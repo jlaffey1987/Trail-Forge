@@ -28,6 +28,10 @@ localPort = 8081
 externalPort = 80
 
 [[ports]]
+localPort = 8082
+externalPort = 3000
+
+[[ports]]
 localPort = 21414
 externalPort = 3001
 
@@ -35,3 +39,4 @@ externalPort = 3001
 
 [userenv.shared]
 SUPABASE_URL = "https://qgzbppzlwydammxxjyct.supabase.co"
+VITE_SUPABASE_URL = "https://qgzbppzlwydammxxjyct.supabase.co"
