@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "TrailForge"
+version = "1.0.0"
+id = "artifacts/trailforge"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21414
+
+[services.development]
+run = "pnpm --filter @workspace/trailforge run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/trailforge", "run", "build" ]
+publicDir = "artifacts/trailforge/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21414"
+BASE_PATH = "/"
