@@ -1,6 +1,5 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -150,4 +149,9 @@
   opacity: 1;
   transform: translateY(0);
   transition: opacity 200ms, transform 200ms;
+}
+
+@keyframes gps-pulse {
+  0%, 100% { box-shadow: 0 0 8px 2px rgba(239, 68, 68, 0.7); transform: scale(1); }
+  50% { box-shadow: 0 0 18px 6px rgba(239, 68, 68, 0.4); transform: scale(1.15); }
 }
