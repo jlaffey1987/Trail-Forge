@@ -1,6 +1,21 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import GpsRecorder from "@/components/GpsRecorder";
 import LayersPanel, { type MapLayer, type BaseMap } from "@/components/LayersPanel";
+import TrailDetailSheet from "@/components/TrailDetailSheet";
+import MapTrailFilters, { type MapTrailFilterState } from "@/components/MapTrailFilters";
+import {
+  fetchTrailsInBbox,
+  type Trail,
+  type MapBbox,
+} from "@/lib/supabase";
+import {
+  renderTrailLayer,
+  type TrailLayerHandle,
+  DIFFICULTY_BUCKETS,
+  getTrailBbox,
+  bboxesIntersect,
+} from "@/lib/trailLayer";
+import { useRouteTrails } from "@/lib/plannerRouteStore";
 
 interface Waypoint {
   id: number;
@@ -39,6 +54,9 @@ export default function MapTab() {
   const drawPolylineRef = useRef<import("leaflet").Polyline | null>(null);
   const tileLayerRef = useRef<import("leaflet").TileLayer | null>(null);
   const layerPolylinesRef = useRef<Map<string, import("leaflet").Polyline[]>>(new Map());
+  const trailLayerHandleRef = useRef<TrailLayerHandle | null>(null);
+  const fetchSeqRef = useRef(0);
+  const fetchDebounceRef = useRef<number | null>(null);
 
   const [mapMode, setMapMode] = useState<MapMode>("explore");
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
@@ -50,6 +68,20 @@ export default function MapTab() {
   const [layers, setLayers] = useState<MapLayer[]>([]);
   const [baseMap, setBaseMap] = useState<BaseMap>("satellite");
   const [osApiKey, setOsApiKey] = useState("");
+
+  // Public-trails layer state
+  const [allTrails, setAllTrails] = useState<Trail[]>([]);
+  const [trailsLoading, setTrailsLoading] = useState(false);
+  const [usedServerBbox, setUsedServerBbox] = useState<boolean | null>(null);
+  const [filters, setFilters] = useState<MapTrailFilterState>({ difficulties: [], trailTypes: [] });
+  const [showFilters, setShowFilters] = useState(false);
+  const [showLegend, setShowLegend] = useState(true);
+  const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
+  const [currentZoom, setCurrentZoom] = useState(7);
+  const [, setCurrentBbox] = useState<MapBbox | null>(null);
+
+  const [routeTrails] = useRouteTrails();
+  const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
 
   const mapModeRef = useRef(mapMode);
   const waypointsRef = useRef(waypoints);
@@ -73,11 +105,55 @@ export default function MapTab() {
     }
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // Bbox-debounced trail fetch
+  // ---------------------------------------------------------------------------
+  const fetchTrailsForCurrentView = useCallback(async () => {
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+    const b = map.getBounds();
+    const bbox: MapBbox = {
+      minLat: b.getSouth(),
+      maxLat: b.getNorth(),
+      minLng: b.getWest(),
+      maxLng: b.getEast(),
+    };
+    setCurrentBbox(bbox);
+    const seq = ++fetchSeqRef.current;
+    setTrailsLoading(true);
+    const { trails, usedBbox } = await fetchTrailsInBbox(bbox, {
+      difficulties: filters.difficulties.length > 0 ? filters.difficulties : undefined,
+      trailTypes: filters.trailTypes.length > 0 ? filters.trailTypes : undefined,
+      limit: 200,
+    });
+    if (seq !== fetchSeqRef.current) return; // stale
+    setUsedServerBbox(usedBbox);
+    setAllTrails(trails);
+    setTrailsLoading(false);
+  }, [filters.difficulties, filters.trailTypes]);
+
+  const scheduleFetch = useCallback(() => {
+    if (fetchDebounceRef.current != null) {
+      window.clearTimeout(fetchDebounceRef.current);
+    }
+    fetchDebounceRef.current = window.setTimeout(() => {
+      fetchDebounceRef.current = null;
+      void fetchTrailsForCurrentView();
+    }, 350);
+  }, [fetchTrailsForCurrentView]);
+
   // Init map
   useEffect(() => {
     if (!leafletLoaded || !mapContainerRef.current || mapRef.current) return;
     const L = window.L;
     const map = L.map(mapContainerRef.current, { center: [53.2, -1.8], zoom: 7, zoomControl: true });
+
+    // Dedicated pane for the public-trails layer with a lower z-index than the
+    // default overlayPane (400). Draw waypoints / recorded GPS lines render in
+    // the default pane so they always appear on top of trail polylines.
+    map.createPane("trailsPane");
+    const trailsPane = map.getPane("trailsPane");
+    if (trailsPane) trailsPane.style.zIndex = "380";
 
     const tileLayer = L.tileLayer(TILE_URLS.satellite, { attribution: TILE_ATTRS.satellite, maxZoom: 19 });
     tileLayer.addTo(map);
@@ -109,8 +185,23 @@ export default function MapTab() {
       }
     });
 
+    // Re-fetch trails on viewport change (debounced)
+    map.on("moveend zoomend", () => {
+      setCurrentZoom(map.getZoom());
+      scheduleFetch();
+    });
+
+    setCurrentZoom(map.getZoom());
     mapRef.current = map;
-  }, [leafletLoaded]);
+    // Initial fetch
+    void fetchTrailsForCurrentView();
+  }, [leafletLoaded, scheduleFetch, fetchTrailsForCurrentView]);
+
+  // Re-fetch when filters change (so server-side filters are applied)
+  useEffect(() => {
+    if (!mapRef.current) return;
+    void fetchTrailsForCurrentView();
+  }, [fetchTrailsForCurrentView]);
 
   // Switch base map tile layer
   useEffect(() => {
@@ -137,6 +228,76 @@ export default function MapTab() {
     tileLayerRef.current = newTile;
   }, [baseMap, osApiKey]);
 
+  // ---------------------------------------------------------------------------
+  // Trail layer rendering — visible in every mode so users can see public
+  // trails while drawing or recording. In Draw / Record the polylines are
+  // non-interactive so map clicks pass through to the waypoint / GPS handlers.
+  // ---------------------------------------------------------------------------
+  const visibleTrails = useMemo(() => {
+    let trails = allTrails;
+    // Apply client-side filters (cheap second pass — also covers fallback fetch).
+    if (filters.difficulties.length > 0) {
+      trails = trails.filter((t) => t.difficulty != null && filters.difficulties.includes(t.difficulty));
+    }
+    if (filters.trailTypes.length > 0) {
+      trails = trails.filter((t) => t.legal_status != null && filters.trailTypes.includes(t.legal_status));
+    }
+    return trails;
+  }, [allTrails, filters.difficulties, filters.trailTypes]);
+
+  // Trails actually visible in viewport (always client-side bbox filter as safety net)
+  const trailsForRender = useMemo(() => {
+    if (!mapRef.current) return visibleTrails;
+    try {
+      const b = mapRef.current.getBounds();
+      const viewport = {
+        minLat: b.getSouth(),
+        maxLat: b.getNorth(),
+        minLng: b.getWest(),
+        maxLng: b.getEast(),
+      };
+      return visibleTrails.filter((t) => {
+        const tb = getTrailBbox(t);
+        if (!tb) return false;
+        return bboxesIntersect(tb, viewport);
+      });
+    } catch {
+      return visibleTrails;
+    }
+    // currentZoom included so recompute when viewport changes.
+  }, [visibleTrails, currentZoom]);
+
+  // (Re)render trail layer whenever inputs change. The layer renders in every
+  // mode; only Explore makes the polylines clickable.
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    trailLayerHandleRef.current?.clear();
+    trailLayerHandleRef.current = null;
+
+    if (trailsForRender.length === 0) return;
+
+    const isExplore = mapMode === "explore";
+    const handle = renderTrailLayer(mapRef.current, trailsForRender, {
+      selectedIds: routeIdSet,
+      selectedColor: "#f0a832",
+      showLabels: false,
+      shadow: false,
+      simplifyForZoom: currentZoom,
+      pane: "trailsPane",
+      interactive: isExplore,
+      onTrailClick: isExplore ? (trail) => setSelectedTrail(trail) : undefined,
+    });
+    trailLayerHandleRef.current = handle;
+  }, [trailsForRender, mapMode, routeIdSet, currentZoom]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (fetchDebounceRef.current != null) window.clearTimeout(fetchDebounceRef.current);
+      trailLayerHandleRef.current?.clear();
+    };
+  }, []);
+
   // Render / update overlay layers on map
   const renderLayers = useCallback((updatedLayers: MapLayer[]) => {
     if (!mapRef.current || !window.L) return;
@@ -157,18 +318,15 @@ export default function MapTab() {
       const existing = polylinesMap.get(layer.id);
 
       if (!layer.visible) {
-        // Hide
         existing?.forEach((pl) => pl.remove());
         continue;
       }
 
       if (existing) {
-        // Ensure visible
         existing.forEach((pl) => pl.addTo(map));
         continue;
       }
 
-      // Draw new layer
       const pls: import("leaflet").Polyline[] = [];
       for (const seg of layer.polylines) {
         if (seg.length < 2) continue;
@@ -181,7 +339,6 @@ export default function MapTab() {
       }
       polylinesMap.set(layer.id, pls);
 
-      // Fit map to first new layer
       if (pls.length > 0) {
         try {
           const group = L.featureGroup(pls);
@@ -198,7 +355,6 @@ export default function MapTab() {
     renderLayers(updatedLayers);
   }, [renderLayers]);
 
-  // Re-render when layers change visibility
   useEffect(() => {
     renderLayers(layers);
   }, [layers, renderLayers]);
@@ -233,6 +389,7 @@ export default function MapTab() {
   };
 
   const activeLayerCount = layers.filter((l) => l.visible).length;
+  const filterCount = filters.difficulties.length + filters.trailTypes.length;
 
   return (
     <div className="flex flex-col h-full relative">
@@ -242,12 +399,12 @@ export default function MapTab() {
 
         {/* Left: mode toggle */}
         <div className="pointer-events-auto flex items-center gap-1 bg-black/65 backdrop-blur rounded-xl px-1.5 py-1.5 border border-stone-700/50">
-          {/* Explore */}
           <button
             onClick={() => setMapMode("explore")}
             className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
               mapMode === "explore" ? "bg-stone-700 text-stone-100 shadow" : "text-stone-500 hover:text-stone-300"
             }`}
+            data-testid="map-mode-explore"
           >
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>
@@ -255,12 +412,12 @@ export default function MapTab() {
             Explore
           </button>
           <div className="w-px h-4 bg-stone-700"></div>
-          {/* Draw */}
           <button
             onClick={() => setMapMode("draw")}
             className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
               mapMode === "draw" ? "bg-amber-500 text-stone-900 shadow-lg shadow-amber-500/30" : "text-stone-500 hover:text-stone-300"
             }`}
+            data-testid="map-mode-draw"
           >
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
@@ -268,19 +425,19 @@ export default function MapTab() {
             Draw
           </button>
           <div className="w-px h-4 bg-stone-700"></div>
-          {/* Record */}
           <button
             onClick={() => setMapMode("record")}
             className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
               mapMode === "record" ? "bg-red-600 text-white shadow-lg shadow-red-600/30" : "text-stone-500 hover:text-stone-300"
             }`}
+            data-testid="map-mode-record"
           >
             <span className={`w-2 h-2 rounded-full ${mapMode === "record" ? "bg-white animate-pulse" : "bg-stone-500"}`}></span>
             Record
           </button>
         </div>
 
-        {/* Right: draw tools + layers button */}
+        {/* Right: draw tools + filters + layers + legend */}
         <div className="pointer-events-auto flex items-center gap-1.5">
           {mapMode === "draw" && waypoints.length > 0 && (
             <>
@@ -302,6 +459,30 @@ export default function MapTab() {
               </button>
             </>
           )}
+
+          {/* Filters button (only meaningful in Explore) */}
+          {mapMode === "explore" && (
+            <button
+              onClick={() => setShowFilters(true)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold uppercase tracking-wider border backdrop-blur transition-all ${
+                filterCount > 0
+                  ? "bg-amber-500/20 border-amber-500/60 text-amber-300"
+                  : "bg-black/65 border-stone-600/60 text-stone-300"
+              }`}
+              data-testid="map-filters-button"
+            >
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+              </svg>
+              Filters
+              {filterCount > 0 && (
+                <span className="bg-amber-500 text-stone-900 text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">
+                  {filterCount}
+                </span>
+              )}
+            </button>
+          )}
+
           {/* Layers button */}
           <button
             onClick={() => setShowLayers(true)}
@@ -310,6 +491,7 @@ export default function MapTab() {
                 ? "bg-amber-500/20 border-amber-500/60 text-amber-300"
                 : "bg-black/65 border-stone-600/60 text-stone-300"
             }`}
+            data-testid="map-layers-button"
           >
             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
               <polygon points="12 2 2 7 12 12 22 7 12 2"/>
@@ -339,15 +521,75 @@ export default function MapTab() {
         </div>
       )}
 
-      {/* Active layer legend */}
+      {/* Trail status pill (Explore mode) */}
+      {mapMode === "explore" && (
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-[1000] pointer-events-none">
+          <div className="bg-black/70 backdrop-blur border border-stone-700/60 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full text-stone-200 flex items-center gap-1.5 shadow-lg">
+            {trailsLoading ? (
+              <>
+                <span className="w-2.5 h-2.5 border border-amber-500/50 border-t-amber-500 rounded-full animate-spin"></span>
+                Loading trails…
+              </>
+            ) : (
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                <span data-testid="map-trail-count">{trailsForRender.length}</span> trail{trailsForRender.length !== 1 ? "s" : ""} in view
+                {usedServerBbox === false && allTrails.length >= 200 && (
+                  <span className="text-amber-400 ml-1" title="Apply the bbox migration for faster loads">⚠</span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Active import-layer legend (TET/ACT/imports) */}
       {activeLayerCount > 0 && (
-        <div className="absolute top-12 left-3 z-[999] flex flex-col gap-1">
+        <div className="absolute top-24 left-3 z-[999] flex flex-col gap-1">
           {layers.filter((l) => l.visible).map((l) => (
             <div key={l.id} className="flex items-center gap-1.5 bg-black/70 backdrop-blur rounded-lg px-2 py-1 text-[10px] font-medium text-stone-200">
               <div className="w-3 h-0.5 rounded-full" style={{ background: l.color }}></div>
               {l.name.length > 20 ? l.name.slice(0, 20) + "…" : l.name}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Difficulty legend (Explore mode) */}
+      {mapMode === "explore" && (
+        <div className="absolute bottom-3 left-3 z-[999] pointer-events-auto">
+          {showLegend ? (
+            <div className="bg-black/75 backdrop-blur border border-stone-700/60 rounded-xl p-2 shadow-lg">
+              <div className="flex items-center justify-between gap-2 mb-1.5 px-1">
+                <span className="text-[9px] font-bold uppercase tracking-widest text-stone-400">Difficulty</span>
+                <button
+                  onClick={() => setShowLegend(false)}
+                  className="text-stone-500 hover:text-stone-300 text-xs leading-none"
+                  aria-label="Hide legend"
+                >×</button>
+              </div>
+              <div className="flex flex-col gap-0.5" data-testid="difficulty-legend">
+                {DIFFICULTY_BUCKETS.map((b) => (
+                  <div key={b.label} className="flex items-center gap-2 px-1">
+                    <div className="w-4 h-1 rounded-full" style={{ background: b.color }}></div>
+                    <span className="text-[10px] text-stone-200 font-medium">{b.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowLegend(true)}
+              className="bg-black/70 backdrop-blur border border-stone-700/60 text-[10px] font-bold uppercase tracking-wider px-2.5 py-1.5 rounded-full text-stone-200 flex items-center gap-1.5"
+              data-testid="show-legend-button"
+            >
+              <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+                <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+              </svg>
+              Legend
+            </button>
+          )}
         </div>
       )}
 
@@ -418,6 +660,23 @@ export default function MapTab() {
           onBaseMapChange={setBaseMap}
           osApiKey={osApiKey}
           onOsApiKeyChange={setOsApiKey}
+        />
+      )}
+
+      {/* Trail filters */}
+      <MapTrailFilters
+        open={showFilters}
+        filters={filters}
+        onChange={setFilters}
+        onClose={() => setShowFilters(false)}
+        visibleCount={trailsForRender.length}
+      />
+
+      {/* Trail detail sheet */}
+      {selectedTrail && (
+        <TrailDetailSheet
+          trail={selectedTrail}
+          onClose={() => setSelectedTrail(null)}
         />
       )}
     </div>

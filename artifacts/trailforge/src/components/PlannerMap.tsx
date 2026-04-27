@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Trail } from "@/lib/supabase";
-import { parseGPX, type Waypoint } from "@/lib/gpx";
 import { type GeoPoint } from "@/lib/routing";
+import { renderTrailLayer, type TrailLayerHandle } from "@/lib/trailLayer";
 
 // Escape user-controlled text before injecting into Leaflet divIcon HTML
 function esc(s: string | null | undefined): string {
@@ -20,11 +20,6 @@ declare global {
   }
 }
 
-const DIFFICULTY_COLORS: Record<number, string> = {
-  1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
-  6: "#fb923c", 7: "#f97316", 8: "#ef4444", 9: "#dc2626", 10: "#7f1d1d",
-};
-
 interface Props {
   start: GeoPoint | null;
   end: GeoPoint | null;
@@ -36,7 +31,8 @@ interface Props {
 export default function PlannerMap({ start, end, trails, selectedIds, onToggle }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
-  const layersRef = useRef<import("leaflet").Layer[]>([]);
+  const markerLayersRef = useRef<import("leaflet").Layer[]>([]);
+  const trailLayerRef = useRef<TrailLayerHandle | null>(null);
   const [leafletLoaded, setLeafletLoaded] = useState(false);
   const [expanded, setExpanded] = useState(true);
 
@@ -61,7 +57,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     return () => clearInterval(check);
   }, []);
 
-  // Init map (container is always mounted; collapse just hides via CSS so the map stays valid)
+  // Init map
   useEffect(() => {
     if (!leafletLoaded || !containerRef.current || mapRef.current) return;
     const L = window.L;
@@ -80,7 +76,9 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
         try { mapRef.current.remove(); } catch { /* ignore */ }
         mapRef.current = null;
       }
-      layersRef.current = [];
+      markerLayersRef.current = [];
+      trailLayerRef.current?.clear();
+      trailLayerRef.current = null;
     };
   }, []);
 
@@ -91,18 +89,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     }
   }, [expanded]);
 
-  // Cache parsed GPX per trail id to avoid re-parsing on every selection toggle
-  const parsedGpxCache = useRef<Map<string, Waypoint[]>>(new Map());
-  const trailGpxData = useMemo(() => {
-    return trails.map((t) => {
-      let wps = parsedGpxCache.current.get(t.id);
-      if (!wps) {
-        wps = parseGPX(t.gpx_data);
-        parsedGpxCache.current.set(t.id, wps);
-      }
-      return { trail: t, wps };
-    });
-  }, [trails]);
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
   // Render markers + trails
   useEffect(() => {
@@ -110,9 +97,11 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     const L = window.L;
     const map = mapRef.current;
 
-    // Clear previous
-    layersRef.current.forEach((l) => l.remove());
-    layersRef.current = [];
+    // Clear previous start/end markers + connection
+    markerLayersRef.current.forEach((l) => l.remove());
+    markerLayersRef.current = [];
+    trailLayerRef.current?.clear();
+    trailLayerRef.current = null;
 
     const allBounds: [number, number][] = [];
 
@@ -124,7 +113,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
           iconSize: [28, 28], iconAnchor: [14, 14], className: "",
         }),
       }).addTo(map).bindPopup(`<b>Start</b><br>${esc(start.label)}`);
-      layersRef.current.push(m);
+      markerLayersRef.current.push(m);
       allBounds.push([start.lat, start.lng]);
     }
 
@@ -136,7 +125,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
           iconSize: [28, 28], iconAnchor: [14, 14], className: "",
         }),
       }).addTo(map).bindPopup(`<b>Destination</b><br>${esc(end.label)}`);
-      layersRef.current.push(m);
+      markerLayersRef.current.push(m);
       allBounds.push([end.lat, end.lng]);
     }
 
@@ -146,74 +135,19 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
         [[start.lat, start.lng], [end.lat, end.lng]],
         { color: "#94a3b8", weight: 1.5, opacity: 0.4, dashArray: "4 6" }
       ).addTo(map);
-      layersRef.current.push(conn);
+      markerLayersRef.current.push(conn);
     }
 
-    // Trails (use cached parsed GPX)
-    trailGpxData.forEach(({ trail, wps }, idx) => {
-      if (wps.length < 2) return;
-      const isSelected = selectedIds.has(trail.id);
-      const routeIdx = isSelected ? Array.from(selectedIds).indexOf(trail.id) + 1 : null;
-      const diffColor = DIFFICULTY_COLORS[trail.difficulty ?? 5] ?? "#fbbf24";
-      const latlngs: [number, number][] = wps.map((w) => [w.lat, w.lon]);
-
-      // Underlay shadow
-      const shadow = L.polyline(latlngs, {
-        color: "#000",
-        weight: isSelected ? 8 : 6,
-        opacity: 0.5,
-      }).addTo(map);
-      layersRef.current.push(shadow);
-
-      // Main polyline
-      const main = L.polyline(latlngs, {
-        color: isSelected ? "#f0a832" : diffColor,
-        weight: isSelected ? 5 : 3.5,
-        opacity: isSelected ? 1 : 0.85,
-        dashArray: isSelected ? undefined : "8 4",
-      }).addTo(map);
-      main.on("click", () => onToggle(trail));
-      layersRef.current.push(main);
-
-      // Marker at trail midpoint
-      const mid = latlngs[Math.floor(latlngs.length / 2)];
-      const marker = L.marker(mid, {
-        icon: L.divIcon({
-          html: `<div style="
-              background:${isSelected ? "#f0a832" : "rgba(20,15,10,0.85)"};
-              border:2px solid ${isSelected ? "#fff" : diffColor};
-              border-radius:6px;
-              padding:3px 6px;
-              display:flex;align-items:center;gap:4px;
-              box-shadow:0 2px 6px rgba(0,0,0,0.7);
-              white-space:nowrap;
-              cursor:pointer;
-              font-family:system-ui,sans-serif;
-              transform:translate(-50%,-50%);
-            ">
-              <span style="
-                background:${isSelected ? "#0a0a0a" : diffColor};
-                color:${isSelected ? "#f0a832" : "#000"};
-                width:16px;height:16px;border-radius:3px;
-                font-size:9px;font-weight:900;
-                display:flex;align-items:center;justify-content:center;
-              ">${routeIdx ?? trail.difficulty ?? "?"}</span>
-              <span style="
-                color:${isSelected ? "#0a0a0a" : "#fff"};
-                font-size:10px;font-weight:700;
-                max-width:120px;overflow:hidden;text-overflow:ellipsis;
-              ">${esc(trail.name)}</span>
-              ${isSelected ? '<span style="color:#0a0a0a;font-weight:900;font-size:11px;">✓</span>' : '<span style="color:#fbbf24;font-weight:900;font-size:11px;">+</span>'}
-            </div>`,
-          iconSize: [0, 0], iconAnchor: [0, 0], className: "",
-        }),
-      }).addTo(map);
-      marker.on("click", () => onToggle(trail));
-      layersRef.current.push(marker);
-
-      latlngs.forEach((c) => allBounds.push(c));
-      void idx;
+    // Trails — uses the shared renderer (parse cache is shared with MapTab)
+    const handle = renderTrailLayer(map, trails, {
+      selectedIds: selectedIdSet,
+      selectedColor: "#f0a832",
+      showLabels: true,
+      shadow: true,
+      onTrailClick: onToggle,
     });
+    trailLayerRef.current = handle;
+    for (const c of handle.bounds) allBounds.push(c);
 
     if (allBounds.length > 1) {
       try {
@@ -222,7 +156,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     } else if (allBounds.length === 1) {
       map.setView(allBounds[0], 12);
     }
-  }, [start, end, trails, selectedIds, onToggle, leafletLoaded]);
+  }, [start, end, trails, selectedIdSet, onToggle, leafletLoaded]);
 
   if (!start && !end && trails.length === 0) return null;
 

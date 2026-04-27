@@ -9,6 +9,7 @@ import {
   type GeoPoint,
   type AssembledRoute,
 } from "@/lib/routing";
+import { useRouteTrails } from "@/lib/plannerRouteStore";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -37,8 +38,9 @@ export default function PlannerTab() {
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
   const [saveStatus, setSaveStatus] = useState<Record<string, "saving" | "saved" | "error">>({});
 
-  // Route linking state
-  const [routeTrails, setRouteTrails] = useState<Trail[]>([]);
+  // Route linking state — backed by a shared store so trails added from the
+  // Map tab also appear here.
+  const [routeTrails, setRouteTrails] = useRouteTrails();
   const [showRouteBuilder, setShowRouteBuilder] = useState(false);
 
   // Full trip navigation state
