@@ -7,14 +7,28 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn("Supabase environment variables not set — running in offline mode");
 }
 
+/**
+ * Anon-key client. Used for PUBLIC READS only:
+ *   - browsing / searching public trails
+ *   - reading a single public trail
+ *
+ * All ownership-sensitive reads / writes (saved_trails, users, trail
+ * inserts) go through the API server (`@workspace/api-client-react`),
+ * which authenticates via Clerk and uses the Supabase service-role
+ * key. The Supabase RLS policies in
+ * `supabase/migrations/0003_rls_policies.sql` enforce that the anon
+ * key can ONLY read public trails.
+ */
 export const supabase = createClient(
   supabaseUrl || "https://placeholder.supabase.co",
-  supabaseAnonKey || "placeholder"
+  supabaseAnonKey || "placeholder",
 );
 
 export interface Trail {
   id: string;
   user_id: string | null;
+  /** Clerk user id of the trail's owner. Added in migration 0002. */
+  owner_user_id?: string | null;
   name: string;
   type: string | null;
   difficulty: number | null;
@@ -53,7 +67,7 @@ export interface BboxFetchOptions {
  */
 export async function fetchTrailsInBbox(
   bbox: MapBbox,
-  opts: BboxFetchOptions = {}
+  opts: BboxFetchOptions = {},
 ): Promise<{ trails: Trail[]; usedBbox: boolean }> {
   const limit = opts.limit ?? 200;
 
@@ -76,7 +90,6 @@ export async function fetchTrailsInBbox(
   const { data, error } = await q.limit(limit);
 
   if (error) {
-    // Column missing or other schema mismatch — fall back to fetching all public trails.
     if (
       error.code === "42703" ||
       /bbox|column/i.test(error.message ?? "")
@@ -140,48 +153,101 @@ export async function searchTrails(opts: {
   return data || [];
 }
 
-export async function saveTrail(trailId: string, sessionId: string): Promise<boolean> {
-  const { error } = await supabase.from("saved_trails").upsert({
-    trail_id: trailId,
-    session_id: sessionId,
-    status: "planned",
-  });
-  if (error) {
-    console.error("Save trail error:", error.message);
+export interface SaveOwner {
+  userId: string | null;
+  sessionId: string | null;
+}
+
+/**
+ * Save (bookmark) a trail. Goes through the API server so the caller's
+ * Clerk session is verified server-side; guests pass `sessionId`.
+ */
+export async function saveTrail(trailId: string, owner: SaveOwner): Promise<boolean> {
+  try {
+    const body: Record<string, unknown> = { trailId };
+    if (!owner.userId && owner.sessionId) body.sessionId = owner.sessionId;
+
+    const res = await fetch("/api/me/saved-trails", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      console.error("Save trail error:", res.status, await res.text());
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("Save trail error:", err);
     return false;
   }
-  return true;
 }
 
-export async function fetchSavedTrails(sessionId: string): Promise<Trail[]> {
-  const { data, error } = await supabase
-    .from("saved_trails")
-    .select("trail_id, status, saved_at, trails(*)")
-    .eq("session_id", sessionId)
-    .order("saved_at", { ascending: false });
+interface SavedTrailItem {
+  trail_id: string;
+  status: string | null;
+  saved_at: string | null;
+  trail: Trail | null;
+}
 
-  if (error) {
-    console.error("Fetch saved trails error:", error.message);
+export async function fetchSavedTrails(owner: SaveOwner): Promise<Trail[]> {
+  try {
+    const url = new URL("/api/me/saved-trails", window.location.origin);
+    if (!owner.userId && owner.sessionId) {
+      url.searchParams.set("sessionId", owner.sessionId);
+    }
+    const res = await fetch(url.toString(), { credentials: "include" });
+    if (!res.ok) {
+      console.error("Fetch saved trails error:", res.status);
+      return [];
+    }
+    const json = (await res.json()) as { items: SavedTrailItem[] };
+    return (json.items ?? [])
+      .map((it) => it.trail)
+      .filter((t): t is Trail => t != null);
+  } catch (err) {
+    console.error("Fetch saved trails error:", err);
     return [];
   }
-  // The Supabase relation join may return `trails` as either a single object
-  // or a single-element array depending on FK inference — normalise both.
-  return (data || [])
-    .map((row: { trails: Trail | Trail[] | null }) => {
-      const t = row.trails;
-      if (Array.isArray(t)) return t[0] ?? null;
-      return t ?? null;
-    })
-    .filter((t): t is Trail => t != null);
 }
 
-export async function addTrail(trail: Omit<Trail, "id" | "created_at">): Promise<Trail | null> {
-  const { data, error } = await supabase.from("trails").insert(trail).select().single();
-  if (error) {
-    console.error("Add trail error:", error.message);
+export async function addTrail(
+  trail: Omit<Trail, "id" | "created_at">,
+): Promise<Trail | null> {
+  try {
+    const res = await fetch("/api/trails", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: trail.name,
+        type: trail.type,
+        difficulty: trail.difficulty,
+        distance_km: trail.distance_km,
+        terrain: trail.terrain,
+        legal_status: trail.legal_status,
+        gpx_data: trail.gpx_data,
+        is_public: trail.is_public,
+        bbox_min_lat: trail.bbox_min_lat,
+        bbox_max_lat: trail.bbox_max_lat,
+        bbox_min_lng: trail.bbox_min_lng,
+        bbox_max_lng: trail.bbox_max_lng,
+      }),
+    });
+    if (!res.ok) {
+      if (res.status === 401) {
+        console.warn("Sign in required to record a trail.");
+        return null;
+      }
+      console.error("Add trail error:", res.status, await res.text());
+      return null;
+    }
+    return (await res.json()) as Trail;
+  } catch (err) {
+    console.error("Add trail error:", err);
     return null;
   }
-  return data;
 }
 
 export async function likeTrail(trailId: string): Promise<void> {
@@ -196,4 +262,13 @@ export function getSessionId(): string {
     localStorage.setItem(SESSION_KEY, id);
   }
   return id;
+}
+
+/**
+ * Clear the device-bound session UUID. Called after a signed-in user has
+ * merged their session-bound saved_trails over to their account so that
+ * future "saved" rows are unambiguously user-owned.
+ */
+export function clearSessionId(): void {
+  localStorage.removeItem(SESSION_KEY);
 }

@@ -10,6 +10,12 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: Storage
+    description: Object storage upload and serving endpoints.
+  - name: Me
+    description: Authenticated user (Clerk) self endpoints.
+  - name: SavedTrails
+    description: Server-mediated saved-trails CRUD (ownership-enforced).
 paths:
   /healthz:
     get:
@@ -24,6 +30,370 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /storage/uploads/request-url:
+    post:
+      tags: [Storage]
+      operationId: requestUploadUrl
+      summary: Request a presigned URL for file upload (authenticated)
+      description: |
+        Authenticated users only. Returns a presigned GCS URL for a direct PUT
+        upload to the private bucket and a stable `objectPath`. After the PUT
+        succeeds the client MUST call `POST /storage/uploads/finalize` with the
+        returned `objectPath` so the server can stamp the per-object ACL
+        policy (owner = caller, visibility = `private`). Until finalize runs,
+        the GET handler will refuse to serve the object.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUrlRequest'
+      responses:
+        '200':
+          description: Presigned upload URL generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          description: Missing or invalid required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to generate upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /storage/uploads/finalize:
+    post:
+      tags: [Storage]
+      operationId: finalizeUpload
+      summary: Finalize an upload by stamping ACL on the now-existing object
+      description: |
+        Authenticated users only. The client calls this after the PUT to the
+        presigned URL succeeds. The server verifies the object exists in the
+        private bucket and writes an ACL policy with owner = caller and
+        visibility = `private`. The same caller is required for finalize as
+        for request-url.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadFinalizeRequest'
+      responses:
+        '200':
+          description: ACL set successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadFinalized'
+        '400':
+          description: Missing or invalid objectPath.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Object not found (PUT did not complete or wrong path).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to set ACL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /me/sync:
+    post:
+      tags: [Me]
+      operationId: syncMe
+      summary: Upsert the calling Clerk user into the Supabase users table
+      description: |
+        Authenticated. Server-side upsert into `public.users` keyed by Clerk
+        user id, using profile data from the Clerk session token (no
+        client-supplied identity is trusted). Returns the persisted row.
+      responses:
+        '200':
+          description: User row upserted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppUser'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to upsert user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /me/saved-trails:
+    get:
+      tags: [SavedTrails]
+      operationId: listMySavedTrails
+      summary: List the caller's saved trails (Clerk session OR guest sessionId)
+      description: |
+        If a Clerk session is present, returns the rows for that user_id.
+        Otherwise returns rows for the supplied `sessionId` query param
+        (guest mode). Returns an empty list if neither is provided.
+      parameters:
+        - name: sessionId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Device session id for guest mode.
+      responses:
+        '200':
+          description: Saved trails (deduped, newest first).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedTrailsList'
+        '500':
+          description: Failed to fetch saved trails.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags: [SavedTrails]
+      operationId: saveTrail
+      summary: Save (bookmark) a trail
+      description: |
+        If a Clerk session is present, the row is owned by the user. Otherwise
+        the body must include a `sessionId` (guest mode); the row is keyed by
+        that device session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveTrailRequest'
+      responses:
+        '200':
+          description: Trail saved (or already saved).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          description: Missing trail id and no session context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to save trail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /me/saved-trails/count:
+    get:
+      tags: [SavedTrails]
+      operationId: countSessionSavedTrails
+      summary: Count guest-session saved trails (for the merge prompt)
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Count.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CountResponse'
+        '400':
+          description: Missing sessionId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /trails:
+    post:
+      tags: [SavedTrails]
+      operationId: createTrail
+      summary: Create a trail (Clerk-required, server stamps owner_user_id)
+      description: |
+        Authenticated. Inserts a new row into `public.trails` with
+        `owner_user_id = auth.userId`, ignoring any owner field the client
+        sends. This keeps trail ownership tamper-proof.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTrailRequest'
+      responses:
+        '200':
+          description: Trail created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedTrail'
+        '400':
+          description: Missing required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to create trail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /me/saved-trails/migrate:
+    post:
+      tags: [SavedTrails]
+      operationId: migrateSessionSavedTrails
+      summary: Migrate guest-session saved trails into the signed-in user
+      description: |
+        Authenticated. Reassigns `saved_trails` rows from the supplied
+        `sessionId` to the calling Clerk user, deduping on (user_id, trail_id).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MigrateRequest'
+      responses:
+        '200':
+          description: Migration complete.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrateResponse'
+        '400':
+          description: Missing sessionId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /storage/public-objects/{filePath}:
+    get:
+      tags: [Storage]
+      operationId: getPublicObject
+      summary: Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
+      description: |
+        Unconditionally public — no authentication or ACL checks.
+        Searches PUBLIC_OBJECT_SEARCH_PATHS for the given file path.
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Relative file path within the public search paths.
+      responses:
+        '200':
+          description: Object content streamed with correct Content-Type.
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: File not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to serve public object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /storage/objects/{objectPath}:
+    get:
+      tags: [Storage]
+      operationId: getStorageObject
+      summary: Serve a private object entity (ACL enforced)
+      description: |
+        Serves objects previously uploaded via the presigned URL flow. The
+        object's ACL policy (set at upload time) is enforced — `public`
+        objects are served to anyone, `private` objects only to the
+        recorded owner or members of an allowed access group. The path
+        segment after `/storage/objects/` corresponds 1:1 with the
+        `objectPath` returned from `requestUploadUrl` (e.g. `uploads/<uuid>`).
+      parameters:
+        - name: objectPath
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Object path within the private object dir (e.g. `uploads/some-uuid`).
+      responses:
+        '200':
+          description: Object content streamed with correct Content-Type.
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Unauthenticated and the object requires auth.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Authenticated user lacks read permission.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Object not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to serve object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 components:
   schemas:
     HealthStatus:
@@ -33,4 +403,179 @@ components:
           type: string
       required:
         - status
-
+    UploadUrlRequest:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Original file name.
+        size:
+          type: integer
+          minimum: 1
+          description: File size in bytes.
+        contentType:
+          type: string
+          minLength: 1
+          description: MIME type of the file (e.g. `image/jpeg`).
+    UploadUrlResponse:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL:
+          type: string
+          format: uri
+          description: Presigned GCS URL for PUT upload.
+        objectPath:
+          type: string
+          description: Normalized object path (e.g. `/objects/uploads/uuid`). Store this in your database.
+        metadata:
+          $ref: '#/components/schemas/UploadUrlRequest'
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+    UploadFinalizeRequest:
+      type: object
+      required: [objectPath]
+      properties:
+        objectPath:
+          type: string
+          minLength: 1
+          description: The `objectPath` returned by `requestUploadUrl`.
+    UploadFinalized:
+      type: object
+      required: [objectPath]
+      properties:
+        objectPath:
+          type: string
+    AppUser:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          nullable: true
+        display_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          nullable: true
+    SaveTrailRequest:
+      type: object
+      required: [trailId]
+      properties:
+        trailId:
+          type: string
+          minLength: 1
+        sessionId:
+          type: string
+          nullable: true
+          description: Required only when no Clerk session is present (guest mode).
+    SavedTrailRef:
+      type: object
+      required: [trail_id]
+      properties:
+        trail_id:
+          type: string
+        status:
+          type: string
+          nullable: true
+        saved_at:
+          type: string
+          nullable: true
+        trail:
+          type: object
+          nullable: true
+          additionalProperties: true
+    SavedTrailsList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedTrailRef'
+    CountResponse:
+      type: object
+      required: [count]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+    MigrateRequest:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+    MigrateResponse:
+      type: object
+      required: [migrated]
+      properties:
+        migrated:
+          type: integer
+          minimum: 0
+    CreateTrailRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        type:
+          type: string
+          nullable: true
+        difficulty:
+          type: integer
+          nullable: true
+        distance_km:
+          type: number
+          nullable: true
+        terrain:
+          type: string
+          nullable: true
+        legal_status:
+          type: string
+          nullable: true
+        gpx_data:
+          nullable: true
+        is_public:
+          type: boolean
+        bbox_min_lat:
+          type: number
+          nullable: true
+        bbox_max_lat:
+          type: number
+          nullable: true
+        bbox_min_lng:
+          type: number
+          nullable: true
+        bbox_max_lng:
+          type: number
+          nullable: true
+    CreatedTrail:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        owner_user_id:
+          type: string
+          nullable: true

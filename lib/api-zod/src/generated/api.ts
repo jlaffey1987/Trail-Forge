@@ -14,3 +14,211 @@ import * as zod from "zod";
 export const HealthCheckResponse = zod.object({
   status: zod.string(),
 });
+
+/**
+ * Authenticated users only. Returns a presigned GCS URL for a direct PUT
+upload to the private bucket and a stable `objectPath`. After the PUT
+succeeds the client MUST call `POST /storage/uploads/finalize` with the
+returned `objectPath` so the server can stamp the per-object ACL
+policy (owner = caller, visibility = `private`). Until finalize runs,
+the GET handler will refuse to serve the object.
+
+ * @summary Request a presigned URL for file upload (authenticated)
+ */
+
+export const RequestUploadUrlBody = zod.object({
+  name: zod.string().min(1).describe("Original file name."),
+  size: zod.number().min(1).describe("File size in bytes."),
+  contentType: zod
+    .string()
+    .min(1)
+    .describe("MIME type of the file (e.g. `image\/jpeg`)."),
+});
+
+export const RequestUploadUrlResponse = zod.object({
+  uploadURL: zod.string().url().describe("Presigned GCS URL for PUT upload."),
+  objectPath: zod
+    .string()
+    .describe(
+      "Normalized object path (e.g. `\/objects\/uploads\/uuid`). Store this in your database.",
+    ),
+  metadata: zod
+    .object({
+      name: zod.string().min(1).describe("Original file name."),
+      size: zod.number().min(1).describe("File size in bytes."),
+      contentType: zod
+        .string()
+        .min(1)
+        .describe("MIME type of the file (e.g. `image\/jpeg`)."),
+    })
+    .optional(),
+});
+
+/**
+ * Authenticated users only. The client calls this after the PUT to the
+presigned URL succeeds. The server verifies the object exists in the
+private bucket and writes an ACL policy with owner = caller and
+visibility = `private`. The same caller is required for finalize as
+for request-url.
+
+ * @summary Finalize an upload by stamping ACL on the now-existing object
+ */
+
+export const FinalizeUploadBody = zod.object({
+  objectPath: zod
+    .string()
+    .min(1)
+    .describe("The `objectPath` returned by `requestUploadUrl`."),
+});
+
+export const FinalizeUploadResponse = zod.object({
+  objectPath: zod.string(),
+});
+
+/**
+ * Authenticated. Server-side upsert into `public.users` keyed by Clerk
+user id, using profile data from the Clerk session token (no
+client-supplied identity is trusted). Returns the persisted row.
+
+ * @summary Upsert the calling Clerk user into the Supabase users table
+ */
+export const SyncMeResponse = zod.object({
+  id: zod.string(),
+  email: zod.string().nullish(),
+  display_name: zod.string().nullish(),
+  avatar_url: zod.string().nullish(),
+  created_at: zod.string().nullish(),
+});
+
+/**
+ * If a Clerk session is present, returns the rows for that user_id.
+Otherwise returns rows for the supplied `sessionId` query param
+(guest mode). Returns an empty list if neither is provided.
+
+ * @summary List the caller's saved trails (Clerk session OR guest sessionId)
+ */
+export const ListMySavedTrailsQueryParams = zod.object({
+  sessionId: zod.coerce
+    .string()
+    .optional()
+    .describe("Device session id for guest mode."),
+});
+
+export const ListMySavedTrailsResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      trail_id: zod.string(),
+      status: zod.string().nullish(),
+      saved_at: zod.string().nullish(),
+      trail: zod.record(zod.string(), zod.unknown()).nullish(),
+    }),
+  ),
+});
+
+/**
+ * If a Clerk session is present, the row is owned by the user. Otherwise
+the body must include a `sessionId` (guest mode); the row is keyed by
+that device session.
+
+ * @summary Save (bookmark) a trail
+ */
+
+export const SaveTrailBody = zod.object({
+  trailId: zod.string().min(1),
+  sessionId: zod
+    .string()
+    .nullish()
+    .describe("Required only when no Clerk session is present (guest mode)."),
+});
+
+export const SaveTrailResponse = zod.object({
+  ok: zod.boolean(),
+});
+
+/**
+ * @summary Count guest-session saved trails (for the merge prompt)
+ */
+export const CountSessionSavedTrailsQueryParams = zod.object({
+  sessionId: zod.coerce.string(),
+});
+
+export const countSessionSavedTrailsResponseCountMin = 0;
+
+export const CountSessionSavedTrailsResponse = zod.object({
+  count: zod.number().min(countSessionSavedTrailsResponseCountMin),
+});
+
+/**
+ * Authenticated. Inserts a new row into `public.trails` with
+`owner_user_id = auth.userId`, ignoring any owner field the client
+sends. This keeps trail ownership tamper-proof.
+
+ * @summary Create a trail (Clerk-required, server stamps owner_user_id)
+ */
+
+export const CreateTrailBody = zod.object({
+  name: zod.string().min(1),
+  type: zod.string().nullish(),
+  difficulty: zod.number().nullish(),
+  distance_km: zod.number().nullish(),
+  terrain: zod.string().nullish(),
+  legal_status: zod.string().nullish(),
+  gpx_data: zod.unknown().nullish(),
+  is_public: zod.boolean().optional(),
+  bbox_min_lat: zod.number().nullish(),
+  bbox_max_lat: zod.number().nullish(),
+  bbox_min_lng: zod.number().nullish(),
+  bbox_max_lng: zod.number().nullish(),
+});
+
+export const CreateTrailResponse = zod.object({
+  id: zod.string(),
+  owner_user_id: zod.string().nullish(),
+});
+
+/**
+ * Authenticated. Reassigns `saved_trails` rows from the supplied
+`sessionId` to the calling Clerk user, deduping on (user_id, trail_id).
+
+ * @summary Migrate guest-session saved trails into the signed-in user
+ */
+
+export const MigrateSessionSavedTrailsBody = zod.object({
+  sessionId: zod.string().min(1),
+});
+
+export const migrateSessionSavedTrailsResponseMigratedMin = 0;
+
+export const MigrateSessionSavedTrailsResponse = zod.object({
+  migrated: zod.number().min(migrateSessionSavedTrailsResponseMigratedMin),
+});
+
+/**
+ * Unconditionally public — no authentication or ACL checks.
+Searches PUBLIC_OBJECT_SEARCH_PATHS for the given file path.
+
+ * @summary Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
+ */
+export const GetPublicObjectParams = zod.object({
+  filePath: zod.coerce
+    .string()
+    .describe("Relative file path within the public search paths."),
+});
+
+/**
+ * Serves objects previously uploaded via the presigned URL flow. The
+object's ACL policy (set at upload time) is enforced — `public`
+objects are served to anyone, `private` objects only to the
+recorded owner or members of an allowed access group. The path
+segment after `/storage/objects/` corresponds 1:1 with the
+`objectPath` returned from `requestUploadUrl` (e.g. `uploads/<uuid>`).
+
+ * @summary Serve a private object entity (ACL enforced)
+ */
+export const GetStorageObjectParams = zod.object({
+  objectPath: zod.coerce
+    .string()
+    .describe(
+      "Object path within the private object dir (e.g. `uploads\/some-uuid`).",
+    ),
+});

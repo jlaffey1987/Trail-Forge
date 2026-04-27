@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
+import { useLocation } from "wouter";
 import { fetchSavedTrails, getSessionId, type Trail } from "@/lib/supabase";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -15,17 +17,23 @@ function formatDate(dateStr: string) {
 }
 
 export default function MyTrailsTab() {
+  const { isLoaded, isSignedIn, userId } = useCurrentUser();
+  const [, setLocation] = useLocation();
   const [savedTrails, setSavedTrails] = useState<Trail[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
-    const sessionId = getSessionId();
-    fetchSavedTrails(sessionId).then((trails) => {
+    if (!isLoaded) return;
+    setLoading(true);
+    const owner = userId
+      ? { userId, sessionId: null }
+      : { userId: null, sessionId: getSessionId() };
+    fetchSavedTrails(owner).then((trails) => {
       setSavedTrails(trails);
       setLoading(false);
     });
-  }, []);
+  }, [isLoaded, userId]);
 
   const totalKm = savedTrails
     .reduce((sum, t) => sum + (t.distance_km ?? 0), 0)
@@ -77,6 +85,16 @@ export default function MyTrailsTab() {
             <div className="text-4xl mb-3">🏍</div>
             <p className="text-stone-500 text-sm">No saved trails yet.</p>
             <p className="text-stone-600 text-xs mt-1">Search trails in the Planner tab and tap the bookmark icon to save them here.</p>
+            {!isSignedIn && (
+              <button
+                onClick={() => setLocation("/sign-in")}
+                className="mt-4 px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900"
+                style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                data-testid="my-trails-sign-in"
+              >
+                Sign in to sync across devices
+              </button>
+            )}
           </div>
         ) : (
           savedTrails.map((trail) => {

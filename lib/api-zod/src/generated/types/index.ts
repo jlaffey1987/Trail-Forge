@@ -6,4 +6,22 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from "./appUser";
+export * from "./countResponse";
+export * from "./countSessionSavedTrailsParams";
+export * from "./createdTrail";
+export * from "./createTrailRequest";
+export * from "./errorEnvelope";
 export * from "./healthStatus";
+export * from "./listMySavedTrailsParams";
+export * from "./migrateRequest";
+export * from "./migrateResponse";
+export * from "./ok";
+export * from "./savedTrailRef";
+export * from "./savedTrailRefTrail";
+export * from "./savedTrailsList";
+export * from "./saveTrailRequest";
+export * from "./uploadFinalized";
+export * from "./uploadFinalizeRequest";
+export * from "./uploadUrlRequest";
+export * from "./uploadUrlResponse";

@@ -1,9 +1,74 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ClerkProvider,
+  SignIn,
+  SignUp,
+  useClerk,
+  useUser,
+} from "@clerk/react";
+import { dark } from "@clerk/themes";
+import {
+  Switch,
+  Route,
+  useLocation,
+  Router as WouterRouter,
+} from "wouter";
 import PlannerTab from "@/pages/PlannerTab";
 import MapTab from "@/pages/MapTab";
 import MyTrailsTab from "@/pages/MyTrailsTab";
 import DiscoverTab from "@/pages/DiscoverTab";
 import AITab from "@/pages/AITab";
+import UserMenu from "@/components/UserMenu";
+import SavedTrailsMergePrompt from "@/components/SavedTrailsMergePrompt";
+import { syncCurrentUser } from "@/lib/users";
+
+const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+if (!clerkPubKey) {
+  throw new Error("Missing VITE_CLERK_PUBLISHABLE_KEY");
+}
+
+// Clerk passes full paths to routerPush/routerReplace, but wouter's
+// setLocation prepends the base — strip it to avoid doubling.
+function stripBase(path: string): string {
+  return basePath && path.startsWith(basePath)
+    ? path.slice(basePath.length) || "/"
+    : path;
+}
+
+const clerkAppearance = {
+  baseTheme: dark,
+  cssLayerName: "clerk",
+  options: {
+    logoPlacement: "inside" as const,
+    logoLinkUrl: basePath || "/",
+    logoImageUrl:
+      typeof window !== "undefined"
+        ? `${window.location.origin}${basePath}/logo.svg`
+        : undefined,
+  },
+  variables: {
+    colorPrimary: "#f0a832",
+    colorForeground: "#f5f5f4",
+    colorMutedForeground: "#a8a29e",
+    colorDanger: "#ef4444",
+    colorBackground: "hsl(22, 15%, 11%)",
+    colorInput: "hsl(22, 15%, 14%)",
+    colorInputForeground: "#f5f5f4",
+    colorNeutral: "hsl(30, 12%, 22%)",
+    fontFamily: "Inter, system-ui, sans-serif",
+    borderRadius: "12px",
+  },
+  elements: {
+    rootBox: "w-full",
+    cardBox:
+      "bg-[hsl(22,15%,11%)] border border-amber-500/20 rounded-2xl w-[400px] max-w-full overflow-hidden shadow-2xl",
+    card: "!shadow-none !border-0 !bg-transparent !rounded-none",
+    footer: "!shadow-none !border-0 !bg-transparent !rounded-none",
+  },
+};
 
 type Tab = "planner" | "map" | "trails" | "discover" | "ai";
 
@@ -78,17 +143,18 @@ function TabContent({ tab }: { tab: Tab }) {
   }
 }
 
-export default function App() {
+function MainShell() {
   const [activeTab, setActiveTab] = useState<Tab>("planner");
 
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
-      {/* Header */}
-      <header className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[hsl(30,12%,14%)]"
+      <header
+        className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[hsl(30,12%,14%)]"
         style={{ background: "linear-gradient(180deg, hsl(22,18%,9%) 0%, hsl(22,15%,8%) 100%)" }}
       >
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
+          <div
+            className="w-8 h-8 rounded-lg flex items-center justify-center"
             style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
           >
             <svg viewBox="0 0 24 24" className="w-4 h-4 text-stone-900" fill="currentColor">
@@ -96,10 +162,16 @@ export default function App() {
             </svg>
           </div>
           <div>
-            <h1 className="text-sm font-black tracking-widest uppercase text-stone-100" style={{ letterSpacing: "0.18em" }}>
+            <h1
+              className="text-sm font-black tracking-widest uppercase text-stone-100"
+              style={{ letterSpacing: "0.18em" }}
+            >
               TrailForge
             </h1>
-            <p className="text-[9px] text-stone-500 uppercase tracking-widest" style={{ letterSpacing: "0.15em" }}>
+            <p
+              className="text-[9px] text-stone-500 uppercase tracking-widest"
+              style={{ letterSpacing: "0.15em" }}
+            >
               Off-Road Navigator
             </p>
           </div>
@@ -109,23 +181,16 @@ export default function App() {
             <div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>
             <span className="text-[10px] text-stone-400">GPS Active</span>
           </div>
-          <button className="w-8 h-8 rounded-full bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,20%)] flex items-center justify-center">
-            <svg viewBox="0 0 24 24" className="w-4 h-4 text-stone-400" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="8" r="4" />
-              <path d="M6 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2" />
-            </svg>
-          </button>
+          <UserMenu />
         </div>
       </header>
 
-      {/* Tab Content */}
       <main className="flex-1 overflow-hidden relative">
         <div className="h-full">
           <TabContent tab={activeTab} />
         </div>
       </main>
 
-      {/* Bottom Navigation */}
       <nav
         className="shrink-0 border-t border-[hsl(30,12%,14%)] safe-bottom"
         style={{ background: "linear-gradient(0deg, hsl(22,18%,7%) 0%, hsl(22,15%,9%) 100%)" }}
@@ -138,6 +203,7 @@ export default function App() {
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
                 className="flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 relative transition-all"
+                data-testid={`nav-${item.id}`}
               >
                 {isActive && (
                   <span
@@ -166,5 +232,96 @@ export default function App() {
         </div>
       </nav>
     </div>
+  );
+}
+
+function SignInPage() {
+  return (
+    <div className="flex min-h-[100dvh] items-center justify-center bg-[hsl(22,15%,8%)] px-4">
+      <SignIn
+        routing="path"
+        path={`${basePath}/sign-in`}
+        signUpUrl={`${basePath}/sign-up`}
+        fallbackRedirectUrl={basePath || "/"}
+      />
+    </div>
+  );
+}
+
+function SignUpPage() {
+  return (
+    <div className="flex min-h-[100dvh] items-center justify-center bg-[hsl(22,15%,8%)] px-4">
+      <SignUp
+        routing="path"
+        path={`${basePath}/sign-up`}
+        signInUrl={`${basePath}/sign-in`}
+        fallbackRedirectUrl={basePath || "/"}
+      />
+    </div>
+  );
+}
+
+/**
+ * Mirror Clerk users into Supabase `users` table on every sign-in.
+ * Lazy & defensive — the helper handles the case where the table is not yet
+ * provisioned.
+ */
+function ClerkUserSync() {
+  const { user, isLoaded, isSignedIn } = useUser();
+  const lastSyncedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !user) return;
+    if (lastSyncedRef.current === user.id) return;
+    lastSyncedRef.current = user.id;
+    syncCurrentUser();
+  }, [isLoaded, isSignedIn, user]);
+
+  return null;
+}
+
+function ClerkProviderWithRoutes() {
+  const [, setLocation] = useLocation();
+
+  return (
+    <ClerkProvider
+      publishableKey={clerkPubKey}
+      proxyUrl={clerkProxyUrl}
+      appearance={clerkAppearance}
+      signInUrl={`${basePath}/sign-in`}
+      signUpUrl={`${basePath}/sign-up`}
+      localization={{
+        signIn: {
+          start: {
+            title: "Welcome back to TrailForge",
+            subtitle: "Sign in to access your trails on any device",
+          },
+        },
+        signUp: {
+          start: {
+            title: "Join TrailForge",
+            subtitle: "Save trails, plan routes, and ride with confidence",
+          },
+        },
+      }}
+      routerPush={(to) => setLocation(stripBase(to))}
+      routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
+    >
+      <ClerkUserSync />
+      <SavedTrailsMergePrompt />
+      <Switch>
+        <Route path="/sign-in/*?" component={SignInPage} />
+        <Route path="/sign-up/*?" component={SignUpPage} />
+        <Route component={MainShell} />
+      </Switch>
+    </ClerkProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <WouterRouter base={basePath}>
+      <ClerkProviderWithRoutes />
+    </WouterRouter>
   );
 }

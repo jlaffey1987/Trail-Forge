@@ -8,3 +8,124 @@
 export interface HealthStatus {
   status: string;
 }
+
+export interface UploadUrlRequest {
+  /**
+   * Original file name.
+   * @minLength 1
+   */
+  name: string;
+  /**
+   * File size in bytes.
+   * @minimum 1
+   */
+  size: number;
+  /**
+   * MIME type of the file (e.g. `image/jpeg`).
+   * @minLength 1
+   */
+  contentType: string;
+}
+
+export interface UploadUrlResponse {
+  /** Presigned GCS URL for PUT upload. */
+  uploadURL: string;
+  /** Normalized object path (e.g. `/objects/uploads/uuid`). Store this in your database. */
+  objectPath: string;
+  metadata?: UploadUrlRequest;
+}
+
+export interface ErrorEnvelope {
+  error: string;
+}
+
+export interface Ok {
+  ok: boolean;
+}
+
+export interface UploadFinalizeRequest {
+  /**
+   * The `objectPath` returned by `requestUploadUrl`.
+   * @minLength 1
+   */
+  objectPath: string;
+}
+
+export interface UploadFinalized {
+  objectPath: string;
+}
+
+export interface AppUser {
+  id: string;
+  email?: string | null;
+  display_name?: string | null;
+  avatar_url?: string | null;
+  created_at?: string | null;
+}
+
+export interface SaveTrailRequest {
+  /** @minLength 1 */
+  trailId: string;
+  /** Required only when no Clerk session is present (guest mode). */
+  sessionId?: string | null;
+}
+
+export type SavedTrailRefTrail = { [key: string]: unknown } | null;
+
+export interface SavedTrailRef {
+  trail_id: string;
+  status?: string | null;
+  saved_at?: string | null;
+  trail?: SavedTrailRefTrail;
+}
+
+export interface SavedTrailsList {
+  items: SavedTrailRef[];
+}
+
+export interface CountResponse {
+  /** @minimum 0 */
+  count: number;
+}
+
+export interface MigrateRequest {
+  /** @minLength 1 */
+  sessionId: string;
+}
+
+export interface MigrateResponse {
+  /** @minimum 0 */
+  migrated: number;
+}
+
+export interface CreateTrailRequest {
+  /** @minLength 1 */
+  name: string;
+  type?: string | null;
+  difficulty?: number | null;
+  distance_km?: number | null;
+  terrain?: string | null;
+  legal_status?: string | null;
+  gpx_data?: unknown | null;
+  is_public?: boolean;
+  bbox_min_lat?: number | null;
+  bbox_max_lat?: number | null;
+  bbox_min_lng?: number | null;
+  bbox_max_lng?: number | null;
+}
+
+export interface CreatedTrail {
+  id: string;
+  owner_user_id?: string | null;
+}
+
+export type ListMySavedTrailsParams = {
+  /**
+   * Device session id for guest mode.
+   */
+  sessionId?: string;
+};
+
+export type CountSessionSavedTrailsParams = {
+  sessionId: string;
+};

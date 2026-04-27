@@ -25,3 +25,15 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+
+## Artifacts
+
+- **trailforge** (`artifacts/trailforge`) — Off-road navigator web app (React + Vite, Supabase, Mapbox/Leaflet).
+  - Auth: Clerk (`@clerk/react`) — see `src/App.tsx` for `<ClerkProvider>` + wouter routing, `src/components/UserMenu.tsx`, `src/hooks/useCurrentUser.ts`.
+  - Data: Supabase tables `trails`, `saved_trails`, `users`. Migrations live in `supabase/migrations/` and are applied manually via the Supabase SQL editor.
+  - User-account migration `0002_users_and_owner.sql` adds the `users` table (Clerk-keyed), `trails.owner_user_id`, and `saved_trails.user_id`. Apply this before users sign in for the first time.
+  - RLS migration `0003_rls_policies.sql` locks down anon access: anon may only `SELECT` public trails. All ownership-sensitive reads/writes go through the API server (service-role key, Clerk-authenticated). Apply after 0002.
+  - Saved trails are session-bound for guests and user-bound after sign-in. `SavedTrailsMergePrompt` offers a one-time merge of session bookmarks into a freshly signed-in account.
+  - Browser writes flow through `/api/me/*`, `/api/trails`, and `/api/storage/uploads/*` — never directly via the supabase anon client. The anon client (`src/lib/supabase.ts`) is used only for public trail reads.
+- **api-server** (`artifacts/api-server`) — Express API. Mounts a Clerk reverse proxy at `/clerk-fapi` (see `src/middlewares/clerkProxyMiddleware.ts`), an object-storage signed-URL + finalize endpoint under `/api/storage/*`, ownership-enforced trail/user/saved-trail endpoints under `/api/me/*` and `/api/trails`. Uses `SUPABASE_SERVICE_ROLE_KEY` (`src/lib/supabaseAdmin.ts`) to bypass RLS while stamping `owner_user_id` / `user_id` from the verified Clerk session.
+- **mockup-sandbox** (`artifacts/mockup-sandbox`) — Design canvas.

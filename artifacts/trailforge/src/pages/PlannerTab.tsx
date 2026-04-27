@@ -1,5 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { searchTrails, saveTrail, getSessionId, type Trail } from "@/lib/supabase";
+import { useLocation } from "wouter";
+import { searchTrails, saveTrail, type Trail } from "@/lib/supabase";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import RouteBuilder from "@/components/RouteBuilder";
 import NavigationView from "@/components/NavigationView";
 import PlannerMap from "@/components/PlannerMap";
@@ -28,6 +30,9 @@ function formatDistance(km: number | null) {
 }
 
 export default function PlannerTab() {
+  const { isSignedIn, userId } = useCurrentUser();
+  const [, setLocation] = useLocation();
+  const [signInPromptForTrail, setSignInPromptForTrail] = useState<string | null>(null);
   const [startLocation, setStartLocation] = useState("");
   const [endLocation, setEndLocation] = useState("");
   const [difficulty, setDifficulty] = useState<number[]>([]);
@@ -129,9 +134,12 @@ export default function PlannerTab() {
   };
 
   const handleSave = async (trail: Trail) => {
+    if (!isSignedIn || !userId) {
+      setSignInPromptForTrail(trail.name);
+      return;
+    }
     setSaveStatus((p) => ({ ...p, [trail.id]: "saving" }));
-    const sessionId = getSessionId();
-    const ok = await saveTrail(trail.id, sessionId);
+    const ok = await saveTrail(trail.id, { userId, sessionId: null });
     if (ok) {
       setSavedIds((prev) => new Set([...prev, trail.id]));
       setSaveStatus((p) => ({ ...p, [trail.id]: "saved" }));
@@ -690,6 +698,51 @@ export default function PlannerTab() {
           route={assembledRoute}
           onClose={() => setShowNav(false)}
         />
+      )}
+
+      {/* Sign-in required prompt for Save action */}
+      {signInPromptForTrail && (
+        <div
+          className="fixed inset-0 z-[2500] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)" }}
+          data-testid="planner-sign-in-prompt"
+        >
+          <div className="w-full max-w-sm bg-[hsl(22,15%,11%)] border border-amber-500/30 rounded-2xl p-5">
+            <div className="flex items-center gap-2.5 mb-3">
+              <div className="w-9 h-9 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center">
+                <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+                </svg>
+              </div>
+              <h2 className="text-base font-bold text-stone-100">Sign in to save</h2>
+            </div>
+            <p className="text-sm text-stone-300 leading-relaxed">
+              Create a free account to save{" "}
+              <span className="font-bold text-amber-400">{signInPromptForTrail}</span>{" "}
+              and access your trails on any device.
+            </p>
+            <div className="mt-5 flex gap-2">
+              <button
+                onClick={() => setSignInPromptForTrail(null)}
+                className="flex-1 py-2.5 rounded-lg text-xs font-semibold text-stone-300 border border-stone-700 hover:bg-stone-800/60 transition-colors"
+                data-testid="planner-sign-in-cancel"
+              >
+                Not now
+              </button>
+              <button
+                onClick={() => {
+                  setSignInPromptForTrail(null);
+                  setLocation("/sign-in");
+                }}
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900"
+                style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                data-testid="planner-sign-in-confirm"
+              >
+                Sign in
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

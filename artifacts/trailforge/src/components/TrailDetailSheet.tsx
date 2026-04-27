@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { type Trail, getSessionId, saveTrail } from "@/lib/supabase";
+import { useLocation } from "wouter";
+import { type Trail, saveTrail } from "@/lib/supabase";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { getDifficultyColor } from "@/lib/trailLayer";
 import { addRouteTrail, removeRouteTrail, isInRoute, subscribeRouteTrails } from "@/lib/plannerRouteStore";
 
@@ -15,8 +17,10 @@ interface Props {
 }
 
 export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: Props) {
+  const { isSignedIn, userId } = useCurrentUser();
+  const [, setLocation] = useLocation();
   const [inPlannerRoute, setInPlannerRoute] = useState(() => isInRoute(trail.id));
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error" | "needsAuth">("idle");
 
   useEffect(() => {
     return subscribeRouteTrails(() => setInPlannerRoute(isInRoute(trail.id)));
@@ -37,8 +41,12 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
 
   const handleSave = async () => {
     if (saveStatus === "saving" || saveStatus === "saved") return;
+    if (!isSignedIn || !userId) {
+      setSaveStatus("needsAuth");
+      return;
+    }
     setSaveStatus("saving");
-    const ok = await saveTrail(trail.id, getSessionId());
+    const ok = await saveTrail(trail.id, { userId, sessionId: null });
     setSaveStatus(ok ? "saved" : "error");
   };
 
@@ -153,7 +161,7 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
             className={`py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border ${
               saveStatus === "saved"
                 ? "border-amber-500/40 bg-amber-500/15 text-amber-400 cursor-default"
-                : saveStatus === "error"
+                : saveStatus === "error" || saveStatus === "needsAuth"
                 ? "border-red-500/50 text-red-400 bg-red-500/10"
                 : "border-stone-700 text-stone-300 bg-stone-900/40 hover:border-amber-500/40 hover:text-amber-400"
             }`}
@@ -171,6 +179,16 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
                 </svg>
                 Saved
               </>
+            ) : saveStatus === "needsAuth" ? (
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLocation("/sign-in");
+                }}
+                className="cursor-pointer"
+              >
+                Sign in to save
+              </span>
             ) : saveStatus === "error" ? (
               <>Try Again</>
             ) : (

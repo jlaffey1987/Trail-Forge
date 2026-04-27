@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { downloadGPX } from "@/lib/gpx";
 import { addTrail } from "@/lib/supabase";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 interface RecordedPoint {
   lat: number;
@@ -75,11 +76,13 @@ function formatDuration(ms: number): string {
 }
 
 export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
+  const { userId, isSignedIn } = useCurrentUser();
   const [state, setState] = useState<RecordState>("idle");
   const [points, setPoints] = useState<RecordedPoint[]>([]);
   const [elapsed, setElapsed] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState<number | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [accuracy, setAccuracy] = useState<number | null>(null);
 
   // Track editor state
@@ -165,6 +168,8 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
       return;
     }
     setGpsError(null);
+    setSaveError(null);
+    setSaveDone(false);
     setPoints([]);
     setElapsed(0);
     setCurrentSpeed(null);
@@ -298,12 +303,18 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
   };
 
   const handleSaveTrail = async () => {
+    setSaveError(null);
+    if (!isSignedIn) {
+      setSaveError("Sign in required to publish a recorded trail.");
+      return;
+    }
     setState("saving");
     const name = trailName || "My Recorded Trail";
     const gpx = buildGPXFromPoints(editedPoints, name);
     const distKm = calcDistanceKm(editedPoints);
-    await addTrail({
+    const saved = await addTrail({
       user_id: null,
+      owner_user_id: userId,
       name,
       type: "enduro",
       difficulty: trailDifficulty,
@@ -313,6 +324,11 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
       gpx_data: gpx,
       is_public: true,
     });
+    if (!saved) {
+      setSaveError("Could not save your trail. Please try again.");
+      setState("idle");
+      return;
+    }
     clearMapLayers();
     setPoints([]);
     setEditedPoints([]);
@@ -346,6 +362,11 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
         {gpsError && (
           <div className="mb-2 bg-red-900/60 border border-red-500/40 rounded-lg px-3 py-2">
             <p className="text-xs text-red-300">{gpsError}</p>
+          </div>
+        )}
+        {saveError && (
+          <div className="mb-2 bg-amber-900/60 border border-amber-500/40 rounded-lg px-3 py-2">
+            <p className="text-xs text-amber-200" data-testid="gps-save-error">{saveError}</p>
           </div>
         )}
         <button

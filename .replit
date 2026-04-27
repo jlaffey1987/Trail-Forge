@@ -48,3 +48,7 @@ externalPort = 3001
 [userenv.shared]
 SUPABASE_URL = "https://qgzbppzlwydammxxjyct.supabase.co"
 VITE_SUPABASE_URL = "https://qgzbppzlwydammxxjyct.supabase.co"
+VITE_CLERK_PUBLISHABLE_KEY = "pk_test_ZGVmaW5pdGUtd2hhbGUtMjIuY2xlcmsuYWNjb3VudHMuZGV2JA"
+
+[nix]
+channel = "stable-25_05"

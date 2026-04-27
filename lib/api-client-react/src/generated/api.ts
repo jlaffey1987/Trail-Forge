@@ -5,18 +5,39 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult,
 } from "@tanstack/react-query";
 
-import type { HealthStatus } from "./api.schemas";
+import type {
+  AppUser,
+  CountResponse,
+  CountSessionSavedTrailsParams,
+  CreateTrailRequest,
+  CreatedTrail,
+  ErrorEnvelope,
+  HealthStatus,
+  ListMySavedTrailsParams,
+  MigrateRequest,
+  MigrateResponse,
+  Ok,
+  SaveTrailRequest,
+  SavedTrailsList,
+  UploadFinalizeRequest,
+  UploadFinalized,
+  UploadUrlRequest,
+  UploadUrlResponse,
+} from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
-import type { ErrorType } from "../custom-fetch";
+import type { ErrorType, BodyType } from "../custom-fetch";
 
 type AwaitedInput<T> = PromiseLike<T> | T;
 
@@ -92,6 +113,931 @@ export function useHealthCheck<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getHealthCheckQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Authenticated users only. Returns a presigned GCS URL for a direct PUT
+upload to the private bucket and a stable `objectPath`. After the PUT
+succeeds the client MUST call `POST /storage/uploads/finalize` with the
+returned `objectPath` so the server can stamp the per-object ACL
+policy (owner = caller, visibility = `private`). Until finalize runs,
+the GET handler will refuse to serve the object.
+
+ * @summary Request a presigned URL for file upload (authenticated)
+ */
+export const getRequestUploadUrlUrl = () => {
+  return `/api/storage/uploads/request-url`;
+};
+
+export const requestUploadUrl = async (
+  uploadUrlRequest: UploadUrlRequest,
+  options?: RequestInit,
+): Promise<UploadUrlResponse> => {
+  return customFetch<UploadUrlResponse>(getRequestUploadUrlUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(uploadUrlRequest),
+  });
+};
+
+export const getRequestUploadUrlMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof requestUploadUrl>>,
+    TError,
+    { data: BodyType<UploadUrlRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof requestUploadUrl>>,
+  TError,
+  { data: BodyType<UploadUrlRequest> },
+  TContext
+> => {
+  const mutationKey = ["requestUploadUrl"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof requestUploadUrl>>,
+    { data: BodyType<UploadUrlRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return requestUploadUrl(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RequestUploadUrlMutationResult = NonNullable<
+  Awaited<ReturnType<typeof requestUploadUrl>>
+>;
+export type RequestUploadUrlMutationBody = BodyType<UploadUrlRequest>;
+export type RequestUploadUrlMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Request a presigned URL for file upload (authenticated)
+ */
+export const useRequestUploadUrl = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof requestUploadUrl>>,
+    TError,
+    { data: BodyType<UploadUrlRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof requestUploadUrl>>,
+  TError,
+  { data: BodyType<UploadUrlRequest> },
+  TContext
+> => {
+  return useMutation(getRequestUploadUrlMutationOptions(options));
+};
+
+/**
+ * Authenticated users only. The client calls this after the PUT to the
+presigned URL succeeds. The server verifies the object exists in the
+private bucket and writes an ACL policy with owner = caller and
+visibility = `private`. The same caller is required for finalize as
+for request-url.
+
+ * @summary Finalize an upload by stamping ACL on the now-existing object
+ */
+export const getFinalizeUploadUrl = () => {
+  return `/api/storage/uploads/finalize`;
+};
+
+export const finalizeUpload = async (
+  uploadFinalizeRequest: UploadFinalizeRequest,
+  options?: RequestInit,
+): Promise<UploadFinalized> => {
+  return customFetch<UploadFinalized>(getFinalizeUploadUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(uploadFinalizeRequest),
+  });
+};
+
+export const getFinalizeUploadMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof finalizeUpload>>,
+    TError,
+    { data: BodyType<UploadFinalizeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof finalizeUpload>>,
+  TError,
+  { data: BodyType<UploadFinalizeRequest> },
+  TContext
+> => {
+  const mutationKey = ["finalizeUpload"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof finalizeUpload>>,
+    { data: BodyType<UploadFinalizeRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return finalizeUpload(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type FinalizeUploadMutationResult = NonNullable<
+  Awaited<ReturnType<typeof finalizeUpload>>
+>;
+export type FinalizeUploadMutationBody = BodyType<UploadFinalizeRequest>;
+export type FinalizeUploadMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Finalize an upload by stamping ACL on the now-existing object
+ */
+export const useFinalizeUpload = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof finalizeUpload>>,
+    TError,
+    { data: BodyType<UploadFinalizeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof finalizeUpload>>,
+  TError,
+  { data: BodyType<UploadFinalizeRequest> },
+  TContext
+> => {
+  return useMutation(getFinalizeUploadMutationOptions(options));
+};
+
+/**
+ * Authenticated. Server-side upsert into `public.users` keyed by Clerk
+user id, using profile data from the Clerk session token (no
+client-supplied identity is trusted). Returns the persisted row.
+
+ * @summary Upsert the calling Clerk user into the Supabase users table
+ */
+export const getSyncMeUrl = () => {
+  return `/api/me/sync`;
+};
+
+export const syncMe = async (options?: RequestInit): Promise<AppUser> => {
+  return customFetch<AppUser>(getSyncMeUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getSyncMeMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof syncMe>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof syncMe>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["syncMe"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof syncMe>>,
+    void
+  > = () => {
+    return syncMe(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SyncMeMutationResult = NonNullable<
+  Awaited<ReturnType<typeof syncMe>>
+>;
+
+export type SyncMeMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Upsert the calling Clerk user into the Supabase users table
+ */
+export const useSyncMe = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof syncMe>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof syncMe>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getSyncMeMutationOptions(options));
+};
+
+/**
+ * If a Clerk session is present, returns the rows for that user_id.
+Otherwise returns rows for the supplied `sessionId` query param
+(guest mode). Returns an empty list if neither is provided.
+
+ * @summary List the caller's saved trails (Clerk session OR guest sessionId)
+ */
+export const getListMySavedTrailsUrl = (params?: ListMySavedTrailsParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/me/saved-trails?${stringifiedParams}`
+    : `/api/me/saved-trails`;
+};
+
+export const listMySavedTrails = async (
+  params?: ListMySavedTrailsParams,
+  options?: RequestInit,
+): Promise<SavedTrailsList> => {
+  return customFetch<SavedTrailsList>(getListMySavedTrailsUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListMySavedTrailsQueryKey = (
+  params?: ListMySavedTrailsParams,
+) => {
+  return [`/api/me/saved-trails`, ...(params ? [params] : [])] as const;
+};
+
+export const getListMySavedTrailsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listMySavedTrails>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  params?: ListMySavedTrailsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listMySavedTrails>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getListMySavedTrailsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listMySavedTrails>>
+  > = ({ signal }) => listMySavedTrails(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listMySavedTrails>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListMySavedTrailsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listMySavedTrails>>
+>;
+export type ListMySavedTrailsQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary List the caller's saved trails (Clerk session OR guest sessionId)
+ */
+
+export function useListMySavedTrails<
+  TData = Awaited<ReturnType<typeof listMySavedTrails>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  params?: ListMySavedTrailsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listMySavedTrails>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListMySavedTrailsQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * If a Clerk session is present, the row is owned by the user. Otherwise
+the body must include a `sessionId` (guest mode); the row is keyed by
+that device session.
+
+ * @summary Save (bookmark) a trail
+ */
+export const getSaveTrailUrl = () => {
+  return `/api/me/saved-trails`;
+};
+
+export const saveTrail = async (
+  saveTrailRequest: SaveTrailRequest,
+  options?: RequestInit,
+): Promise<Ok> => {
+  return customFetch<Ok>(getSaveTrailUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(saveTrailRequest),
+  });
+};
+
+export const getSaveTrailMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof saveTrail>>,
+    TError,
+    { data: BodyType<SaveTrailRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof saveTrail>>,
+  TError,
+  { data: BodyType<SaveTrailRequest> },
+  TContext
+> => {
+  const mutationKey = ["saveTrail"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof saveTrail>>,
+    { data: BodyType<SaveTrailRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return saveTrail(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SaveTrailMutationResult = NonNullable<
+  Awaited<ReturnType<typeof saveTrail>>
+>;
+export type SaveTrailMutationBody = BodyType<SaveTrailRequest>;
+export type SaveTrailMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Save (bookmark) a trail
+ */
+export const useSaveTrail = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof saveTrail>>,
+    TError,
+    { data: BodyType<SaveTrailRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof saveTrail>>,
+  TError,
+  { data: BodyType<SaveTrailRequest> },
+  TContext
+> => {
+  return useMutation(getSaveTrailMutationOptions(options));
+};
+
+/**
+ * @summary Count guest-session saved trails (for the merge prompt)
+ */
+export const getCountSessionSavedTrailsUrl = (
+  params: CountSessionSavedTrailsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/me/saved-trails/count?${stringifiedParams}`
+    : `/api/me/saved-trails/count`;
+};
+
+export const countSessionSavedTrails = async (
+  params: CountSessionSavedTrailsParams,
+  options?: RequestInit,
+): Promise<CountResponse> => {
+  return customFetch<CountResponse>(getCountSessionSavedTrailsUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getCountSessionSavedTrailsQueryKey = (
+  params?: CountSessionSavedTrailsParams,
+) => {
+  return [`/api/me/saved-trails/count`, ...(params ? [params] : [])] as const;
+};
+
+export const getCountSessionSavedTrailsQueryOptions = <
+  TData = Awaited<ReturnType<typeof countSessionSavedTrails>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  params: CountSessionSavedTrailsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof countSessionSavedTrails>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getCountSessionSavedTrailsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof countSessionSavedTrails>>
+  > = ({ signal }) =>
+    countSessionSavedTrails(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof countSessionSavedTrails>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type CountSessionSavedTrailsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof countSessionSavedTrails>>
+>;
+export type CountSessionSavedTrailsQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Count guest-session saved trails (for the merge prompt)
+ */
+
+export function useCountSessionSavedTrails<
+  TData = Awaited<ReturnType<typeof countSessionSavedTrails>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  params: CountSessionSavedTrailsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof countSessionSavedTrails>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getCountSessionSavedTrailsQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Authenticated. Inserts a new row into `public.trails` with
+`owner_user_id = auth.userId`, ignoring any owner field the client
+sends. This keeps trail ownership tamper-proof.
+
+ * @summary Create a trail (Clerk-required, server stamps owner_user_id)
+ */
+export const getCreateTrailUrl = () => {
+  return `/api/trails`;
+};
+
+export const createTrail = async (
+  createTrailRequest: CreateTrailRequest,
+  options?: RequestInit,
+): Promise<CreatedTrail> => {
+  return customFetch<CreatedTrail>(getCreateTrailUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(createTrailRequest),
+  });
+};
+
+export const getCreateTrailMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createTrail>>,
+    TError,
+    { data: BodyType<CreateTrailRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createTrail>>,
+  TError,
+  { data: BodyType<CreateTrailRequest> },
+  TContext
+> => {
+  const mutationKey = ["createTrail"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createTrail>>,
+    { data: BodyType<CreateTrailRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return createTrail(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateTrailMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createTrail>>
+>;
+export type CreateTrailMutationBody = BodyType<CreateTrailRequest>;
+export type CreateTrailMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Create a trail (Clerk-required, server stamps owner_user_id)
+ */
+export const useCreateTrail = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createTrail>>,
+    TError,
+    { data: BodyType<CreateTrailRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createTrail>>,
+  TError,
+  { data: BodyType<CreateTrailRequest> },
+  TContext
+> => {
+  return useMutation(getCreateTrailMutationOptions(options));
+};
+
+/**
+ * Authenticated. Reassigns `saved_trails` rows from the supplied
+`sessionId` to the calling Clerk user, deduping on (user_id, trail_id).
+
+ * @summary Migrate guest-session saved trails into the signed-in user
+ */
+export const getMigrateSessionSavedTrailsUrl = () => {
+  return `/api/me/saved-trails/migrate`;
+};
+
+export const migrateSessionSavedTrails = async (
+  migrateRequest: MigrateRequest,
+  options?: RequestInit,
+): Promise<MigrateResponse> => {
+  return customFetch<MigrateResponse>(getMigrateSessionSavedTrailsUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(migrateRequest),
+  });
+};
+
+export const getMigrateSessionSavedTrailsMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof migrateSessionSavedTrails>>,
+    TError,
+    { data: BodyType<MigrateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof migrateSessionSavedTrails>>,
+  TError,
+  { data: BodyType<MigrateRequest> },
+  TContext
+> => {
+  const mutationKey = ["migrateSessionSavedTrails"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof migrateSessionSavedTrails>>,
+    { data: BodyType<MigrateRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return migrateSessionSavedTrails(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type MigrateSessionSavedTrailsMutationResult = NonNullable<
+  Awaited<ReturnType<typeof migrateSessionSavedTrails>>
+>;
+export type MigrateSessionSavedTrailsMutationBody = BodyType<MigrateRequest>;
+export type MigrateSessionSavedTrailsMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Migrate guest-session saved trails into the signed-in user
+ */
+export const useMigrateSessionSavedTrails = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof migrateSessionSavedTrails>>,
+    TError,
+    { data: BodyType<MigrateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof migrateSessionSavedTrails>>,
+  TError,
+  { data: BodyType<MigrateRequest> },
+  TContext
+> => {
+  return useMutation(getMigrateSessionSavedTrailsMutationOptions(options));
+};
+
+/**
+ * Unconditionally public — no authentication or ACL checks.
+Searches PUBLIC_OBJECT_SEARCH_PATHS for the given file path.
+
+ * @summary Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
+ */
+export const getGetPublicObjectUrl = (filePath: string) => {
+  return `/api/storage/public-objects/${filePath}`;
+};
+
+export const getPublicObject = async (
+  filePath: string,
+  options?: RequestInit,
+): Promise<Blob> => {
+  return customFetch<Blob>(getGetPublicObjectUrl(filePath), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetPublicObjectQueryKey = (filePath: string) => {
+  return [`/api/storage/public-objects/${filePath}`] as const;
+};
+
+export const getGetPublicObjectQueryOptions = <
+  TData = Awaited<ReturnType<typeof getPublicObject>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  filePath: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPublicObject>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetPublicObjectQueryKey(filePath);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getPublicObject>>> = ({
+    signal,
+  }) => getPublicObject(filePath, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!filePath,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getPublicObject>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetPublicObjectQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getPublicObject>>
+>;
+export type GetPublicObjectQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Serve a public asset from PUBLIC_OBJECT_SEARCH_PATHS
+ */
+
+export function useGetPublicObject<
+  TData = Awaited<ReturnType<typeof getPublicObject>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  filePath: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPublicObject>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetPublicObjectQueryOptions(filePath, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Serves objects previously uploaded via the presigned URL flow. The
+object's ACL policy (set at upload time) is enforced — `public`
+objects are served to anyone, `private` objects only to the
+recorded owner or members of an allowed access group. The path
+segment after `/storage/objects/` corresponds 1:1 with the
+`objectPath` returned from `requestUploadUrl` (e.g. `uploads/<uuid>`).
+
+ * @summary Serve a private object entity (ACL enforced)
+ */
+export const getGetStorageObjectUrl = (objectPath: string) => {
+  return `/api/storage/objects/${objectPath}`;
+};
+
+export const getStorageObject = async (
+  objectPath: string,
+  options?: RequestInit,
+): Promise<Blob> => {
+  return customFetch<Blob>(getGetStorageObjectUrl(objectPath), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetStorageObjectQueryKey = (objectPath: string) => {
+  return [`/api/storage/objects/${objectPath}`] as const;
+};
+
+export const getGetStorageObjectQueryOptions = <
+  TData = Awaited<ReturnType<typeof getStorageObject>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  objectPath: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getStorageObject>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetStorageObjectQueryKey(objectPath);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getStorageObject>>
+  > = ({ signal }) =>
+    getStorageObject(objectPath, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!objectPath,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getStorageObject>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetStorageObjectQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getStorageObject>>
+>;
+export type GetStorageObjectQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Serve a private object entity (ACL enforced)
+ */
+
+export function useGetStorageObject<
+  TData = Awaited<ReturnType<typeof getStorageObject>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  objectPath: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getStorageObject>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetStorageObjectQueryOptions(objectPath, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
