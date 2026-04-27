@@ -7,8 +7,42 @@ import {
   formatKm,
   formatDurationMin,
   maneuverArrow,
+  haversineM,
 } from "@/lib/routing";
 import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
+
+// Find nearest section to a user position; returns { section, distanceM }
+function findNearestSection(route: AssembledRoute, user: GeoPoint): { section: RouteSection; distanceM: number } | null {
+  let best: { section: RouteSection; distanceM: number } | null = null;
+  for (const sec of route.sections) {
+    const pts = sec.kind === "road" ? sec.route.polyline : sec.polyline;
+    // Sample at most 30 evenly-spaced points to keep it fast
+    const stride = Math.max(1, Math.floor(pts.length / 30));
+    let minD = Infinity;
+    for (let i = 0; i < pts.length; i += stride) {
+      const d = haversineM(user, pts[i]);
+      if (d < minD) minD = d;
+    }
+    if (!best || minD < best.distanceM) best = { section: sec, distanceM: minD };
+  }
+  return best;
+}
+
+// For a road section, find the index of the next upcoming step relative to user position.
+// We pick the step whose location is closest to user, then return that step or step+1 if user has passed it.
+function findNextRoadStep(section: Extract<RouteSection, { kind: "road" }>, user: GeoPoint): { stepIndex: number; distanceToStepM: number } | null {
+  const steps = section.route.steps;
+  if (steps.length === 0) return null;
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < steps.length; i++) {
+    const d = haversineM(user, steps[i].location);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  // If we're within 30m of the best step, treat it as the active maneuver; else it's still upcoming
+  const distanceToStepM = bestDist;
+  return { stepIndex: bestIdx, distanceToStepM };
+}
 
 declare global {
   interface Window {
@@ -29,9 +63,28 @@ export default function NavigationView({ route, onClose }: Props) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const sectionLayersRef = useRef<Map<number, import("leaflet").Polyline | import("leaflet").Marker>>(new Map());
+  const userMarkerRef = useRef<import("leaflet").Marker | null>(null);
+  const userAccuracyRef = useRef<import("leaflet").Circle | null>(null);
+  const watchIdRef = useRef<number | null>(null);
   const [leafletLoaded, setLeafletLoaded] = useState(false);
   const [activeSection, setActiveSection] = useState<number | null>(null);
   const [bottomTab, setBottomTab] = useState<"sections" | "turns">("sections");
+
+  // Live GPS state
+  const [riding, setRiding] = useState(false);
+  const [userPos, setUserPos] = useState<(GeoPoint & { accuracyM: number; speedMs: number | null; headingDeg: number | null }) | null>(null);
+  const [geoError, setGeoError] = useState<string | null>(null);
+
+  // Computed nav state from current user position
+  const nearestInfo = userPos ? findNearestSection(route, userPos) : null;
+  const currentSection = nearestInfo?.section ?? null;
+  const offRouteM = nearestInfo?.distanceM ?? null;
+  const nextRoadStepInfo = currentSection?.kind === "road" && userPos
+    ? findNextRoadStep(currentSection, userPos)
+    : null;
+  const nextRoadStep = nextRoadStepInfo && currentSection?.kind === "road"
+    ? currentSection.route.steps[nextRoadStepInfo.stepIndex]
+    : null;
 
   useEffect(() => {
     if (window.L) { setLeafletLoaded(true); return undefined; }
@@ -64,6 +117,128 @@ export default function NavigationView({ route, onClose }: Props) {
     ).addTo(map);
     mapRef.current = map;
   }, [leafletLoaded]);
+
+  // Cleanup map on unmount
+  useEffect(() => {
+    return () => {
+      if (watchIdRef.current != null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+      if (mapRef.current) {
+        try { mapRef.current.remove(); } catch { /* ignore */ }
+        mapRef.current = null;
+      }
+      sectionLayersRef.current.clear();
+      userMarkerRef.current = null;
+      userAccuracyRef.current = null;
+    };
+  }, []);
+
+  // Geolocation watcher (only active while riding)
+  useEffect(() => {
+    if (!riding) {
+      if (watchIdRef.current != null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+      return;
+    }
+    if (!navigator.geolocation) {
+      setGeoError("Geolocation is not supported on this device.");
+      setRiding(false);
+      return;
+    }
+    setGeoError(null);
+    const id = navigator.geolocation.watchPosition(
+      (pos) => {
+        setUserPos({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracyM: pos.coords.accuracy,
+          speedMs: pos.coords.speed,
+          headingDeg: pos.coords.heading,
+        });
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          setGeoError("Location permission denied. Enable location access in your browser settings.");
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          setGeoError("Location signal unavailable. Move to an area with better GPS reception.");
+        } else if (err.code === err.TIMEOUT) {
+          setGeoError("Location request timed out. Trying again...");
+        } else {
+          setGeoError("Could not get your location.");
+        }
+      },
+      { enableHighAccuracy: true, maximumAge: 1500, timeout: 10000 }
+    );
+    watchIdRef.current = id;
+    return () => {
+      if (watchIdRef.current != null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+    };
+  }, [riding]);
+
+  // Update user marker and auto-pan map when riding
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    const map = mapRef.current;
+
+    // Remove if not riding or no position
+    if (!riding || !userPos) {
+      if (userMarkerRef.current) { userMarkerRef.current.remove(); userMarkerRef.current = null; }
+      if (userAccuracyRef.current) { userAccuracyRef.current.remove(); userAccuracyRef.current = null; }
+      return;
+    }
+
+    // Accuracy circle
+    if (!userAccuracyRef.current) {
+      userAccuracyRef.current = L.circle([userPos.lat, userPos.lng], {
+        radius: userPos.accuracyM,
+        color: "#3b82f6",
+        weight: 1,
+        fillColor: "#3b82f6",
+        fillOpacity: 0.12,
+      }).addTo(map);
+    } else {
+      userAccuracyRef.current.setLatLng([userPos.lat, userPos.lng]);
+      userAccuracyRef.current.setRadius(userPos.accuracyM);
+    }
+
+    // Pulsing user marker
+    const heading = userPos.headingDeg ?? 0;
+    const html = `<div style="position:relative;width:32px;height:32px;display:flex;align-items:center;justify-content:center;">
+      <div style="position:absolute;inset:0;background:#3b82f6;border-radius:50%;opacity:0.3;animation:pulse 1.6s ease-out infinite;"></div>
+      <div style="position:relative;width:18px;height:18px;background:#3b82f6;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.6);"></div>
+      ${userPos.headingDeg != null ? `<div style="position:absolute;top:-2px;left:50%;transform:translateX(-50%) rotate(${heading}deg);transform-origin:50% 18px;width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:10px solid #3b82f6;"></div>` : ""}
+    </div>
+    <style>@keyframes pulse{0%{transform:scale(0.8);opacity:0.6}100%{transform:scale(2.2);opacity:0}}</style>`;
+
+    if (!userMarkerRef.current) {
+      userMarkerRef.current = L.marker([userPos.lat, userPos.lng], {
+        icon: L.divIcon({
+          html, iconSize: [32, 32], iconAnchor: [16, 16], className: "user-marker",
+        }),
+        zIndexOffset: 1000,
+      }).addTo(map);
+    } else {
+      userMarkerRef.current.setLatLng([userPos.lat, userPos.lng]);
+      userMarkerRef.current.setIcon(L.divIcon({
+        html, iconSize: [32, 32], iconAnchor: [16, 16], className: "user-marker",
+      }));
+    }
+
+    // Auto-pan if user is far from map center
+    const center = map.getCenter();
+    const dist = haversineM({ lat: center.lat, lng: center.lng }, userPos);
+    if (dist > 200) {
+      map.setView([userPos.lat, userPos.lng], Math.max(map.getZoom(), 15), { animate: true });
+    }
+  }, [userPos, riding]);
 
   // Render route sections
   useEffect(() => {
@@ -213,17 +388,40 @@ export default function NavigationView({ route, onClose }: Props) {
               {route.start.label?.split(",")[0] || "Start"} → {route.end.label?.split(",")[0] || "End"}
             </div>
           </div>
-          <button
-            onClick={handleDownloadFullGPX}
-            className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition-colors"
-            title="Download full trip GPX"
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setRiding((v) => !v)}
+              className={`px-2.5 py-1.5 rounded-lg border transition-all flex items-center gap-1.5 ${
+                riding
+                  ? "bg-red-500/25 border-red-500/60 text-red-300 hover:bg-red-500/35"
+                  : "bg-green-500/20 border-green-500/50 text-green-300 hover:bg-green-500/30"
+              }`}
+              title={riding ? "Stop live navigation" : "Start live GPS navigation"}
+            >
+              {riding ? (
+                <>
+                  <span className="w-2.5 h-2.5 rounded-sm bg-red-400"></span>
+                  <span className="text-[10px] font-black uppercase tracking-wider">Stop</span>
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  <span className="text-[10px] font-black uppercase tracking-wider">Ride</span>
+                </>
+              )}
+            </button>
+            <button
+              onClick={handleDownloadFullGPX}
+              className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition-colors"
+              title="Download full trip GPX"
+            >
+              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Stats row */}
@@ -246,6 +444,117 @@ export default function NavigationView({ route, onClose }: Props) {
           </div>
         </div>
       </div>
+
+      {/* LIVE NAV BANNER — shows when riding */}
+      {riding && (
+        <div className="shrink-0 bg-gradient-to-r from-blue-900/60 to-stone-900/80 border-b-2 border-blue-500/50 px-3 py-2.5">
+          {!userPos && !geoError && (
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse"></div>
+              <span className="text-xs text-blue-200 font-medium">Acquiring GPS signal...</span>
+            </div>
+          )}
+          {geoError && (
+            <div className="flex items-center gap-2">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <span className="text-[11px] text-red-300 leading-tight">{geoError}</span>
+            </div>
+          )}
+          {userPos && currentSection && (() => {
+            const isRoad = currentSection.kind === "road";
+            const isTrail = currentSection.kind === "trail";
+            // 3 distinct states: road-with-step, road-without-step, trail
+            const hasManeuver = isRoad && nextRoadStep != null;
+            const accent = isRoad ? "#3b82f6" : "#f97316";
+            return (
+            <div className="flex items-stretch gap-3">
+              {/* Big maneuver / section icon */}
+              <div className="shrink-0 w-14 h-14 rounded-xl flex flex-col items-center justify-center"
+                   style={{
+                     background: isRoad ? "rgba(59,130,246,0.25)" : "rgba(249,115,22,0.25)",
+                     border: `2px solid ${accent}`,
+                   }}>
+                {hasManeuver ? (
+                  <svg viewBox="0 0 24 24" className="w-7 h-7 text-blue-300" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d={maneuverArrow(nextRoadStep!.maneuver, nextRoadStep!.modifier)}/>
+                  </svg>
+                ) : isRoad ? (
+                  <svg viewBox="0 0 24 24" className="w-7 h-7 text-blue-300" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M12 5v14M12 5l-4 4M12 5l4 4"/>
+                  </svg>
+                ) : (
+                  <>
+                    <svg viewBox="0 0 24 24" className="w-6 h-6 text-orange-300" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/>
+                    </svg>
+                    <span className="text-[8px] text-orange-300 font-black uppercase mt-0.5">Trail</span>
+                  </>
+                )}
+              </div>
+              {/* Instruction text */}
+              <div className="flex-1 min-w-0 flex flex-col justify-center">
+                {hasManeuver ? (
+                  <>
+                    <div className="text-[10px] text-blue-300 font-bold uppercase tracking-wider">
+                      {nextRoadStepInfo && nextRoadStepInfo.distanceToStepM > 30
+                        ? `In ${formatDistance(nextRoadStepInfo.distanceToStepM)}`
+                        : "Now"}
+                    </div>
+                    <div className="text-sm font-bold text-white leading-tight truncate">
+                      {nextRoadStep!.instruction}
+                    </div>
+                    <div className="text-[10px] text-stone-400 mt-0.5 truncate">
+                      On road to {currentSection.kind === "road" ? (currentSection.label.split("→")[1]?.trim() || "next trail") : ""}
+                    </div>
+                  </>
+                ) : isRoad ? (
+                  <>
+                    <div className="text-[10px] text-blue-300 font-bold uppercase tracking-wider">
+                      On the road
+                    </div>
+                    <div className="text-sm font-bold text-white leading-tight truncate">
+                      Stay on this road
+                    </div>
+                    <div className="text-[10px] text-stone-400 mt-0.5 truncate">
+                      Heading to {currentSection.kind === "road" ? (currentSection.label.split("→")[1]?.trim() || "next trail") : ""}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-[10px] text-orange-300 font-bold uppercase tracking-wider">
+                      Off-road · Follow GPX
+                    </div>
+                    <div className="text-sm font-bold text-white leading-tight truncate">
+                      {isTrail ? currentSection.trail.name : "On trail"}
+                    </div>
+                    <div className="text-[10px] text-stone-400 mt-0.5">
+                      {isTrail && `Difficulty ${currentSection.trail.difficulty} · ${currentSection.trail.legal_status}`}
+                    </div>
+                  </>
+                )}
+              </div>
+              {/* Speed + off-route */}
+              <div className="shrink-0 flex flex-col items-end justify-center text-right">
+                {userPos.speedMs != null && userPos.speedMs > 0 && (
+                  <div>
+                    <div className="text-base font-black text-white leading-none">{Math.round(userPos.speedMs * 3.6)}</div>
+                    <div className="text-[8px] text-stone-400 uppercase">km/h</div>
+                  </div>
+                )}
+                {offRouteM != null && offRouteM > 50 && (
+                  <div className="mt-1 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40">
+                    <div className="text-[8px] text-amber-300 font-bold uppercase">Off-route</div>
+                    <div className="text-[9px] text-amber-200">{formatDistance(offRouteM)}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* Warnings if any */}
       {(route.skippedTrails.length > 0 || route.failedRoadSegments > 0) && (

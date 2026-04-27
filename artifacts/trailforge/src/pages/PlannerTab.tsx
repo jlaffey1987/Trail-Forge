@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { searchTrails, saveTrail, getSessionId, type Trail } from "@/lib/supabase";
 import RouteBuilder from "@/components/RouteBuilder";
 import NavigationView from "@/components/NavigationView";
+import PlannerMap from "@/components/PlannerMap";
 import {
   geocode,
   assembleMultiModalRoute,
@@ -67,6 +68,28 @@ export default function PlannerTab() {
     setOverlays((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
+  // Geocode request sequence tokens (per field) to discard stale responses
+  const startSeqRef = useRef(0);
+  const endSeqRef = useRef(0);
+
+  // Auto-geocode an input on blur so the map can pin it immediately.
+  // Uses a per-field sequence guard so out-of-order responses can't overwrite a newer query.
+  const handleAddressBlur = async (which: "start" | "end") => {
+    const value = which === "start" ? startLocation.trim() : endLocation.trim();
+    if (!value) return;
+    const cached = which === "start" ? geocodedStart : geocodedEnd;
+    if (cached && cached.q === value) return;
+    const seq = which === "start" ? ++startSeqRef.current : ++endSeqRef.current;
+    const pt = await geocode(value);
+    if (!pt) return;
+    // Discard if a newer request was issued or the user has since changed the input
+    const currentSeq = which === "start" ? startSeqRef.current : endSeqRef.current;
+    const currentValue = which === "start" ? startLocation.trim() : endLocation.trim();
+    if (seq !== currentSeq || currentValue !== value) return;
+    if (which === "start") setGeocodedStart({ q: value, pt });
+    else setGeocodedEnd({ q: value, pt });
+  };
+
   const handleSearch = async () => {
     setSearching(true);
     const trailTypes: string[] = [];
@@ -79,6 +102,28 @@ export default function PlannerTab() {
     });
     setResults(data);
     setSearching(false);
+
+    // Eagerly geocode any addresses so map pins appear on first results render (with sequence guard)
+    const tasks: Promise<void>[] = [];
+    const startVal = startLocation.trim();
+    const endVal = endLocation.trim();
+    if (startVal && (!geocodedStart || geocodedStart.q !== startVal)) {
+      const seq = ++startSeqRef.current;
+      tasks.push(geocode(startVal).then((pt) => {
+        if (pt && seq === startSeqRef.current && startLocation.trim() === startVal) {
+          setGeocodedStart({ q: startVal, pt });
+        }
+      }));
+    }
+    if (endVal && (!geocodedEnd || geocodedEnd.q !== endVal)) {
+      const seq = ++endSeqRef.current;
+      tasks.push(geocode(endVal).then((pt) => {
+        if (pt && seq === endSeqRef.current && endLocation.trim() === endVal) {
+          setGeocodedEnd({ q: endVal, pt });
+        }
+      }));
+    }
+    await Promise.all(tasks);
   };
 
   const handleSave = async (trail: Trail) => {
@@ -96,13 +141,22 @@ export default function PlannerTab() {
   // Route trail linking
   const isInRoute = (id: string) => routeTrails.some((t) => t.id === id);
 
-  const toggleRouteTrail = (trail: Trail) => {
-    if (isInRoute(trail.id)) {
-      setRouteTrails((prev) => prev.filter((t) => t.id !== trail.id));
-    } else {
-      setRouteTrails((prev) => [...prev, trail]);
-    }
-  };
+  const toggleRouteTrail = useCallback((trail: Trail) => {
+    setRouteTrails((prev) => {
+      if (prev.some((t) => t.id === trail.id)) return prev.filter((t) => t.id !== trail.id);
+      return [...prev, trail];
+    });
+  }, []);
+
+  // Memoized inputs to PlannerMap so it doesn't rebuild layers on unrelated re-renders
+  const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
+  // Pins only when the cached geocoded query matches the current trimmed input value
+  const startPin = useMemo(() => {
+    return geocodedStart && geocodedStart.q === startLocation.trim() ? geocodedStart.pt : null;
+  }, [geocodedStart, startLocation]);
+  const endPin = useMemo(() => {
+    return geocodedEnd && geocodedEnd.q === endLocation.trim() ? geocodedEnd.pt : null;
+  }, [geocodedEnd, endLocation]);
 
   const removeFromRoute = (id: string) => {
     setRouteTrails((prev) => prev.filter((t) => t.id !== id));
@@ -213,6 +267,7 @@ export default function PlannerTab() {
                 placeholder="Start address (e.g. 9 High Street, Stranraer)"
                 value={startLocation}
                 onChange={(e) => { setStartLocation(e.target.value); setPlanError(null); }}
+                onBlur={() => handleAddressBlur("start")}
                 className={`w-full bg-[hsl(22,15%,11%)] border rounded-lg pl-8 pr-4 py-3 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-1 transition-colors ${
                   highlightInputs ? "border-amber-500 ring-1 ring-amber-500/50" : "border-[hsl(30,12%,20%)] focus:border-amber-500/60 focus:ring-amber-500/30"
                 }`}
@@ -232,6 +287,7 @@ export default function PlannerTab() {
                 placeholder="Destination (e.g. ABR Festival, Ravenstone Manor)"
                 value={endLocation}
                 onChange={(e) => { setEndLocation(e.target.value); setPlanError(null); }}
+                onBlur={() => handleAddressBlur("end")}
                 className={`w-full bg-[hsl(22,15%,11%)] border rounded-lg pl-8 pr-4 py-3 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-1 transition-colors ${
                   highlightInputs ? "border-amber-500 ring-1 ring-amber-500/50" : "border-[hsl(30,12%,20%)] focus:border-amber-500/60 focus:ring-amber-500/30"
                 }`}
@@ -347,6 +403,19 @@ export default function PlannerTab() {
             ) : "Find Trails"}
           </button>
         </div>
+
+        {/* Trail Discovery Map — shown once we have search results OR a geocoded address */}
+        {(results.length > 0 || startPin || endPin) && (
+          <div className="px-4 pb-3">
+            <PlannerMap
+              start={startPin}
+              end={endPin}
+              trails={results}
+              selectedIds={routeIdSet}
+              onToggle={toggleRouteTrail}
+            />
+          </div>
+        )}
 
         {/* Results */}
         {results.length > 0 && (
