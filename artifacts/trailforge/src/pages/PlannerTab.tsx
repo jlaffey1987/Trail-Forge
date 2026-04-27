@@ -607,7 +607,7 @@ export default function PlannerTab() {
                 {routeTrails.length > 2 ? ` → +${routeTrails.length - 2} more` : ""}
               </div>
             </div>
-            <div className="flex items-center gap-1 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0">
               {routeTrails.slice(0, 3).map((t, i) => (
                 <div
                   key={t.id}
@@ -617,6 +617,26 @@ export default function PlannerTab() {
                   {i + 1}
                 </div>
               ))}
+              <button
+                type="button"
+                onClick={() => {
+                  if (planningTrip) return;
+                  if (routeTrails.length > 1 && !window.confirm(`Clear all ${routeTrails.length} trails from your route?`)) return;
+                  setRouteTrails([]);
+                  setPlanError(null);
+                }}
+                disabled={planningTrip}
+                aria-label="Clear all trails from route"
+                title="Clear all trails"
+                className="ml-1 w-7 h-7 rounded-md flex items-center justify-center border border-stone-700 bg-stone-900/60 text-stone-400 hover:border-red-500/60 hover:text-red-400 hover:bg-red-900/20 transition-all disabled:opacity-50"
+              >
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5 6"/>
+                  <path d="M10 11v6M14 11v6"/>
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                </svg>
+              </button>
             </div>
           </div>
 
