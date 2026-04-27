@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { type Trail, getSessionId, saveTrail } from "@/lib/supabase";
 import { getDifficultyColor } from "@/lib/trailLayer";
-import { addRouteTrail, isInRoute, subscribeRouteTrails } from "@/lib/plannerRouteStore";
+import { addRouteTrail, removeRouteTrail, isInRoute, subscribeRouteTrails } from "@/lib/plannerRouteStore";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
@@ -27,7 +27,10 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
   const diffLabel = DIFFICULTY_LABELS[diff] ?? "Medium";
 
   const handleAddToPlanner = () => {
-    if (inPlannerRoute) return;
+    if (inPlannerRoute) {
+      removeRouteTrail(trail.id);
+      return;
+    }
     addRouteTrail(trail);
     onAddedToPlanner?.(trail);
   };
@@ -109,10 +112,9 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
         <div className="px-4 pb-5 pt-1 grid grid-cols-2 gap-2">
           <button
             onClick={handleAddToPlanner}
-            disabled={inPlannerRoute}
-            className={`py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
+            className={`group py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
               inPlannerRoute
-                ? "bg-amber-500/15 border border-amber-500/40 text-amber-400 cursor-default"
+                ? "bg-amber-500/15 border border-amber-500/40 text-amber-400 hover:bg-red-500/15 hover:border-red-500/50 hover:text-red-400"
                 : "text-stone-900 shadow-lg shadow-amber-900/30"
             }`}
             style={
@@ -121,13 +123,20 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
                 : { background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" }
             }
             data-testid="trail-detail-add-planner"
+            aria-pressed={inPlannerRoute}
+            aria-label={inPlannerRoute ? "Remove from planner route" : "Add to planner route"}
+            title={inPlannerRoute ? "Tap to remove from your planned route" : "Add this trail to your planned route"}
           >
             {inPlannerRoute ? (
               <>
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 group-hover:hidden" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <polyline points="20 6 9 17 4 12"/>
                 </svg>
-                In Planner
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 hidden group-hover:block" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+                </svg>
+                <span className="group-hover:hidden">In Planner</span>
+                <span className="hidden group-hover:inline">Remove</span>
               </>
             ) : (
               <>
