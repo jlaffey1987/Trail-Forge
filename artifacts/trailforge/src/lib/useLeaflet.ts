@@ -43,6 +43,10 @@ export function useLeaflet(): boolean {
     const script = document.createElement("script");
     script.id = "leaflet-script";
     script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    // Load with crossorigin so any errors thrown inside Leaflet code surface
+    // with a real message + stack instead of being masked as "Script error.".
+    // unpkg serves Access-Control-Allow-Origin: *.
+    script.crossOrigin = "anonymous";
     script.onload = () => setLoaded(true);
     document.head.appendChild(script);
     return;

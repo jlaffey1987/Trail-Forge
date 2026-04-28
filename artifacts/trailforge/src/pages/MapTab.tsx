@@ -6,6 +6,8 @@ import MapTrailFilters, { type MapTrailFilterState } from "@/components/MapTrail
 import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTrailMenu";
 import SaveTrailForm from "@/components/contribute/SaveTrailForm";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
+import MapRoutePanel from "@/components/MapRoutePanel";
+import { parseGPX, getTrailStart, getTrailEnd } from "@/lib/gpx";
 import { useLeaflet } from "@/lib/useLeaflet";
 import {
   addTrail,
@@ -26,7 +28,7 @@ import {
   getTrailBbox,
   bboxesIntersect,
 } from "@/lib/trailLayer";
-import { useRouteTrails } from "@/lib/plannerRouteStore";
+import { useRouteTrails, removeRouteTrail } from "@/lib/plannerRouteStore";
 import {
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
   fetchGroupTrails,
@@ -99,8 +101,9 @@ export default function MapTab() {
   const [currentZoom, setCurrentZoom] = useState(7);
   const [, setCurrentBbox] = useState<MapBbox | null>(null);
 
-  const [routeTrails] = useRouteTrails();
+  const [routeTrails, setRouteTrails] = useRouteTrails();
   const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
+  const routeConnectorsRef = useRef<import("leaflet").Polyline[]>([]);
 
   // "+ Add Trail" / contribute flows
   const [showAddMenu, setShowAddMenu] = useState(false);
@@ -383,12 +386,66 @@ export default function MapTab() {
     trailLayerHandleRef.current = handle;
   }, [trailsForRender, mapMode, routeIdSet, currentZoom]);
 
+  // Render dashed connector polylines between consecutive trails in the
+  // planner route so the user can preview the order they've chosen on the
+  // map. Endpoints come from each trail's GPX (end of N → start of N+1).
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    const map = mapRef.current;
+
+    // Clear previous connectors
+    routeConnectorsRef.current.forEach((pl) => {
+      try { pl.remove(); } catch { /**/ }
+    });
+    routeConnectorsRef.current = [];
+
+    if (routeTrails.length < 2) return;
+
+    const newLines: import("leaflet").Polyline[] = [];
+    try {
+      for (let i = 0; i < routeTrails.length - 1; i++) {
+        const fromWp = parseGPX(routeTrails[i].gpx_data);
+        const toWp = parseGPX(routeTrails[i + 1].gpx_data);
+        const fromEnd = getTrailEnd(fromWp);
+        const toStart = getTrailStart(toWp);
+        if (!fromEnd || !toStart) continue;
+        if (
+          !Number.isFinite(fromEnd.lat) || !Number.isFinite(fromEnd.lon) ||
+          !Number.isFinite(toStart.lat) || !Number.isFinite(toStart.lon)
+        ) continue;
+        const pl = L.polyline(
+          [
+            [fromEnd.lat, fromEnd.lon],
+            [toStart.lat, toStart.lon],
+          ],
+          {
+            color: "#f0a832",
+            weight: 3,
+            opacity: 0.85,
+            dashArray: "8,8",
+            pane: "trailsPane",
+            interactive: false,
+          },
+        ).addTo(map);
+        newLines.push(pl);
+      }
+    } catch (err) {
+      // Defensive: never let a malformed GPX in the route store break the map.
+      // eslint-disable-next-line no-console
+      console.error("[MapTab] route connector render failed:", err);
+    }
+    routeConnectorsRef.current = newLines;
+  }, [routeTrails]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (fetchDebounceRef.current != null) window.clearTimeout(fetchDebounceRef.current);
       trailLayerHandleRef.current?.clear();
       clusterLayerHandleRef.current?.clear();
+      routeConnectorsRef.current.forEach((pl) => pl.remove());
+      routeConnectorsRef.current = [];
     };
   }, []);
 
@@ -484,6 +541,16 @@ export default function MapTab() {
 
   const activeLayerCount = layers.filter((l) => l.visible).length;
   const filterCount = filters.difficulties.length + filters.trailTypes.length;
+
+  // Hand off the current route to the Planner tab. App.tsx listens for this
+  // event and switches tabs + writes a query param so PlannerTab knows to
+  // prompt for start + end addresses.
+  const handleBuildRoute = useCallback(() => {
+    if (routeTrails.length === 0) return;
+    window.dispatchEvent(
+      new CustomEvent("trailforge:open-planner", { detail: { build: true } }),
+    );
+  }, [routeTrails.length]);
 
   const handleAddChoice = (choice: AddTrailChoice) => {
     setShowAddMenu(false);
@@ -674,9 +741,14 @@ ${trkpts}
         </div>
       )}
 
-      {/* Trail status pill (Explore mode) */}
+      {/* Trail status pill (Explore mode). Shifts down when the Map Route
+          Panel is showing so they don't overlap. */}
       {mapMode === "explore" && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-[1000] pointer-events-none">
+        <div
+          className={`absolute left-1/2 -translate-x-1/2 z-[1000] pointer-events-none ${
+            routeTrails.length > 0 ? "top-24" : "top-12"
+          }`}
+        >
           <div className="bg-black/70 backdrop-blur border border-stone-700/60 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full text-stone-200 flex items-center gap-1.5 shadow-lg">
             {trailsLoading ? (
               <>
@@ -711,6 +783,19 @@ ${trkpts}
             </div>
           ))}
         </div>
+      )}
+
+      {/* Map Route Panel — only in Explore so it doesn't fight Draw / Record
+          stats. Lets users review, reorder, remove, and hand off the
+          tap-built route to the Planner. */}
+      {mapMode === "explore" && (
+        <MapRoutePanel
+          trails={routeTrails}
+          onReorder={(next) => setRouteTrails(next)}
+          onRemove={(id) => removeRouteTrail(id)}
+          onClear={() => setRouteTrails([])}
+          onBuildRoute={handleBuildRoute}
+        />
       )}
 
       {/* Difficulty legend (Explore mode) */}

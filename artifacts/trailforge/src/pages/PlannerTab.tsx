@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { searchTrails, saveTrail, type Trail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -78,6 +78,47 @@ export default function PlannerTab() {
   // Geocode request sequence tokens (per field) to discard stale responses
   const startSeqRef = useRef(0);
   const endSeqRef = useRef(0);
+  // Ref for the start address input so we can focus it after the Map tab
+  // hands off via "Build Route".
+  const startInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Mount-effect handoff from the Map tab's "Build Route" button. App.tsx
+  // sets `?build=1` before switching to this tab; if a route is loaded,
+  // highlight the address inputs, scroll the form into view, and focus the
+  // start input so the user can type immediately. Then strip the param.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("build") !== "1") return;
+    const cleanup = () => {
+      params.delete("build");
+      const qs = params.toString();
+      const newUrl =
+        window.location.pathname +
+        (qs ? `?${qs}` : "") +
+        window.location.hash;
+      window.history.replaceState(null, "", newUrl);
+    };
+    if (routeTrails.length === 0) {
+      // Nothing to plan — silently drop the param.
+      cleanup();
+      return;
+    }
+    setHighlightInputs(true);
+    setPlanError(null);
+    // Scroll the address inputs into view and focus the first empty one.
+    requestAnimationFrame(() => {
+      const container = document.querySelector(".overflow-y-auto");
+      if (container) container.scrollTo({ top: 0, behavior: "smooth" });
+      const target = startInputRef.current;
+      if (target && !startLocation.trim()) target.focus();
+    });
+    const t = window.setTimeout(() => setHighlightInputs(false), 3000);
+    cleanup();
+    return () => window.clearTimeout(t);
+    // Run only on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-geocode an input on blur so the map can pin it immediately.
   // Uses a per-field sequence guard so out-of-order responses can't overwrite a newer query.
@@ -292,11 +333,13 @@ export default function PlannerTab() {
             <div className="relative">
               <div className="absolute left-3 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-green-500"></div>
               <input
+                ref={startInputRef}
                 type="text"
                 placeholder="Start address (e.g. 9 High Street, Stranraer)"
                 value={startLocation}
                 onChange={(e) => { setStartLocation(e.target.value); setPlanError(null); }}
                 onBlur={() => handleAddressBlur("start")}
+                data-testid="planner-start-address"
                 className={`w-full bg-[hsl(22,15%,11%)] border rounded-lg pl-8 pr-4 py-3 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-1 transition-colors ${
                   highlightInputs ? "border-amber-500 ring-1 ring-amber-500/50" : "border-[hsl(30,12%,20%)] focus:border-amber-500/60 focus:ring-amber-500/30"
                 }`}

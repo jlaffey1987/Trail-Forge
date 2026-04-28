@@ -173,6 +173,29 @@ function MainShell() {
     };
   }, []);
 
+  // Cross-tab navigation bridge: Map tab dispatches `trailforge:open-planner`
+  // when a user taps "Build Route" on the on-map route panel. We switch to
+  // the Planner tab and write `?build=1` so PlannerTab's mount-effect can
+  // prompt for start + end addresses.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ build?: boolean }>).detail ?? {};
+      if (detail.build) {
+        const params = new URLSearchParams(window.location.search);
+        params.set("build", "1");
+        const qs = params.toString();
+        const newUrl =
+          window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+        window.history.replaceState(null, "", newUrl);
+      }
+      setActiveTab("planner");
+    };
+    window.addEventListener("trailforge:open-planner", handler as EventListener);
+    return () => {
+      window.removeEventListener("trailforge:open-planner", handler as EventListener);
+    };
+  }, []);
+
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
       <header
