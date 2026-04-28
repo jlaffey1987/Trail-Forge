@@ -84,6 +84,18 @@ export interface Trail {
   path_geojson?: { type: "LineString"; coordinates: [number, number][] } | null;
   /** Number of points stored in the simplified path. */
   path_point_count?: number | null;
+  /**
+   * Pre-computed elevation profile derived from `<ele>` tags in `gpx_data`
+   * by the trigger added in migration 0011. Downsampled array of integer
+   * metres aligned with `simplified_path`, with `null` entries for points
+   * whose source GPX was missing elevation. NULL when the GPX has no
+   * usable elevation data at all.
+   */
+  elevation_profile?: Array<number | null> | null;
+  /** Total ascent in metres (jitter-filtered). Added in migration 0011. */
+  elevation_gain_m?: number | null;
+  /** Total descent in metres, expressed as a positive number. Added in migration 0011. */
+  elevation_loss_m?: number | null;
 }
 
 export interface MapBbox {
@@ -138,6 +150,9 @@ const TRAIL_SLIM_COLUMNS = [
   "simplified_path",
   "path_geojson",
   "path_point_count",
+  "elevation_profile",
+  "elevation_gain_m",
+  "elevation_loss_m",
 ].join(",");
 
 /**

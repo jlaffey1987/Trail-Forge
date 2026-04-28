@@ -18,6 +18,7 @@ import {
 import TrailNotesPanel from "./trail-content/TrailNotesPanel";
 import TrailPhotosPanel from "./trail-content/TrailPhotosPanel";
 import TrailAmendmentsPanel from "./trail-content/TrailAmendmentsPanel";
+import TrailElevationChart from "./TrailElevationChart";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
@@ -392,6 +393,8 @@ function OverviewPanel({
           </div>
         </div>
       </div>
+
+      <TrailElevationChart trail={trail} />
 
       {(regradeResult || canRegrade) ? (
         <div className="px-4 pb-2">

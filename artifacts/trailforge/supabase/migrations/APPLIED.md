@@ -21,6 +21,7 @@ migration; do not rewrite history.
 | 0008_trail_simplified_path.sql | (status not verified by task 23) | — | re-check next time it matters |
 | 0009_act_imports.sql | (status not verified by task 23) | — | re-check next time it matters |
 | 0010_group_notifications.sql | (status not verified by task 23) | — | re-check next time it matters |
+| 0011_trail_elevation_profile.sql | (pending — apply manually) | task-27 / agent | Adds `elevation_profile jsonb`, `elevation_gain_m int`, `elevation_loss_m int` to `trails`. Two new helper fns (`trailforge_extract_elevations`, `trailforge_build_elevation`), one new BEFORE INSERT/UPDATE OF gpx_data trigger (`trails_elevation_profile_trigger`), and a LATERAL backfill for existing rows. Same shape as 0008 — safe to re-run (uses `CREATE OR REPLACE` + `ADD COLUMN IF NOT EXISTS` + `DROP TRIGGER IF EXISTS`). The TrailDetailSheet hides the chart gracefully when columns are absent or `elevation_profile` is NULL, so the UI is forward-compatible with un-applied DBs. |
 
 ## How to apply a new migration
 
