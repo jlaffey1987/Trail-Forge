@@ -162,7 +162,11 @@ export async function upsertTrail(candidate: CandidateTrail): Promise<PersistOut
 
   const row = {
     name: candidate.name,
-    type: "off-road",
+    // Map source family to the trails.type CHECK constraint
+    // ('TET' | 'BOAT' | 'green-lane' | 'gravel' | 'enduro' | 'road-link' | 'custom').
+    // TET segments → 'TET'; ACT segments → 'green-lane' (the broadest
+    // UK-legal off-road byway category that fits curated adventure routes).
+    type: candidate.source === "tet" ? "TET" : "green-lane",
     legal_status: "byway",
     terrain: "off-road",
     difficulty: candidate.aiGrade,
