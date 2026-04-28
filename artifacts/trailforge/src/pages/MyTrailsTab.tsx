@@ -2,6 +2,10 @@ import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { fetchSavedTrails, getSessionId, type Trail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import {
+  fetchTrailActivityCounts,
+  type TrailActivityCounts,
+} from "@/lib/trailContent";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -22,6 +26,7 @@ export default function MyTrailsTab() {
   const [savedTrails, setSavedTrails] = useState<Trail[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [activityCounts, setActivityCounts] = useState<Record<string, TrailActivityCounts>>({});
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -32,6 +37,9 @@ export default function MyTrailsTab() {
     fetchSavedTrails(owner).then((trails) => {
       setSavedTrails(trails);
       setLoading(false);
+      if (trails.length > 0) {
+        fetchTrailActivityCounts(trails.map((t) => t.id)).then(setActivityCounts);
+      }
     });
   }, [isLoaded, userId]);
 
@@ -144,6 +152,14 @@ export default function MyTrailsTab() {
                     <span className={`text-xs ${trail.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}`}>
                       {trail.legal_status || trail.type || "Trail"}
                     </span>
+                  </div>
+                  <div
+                    className="text-[10px] text-stone-500 mt-1"
+                    data-testid={`trail-card-counts-${trail.id}`}
+                  >
+                    {(activityCounts[trail.id]?.notes ?? 0)} notes ·{" "}
+                    {(activityCounts[trail.id]?.photos ?? 0)} photos ·{" "}
+                    {(activityCounts[trail.id]?.pending ?? 0)} pending
                   </div>
                 </button>
 

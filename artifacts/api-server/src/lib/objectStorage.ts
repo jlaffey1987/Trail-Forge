@@ -106,7 +106,7 @@ export class ObjectStorageService {
     return new Response(webStream, { headers });
   }
 
-  async getObjectEntityUploadURL(): Promise<string> {
+  async getObjectEntityUploadURL(subPath?: string): Promise<string> {
     const privateObjectDir = this.getPrivateObjectDir();
     if (!privateObjectDir) {
       throw new Error(
@@ -115,8 +115,21 @@ export class ObjectStorageService {
       );
     }
 
-    const objectId = randomUUID();
-    const fullPath = `${privateObjectDir}/uploads/${objectId}`;
+    let suffix: string;
+    if (subPath) {
+      // Validate sub-path: no leading slash, no traversal, no empty segments.
+      if (
+        subPath.startsWith("/") ||
+        subPath.includes("..") ||
+        subPath.split("/").some((seg) => seg.length === 0)
+      ) {
+        throw new Error(`Invalid object sub-path: ${subPath}`);
+      }
+      suffix = subPath;
+    } else {
+      suffix = `uploads/${randomUUID()}`;
+    }
+    const fullPath = `${privateObjectDir}/${suffix}`;
 
     const { bucketName, objectName } = parseObjectPath(fullPath);
 

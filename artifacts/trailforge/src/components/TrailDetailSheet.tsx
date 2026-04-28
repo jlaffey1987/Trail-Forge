@@ -1,14 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useLocation } from "wouter";
 import { type Trail, saveTrail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { getDifficultyColor } from "@/lib/trailLayer";
-import { addRouteTrail, removeRouteTrail, isInRoute, subscribeRouteTrails } from "@/lib/plannerRouteStore";
+import {
+  addRouteTrail,
+  removeRouteTrail,
+  isInRoute,
+  subscribeRouteTrails,
+} from "@/lib/plannerRouteStore";
+import {
+  fetchTrailActivityCounts,
+  fetchTrailPermissions,
+  type TrailActivityCounts,
+  type TrailPermissions,
+} from "@/lib/trailContent";
+import TrailNotesPanel from "./trail-content/TrailNotesPanel";
+import TrailPhotosPanel from "./trail-content/TrailPhotosPanel";
+import TrailAmendmentsPanel from "./trail-content/TrailAmendmentsPanel";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
   6: "Hard", 7: "Expert", 8: "Extreme", 9: "Pro", 10: "Elite",
 };
+
+type TabKey = "overview" | "notes" | "photos" | "amendments";
 
 interface Props {
   trail: Trail;
@@ -21,10 +37,25 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
   const [, setLocation] = useLocation();
   const [inPlannerRoute, setInPlannerRoute] = useState(() => isInRoute(trail.id));
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error" | "needsAuth">("idle");
+  const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const [counts, setCounts] = useState<TrailActivityCounts>({ notes: 0, photos: 0, pending: 0 });
+  const [perms, setPerms] = useState<TrailPermissions>({ isOwner: false, isModerator: false, canModerate: false });
 
   useEffect(() => {
     return subscribeRouteTrails(() => setInPlannerRoute(isInRoute(trail.id)));
   }, [trail.id]);
+
+  const refreshCounts = useCallback(() => {
+    fetchTrailActivityCounts([trail.id]).then((map) => {
+      const c = map[trail.id];
+      if (c) setCounts(c);
+    });
+  }, [trail.id]);
+
+  useEffect(() => {
+    refreshCounts();
+    fetchTrailPermissions(trail.id).then(setPerms);
+  }, [trail.id, refreshCounts, isSignedIn]);
 
   const diff = trail.difficulty ?? 5;
   const diffColor = getDifficultyColor(diff);
@@ -50,6 +81,13 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
     setSaveStatus(ok ? "saved" : "error");
   };
 
+  const tabs: { key: TabKey; label: string; badge?: number }[] = [
+    { key: "overview", label: "Overview" },
+    { key: "notes", label: "Notes", badge: counts.notes },
+    { key: "photos", label: "Photos", badge: counts.photos },
+    { key: "amendments", label: "Edits", badge: counts.pending },
+  ];
+
   return (
     <div
       className="fixed inset-0 z-[1500] flex flex-col"
@@ -57,8 +95,8 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
       onClick={onClose}
     >
       <div
-        className="mt-auto rounded-t-2xl overflow-hidden shadow-2xl"
-        style={{ background: "hsl(22,15%,9%)" }}
+        className="mt-auto rounded-t-2xl overflow-hidden shadow-2xl flex flex-col"
+        style={{ background: "hsl(22,15%,9%)", maxHeight: "92vh" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Drag handle */}
@@ -67,7 +105,7 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
         </div>
 
         {/* Header */}
-        <div className="px-4 pt-2 pb-3">
+        <div className="px-4 pt-2 pb-2">
           <div className="flex items-start gap-3">
             <span
               className="inline-flex items-center justify-center w-10 h-10 rounded-lg text-base font-black text-stone-900 shrink-0"
@@ -76,131 +114,226 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
               {diff}
             </span>
             <div className="flex-1 min-w-0">
-              <h2 className="text-base font-bold text-stone-100 leading-tight">{trail.name}</h2>
+              <h2 className="text-base font-bold text-stone-100 leading-tight" data-testid="trail-detail-name">
+                {trail.name}
+              </h2>
               <p className="text-[11px] text-stone-400 mt-0.5">
                 <span style={{ color: diffColor }}>{diffLabel}</span>
                 {trail.legal_status ? <> · {trail.legal_status}</> : null}
                 {trail.distance_km != null ? <> · {trail.distance_km.toFixed(1)} km</> : null}
               </p>
+              <p className="text-[10px] text-stone-500 mt-0.5" data-testid="trail-detail-counts">
+                {counts.notes} notes · {counts.photos} photos · {counts.pending} pending edits
+              </p>
             </div>
             <button
               onClick={onClose}
               className="w-8 h-8 rounded-full bg-stone-800 flex items-center justify-center text-stone-400 hover:text-stone-200 transition-colors shrink-0"
+              aria-label="Close"
             >
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
             </button>
           </div>
         </div>
 
-        {/* Stats grid */}
-        <div className="px-4 pb-3 grid grid-cols-2 gap-2">
-          <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
-            <div className="text-[9px] text-stone-500 uppercase tracking-wider">Type</div>
-            <div className="text-sm font-bold text-stone-200 truncate">{trail.legal_status || trail.type || "Trail"}</div>
-          </div>
-          <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
-            <div className="text-[9px] text-stone-500 uppercase tracking-wider">Distance</div>
-            <div className="text-sm font-bold text-stone-200">
-              {trail.distance_km != null ? `${trail.distance_km.toFixed(1)} km` : "—"}
-            </div>
-          </div>
-          <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
-            <div className="text-[9px] text-stone-500 uppercase tracking-wider">Surface</div>
-            <div className="text-sm font-bold text-stone-200 truncate">{trail.terrain || "Off-road"}</div>
-          </div>
-          <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
-            <div className="text-[9px] text-stone-500 uppercase tracking-wider">Difficulty</div>
-            <div className="text-sm font-bold" style={{ color: diffColor }}>{diff}/10 · {diffLabel}</div>
-          </div>
+        {/* Tab strip */}
+        <div className="px-4 border-b border-[hsl(30,12%,16%)] flex gap-1 overflow-x-auto" style={{ scrollbarWidth: "none" }}>
+          {tabs.map((t) => {
+            const active = activeTab === t.key;
+            return (
+              <button
+                key={t.key}
+                onClick={() => setActiveTab(t.key)}
+                className={`shrink-0 px-3 py-2 text-[11px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1.5 border-b-2 ${
+                  active
+                    ? "text-amber-400 border-amber-500"
+                    : "text-stone-500 border-transparent hover:text-stone-300"
+                }`}
+                data-testid={`trail-tab-${t.key}`}
+              >
+                {t.label}
+                {t.badge != null && t.badge > 0 ? (
+                  <span className="text-[9px] bg-stone-800 text-stone-300 px-1.5 py-0.5 rounded-full">
+                    {t.badge}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
         </div>
 
-        {/* Action buttons */}
-        <div className="px-4 pb-5 pt-1 grid grid-cols-2 gap-2">
-          <button
-            onClick={handleAddToPlanner}
-            className={`group py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
-              inPlannerRoute
-                ? "bg-amber-500/15 border border-amber-500/40 text-amber-400 hover:bg-red-500/15 hover:border-red-500/50 hover:text-red-400"
-                : "text-stone-900 shadow-lg shadow-amber-900/30"
-            }`}
-            style={
-              inPlannerRoute
-                ? undefined
-                : { background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" }
-            }
-            data-testid="trail-detail-add-planner"
-            aria-pressed={inPlannerRoute}
-            aria-label={inPlannerRoute ? "Remove from planner route" : "Add to planner route"}
-            title={inPlannerRoute ? "Tap to remove from your planned route" : "Add this trail to your planned route"}
-          >
-            {inPlannerRoute ? (
-              <>
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 group-hover:hidden" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 hidden group-hover:block" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
-                </svg>
-                <span className="group-hover:hidden">In Planner</span>
-                <span className="hidden group-hover:inline">Remove</span>
-              </>
-            ) : (
-              <>
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                </svg>
-                Add to Planner
-              </>
-            )}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saveStatus === "saving" || saveStatus === "saved"}
-            className={`py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border ${
-              saveStatus === "saved"
-                ? "border-amber-500/40 bg-amber-500/15 text-amber-400 cursor-default"
-                : saveStatus === "error" || saveStatus === "needsAuth"
-                ? "border-red-500/50 text-red-400 bg-red-500/10"
-                : "border-stone-700 text-stone-300 bg-stone-900/40 hover:border-amber-500/40 hover:text-amber-400"
-            }`}
-            data-testid="trail-detail-save"
-          >
-            {saveStatus === "saving" ? (
-              <>
-                <span className="w-3.5 h-3.5 border-2 border-stone-500/40 border-t-stone-200 rounded-full animate-spin"></span>
-                Saving…
-              </>
-            ) : saveStatus === "saved" ? (
-              <>
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="#f0a832" stroke="#f0a832" strokeWidth="2">
-                  <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-                </svg>
-                Saved
-              </>
-            ) : saveStatus === "needsAuth" ? (
-              <span
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setLocation("/sign-in");
-                }}
-                className="cursor-pointer"
-              >
-                Sign in to save
-              </span>
-            ) : saveStatus === "error" ? (
-              <>Try Again</>
-            ) : (
-              <>
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-                </svg>
-                Save
-              </>
-            )}
-          </button>
+        {/* Tab content */}
+        <div className="flex-1 overflow-y-auto">
+          {activeTab === "overview" ? (
+            <OverviewPanel
+              trail={trail}
+              diff={diff}
+              diffColor={diffColor}
+              diffLabel={diffLabel}
+              inPlannerRoute={inPlannerRoute}
+              saveStatus={saveStatus}
+              handleAddToPlanner={handleAddToPlanner}
+              handleSave={handleSave}
+              setLocation={setLocation}
+            />
+          ) : null}
+          {activeTab === "notes" ? (
+            <TrailNotesPanel trailId={trail.id} onCountsChanged={refreshCounts} />
+          ) : null}
+          {activeTab === "photos" ? (
+            <TrailPhotosPanel trailId={trail.id} onCountsChanged={refreshCounts} />
+          ) : null}
+          {activeTab === "amendments" ? (
+            <TrailAmendmentsPanel
+              trail={trail}
+              onCountsChanged={refreshCounts}
+              canModerate={perms.canModerate}
+            />
+          ) : null}
         </div>
+      </div>
+    </div>
+  );
+}
+
+interface OverviewProps {
+  trail: Trail;
+  diff: number;
+  diffColor: string;
+  diffLabel: string;
+  inPlannerRoute: boolean;
+  saveStatus: "idle" | "saving" | "saved" | "error" | "needsAuth";
+  handleAddToPlanner: () => void;
+  handleSave: () => void;
+  setLocation: (path: string) => void;
+}
+
+function OverviewPanel({
+  trail,
+  diff,
+  diffColor,
+  diffLabel,
+  inPlannerRoute,
+  saveStatus,
+  handleAddToPlanner,
+  handleSave,
+  setLocation,
+}: OverviewProps) {
+  return (
+    <div data-testid="trail-overview-panel">
+      <div className="px-4 pt-3 pb-3 grid grid-cols-2 gap-2">
+        <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
+          <div className="text-[9px] text-stone-500 uppercase tracking-wider">Type</div>
+          <div className="text-sm font-bold text-stone-200 truncate">
+            {trail.legal_status || trail.type || "Trail"}
+          </div>
+        </div>
+        <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
+          <div className="text-[9px] text-stone-500 uppercase tracking-wider">Distance</div>
+          <div className="text-sm font-bold text-stone-200">
+            {trail.distance_km != null ? `${trail.distance_km.toFixed(1)} km` : "—"}
+          </div>
+        </div>
+        <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
+          <div className="text-[9px] text-stone-500 uppercase tracking-wider">Surface</div>
+          <div className="text-sm font-bold text-stone-200 truncate">
+            {trail.terrain || "Off-road"}
+          </div>
+        </div>
+        <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
+          <div className="text-[9px] text-stone-500 uppercase tracking-wider">Difficulty</div>
+          <div className="text-sm font-bold" style={{ color: diffColor }}>
+            {diff}/10 · {diffLabel}
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 pb-5 pt-1 grid grid-cols-2 gap-2">
+        <button
+          onClick={handleAddToPlanner}
+          className={`group py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
+            inPlannerRoute
+              ? "bg-amber-500/15 border border-amber-500/40 text-amber-400 hover:bg-red-500/15 hover:border-red-500/50 hover:text-red-400"
+              : "text-stone-900 shadow-lg shadow-amber-900/30"
+          }`}
+          style={
+            inPlannerRoute
+              ? undefined
+              : { background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" }
+          }
+          data-testid="trail-detail-add-planner"
+          aria-pressed={inPlannerRoute}
+        >
+          {inPlannerRoute ? (
+            <>
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 group-hover:hidden" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 hidden group-hover:block" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="6" y1="6" x2="18" y2="18" />
+                <line x1="6" y1="18" x2="18" y2="6" />
+              </svg>
+              <span className="group-hover:hidden">In Planner</span>
+              <span className="hidden group-hover:inline">Remove</span>
+            </>
+          ) : (
+            <>
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Add to Planner
+            </>
+          )}
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={saveStatus === "saving" || saveStatus === "saved"}
+          className={`py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border ${
+            saveStatus === "saved"
+              ? "border-amber-500/40 bg-amber-500/15 text-amber-400 cursor-default"
+              : saveStatus === "error" || saveStatus === "needsAuth"
+              ? "border-red-500/50 text-red-400 bg-red-500/10"
+              : "border-stone-700 text-stone-300 bg-stone-900/40 hover:border-amber-500/40 hover:text-amber-400"
+          }`}
+          data-testid="trail-detail-save"
+        >
+          {saveStatus === "saving" ? (
+            <>
+              <span className="w-3.5 h-3.5 border-2 border-stone-500/40 border-t-stone-200 rounded-full animate-spin"></span>
+              Saving…
+            </>
+          ) : saveStatus === "saved" ? (
+            <>
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="#f0a832" stroke="#f0a832" strokeWidth="2">
+                <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+              </svg>
+              Saved
+            </>
+          ) : saveStatus === "needsAuth" ? (
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                setLocation("/sign-in");
+              }}
+              className="cursor-pointer"
+            >
+              Sign in to save
+            </span>
+          ) : saveStatus === "error" ? (
+            <>Try Again</>
+          ) : (
+            <>
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+              </svg>
+              Save
+            </>
+          )}
+        </button>
       </div>
     </div>
   );

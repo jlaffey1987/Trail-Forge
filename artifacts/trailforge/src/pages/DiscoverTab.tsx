@@ -1,5 +1,9 @@
 import { useState, useEffect } from "react";
 import { fetchCommunityTrails, type Trail } from "@/lib/supabase";
+import {
+  fetchTrailActivityCounts,
+  type TrailActivityCounts,
+} from "@/lib/trailContent";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -41,11 +45,15 @@ export default function DiscoverTab() {
   const [trails, setTrails] = useState<Trail[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [activityCounts, setActivityCounts] = useState<Record<string, TrailActivityCounts>>({});
 
   useEffect(() => {
     fetchCommunityTrails().then((data) => {
       setTrails(data);
       setLoading(false);
+      if (data.length > 0) {
+        fetchTrailActivityCounts(data.map((t) => t.id)).then(setActivityCounts);
+      }
     });
   }, []);
 
@@ -181,6 +189,15 @@ export default function DiscoverTab() {
                       <span className="text-xs text-stone-500 bg-stone-800/40 px-2 py-0.5 rounded">
                         {trail.terrain || "Mixed"}
                       </span>
+                    </div>
+
+                    <div
+                      className="text-[10px] text-stone-500 mb-2"
+                      data-testid={`trail-card-counts-${trail.id}`}
+                    >
+                      {(activityCounts[trail.id]?.notes ?? 0)} notes ·{" "}
+                      {(activityCounts[trail.id]?.photos ?? 0)} photos ·{" "}
+                      {(activityCounts[trail.id]?.pending ?? 0)} pending
                     </div>
 
                     <div className="flex items-center justify-between pt-2 border-t border-[hsl(30,12%,16%)]">
