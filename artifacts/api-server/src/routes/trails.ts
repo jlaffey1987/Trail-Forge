@@ -185,8 +185,11 @@ router.post("/trails", async (req: Request, res: Response) => {
   }
 
   // Privacy selector takes precedence over is_public, defaulting to PRIVATE
-  // for safety. Group sharing is not yet implemented; we treat it as private
-  // until the groups task lands.
+  // for safety. "group" privacy keeps the trail row itself private
+  // (is_public=false) — group visibility is layered on top via rows in
+  // `trail_shares` and surfaced to members through `/api/me/group-trails`.
+  // Callers create the share rows in a follow-up `PUT /api/trails/:id/shares`
+  // request once they have the new trail id.
   const data = parsed.data;
   let isPublic = data.is_public ?? false;
   if (extras.data.privacy === "public") isPublic = true;
@@ -332,6 +335,10 @@ router.patch(
       return;
     }
 
+    // See POST /trails for the privacy → is_public mapping. "group" privacy
+    // keeps the trail row private; group share rows are managed separately
+    // via `PUT /api/trails/:id/shares` (so this endpoint never touches the
+    // `trail_shares` table).
     const update: Record<string, unknown> = { ...parsed.data };
     if (parsed.data.privacy === "public") update.is_public = true;
     else if (parsed.data.privacy === "private") update.is_public = false;

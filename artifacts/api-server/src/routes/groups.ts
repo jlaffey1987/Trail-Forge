@@ -1151,6 +1151,12 @@ router.get(
 // REPLACE trail shares (owner only). Body: { group_ids: string[] }.
 // Adds new shares, removes shares not in the list. Each group_id must be
 // one the caller is a member of.
+//
+// This is the second step of the two-step group-share flow: the trail row
+// itself is created/updated by `routes/trails.ts` (POST /trails or
+// PATCH /trails/:id) with `privacy: "group"` (which keeps `is_public=false`),
+// and group visibility is layered on by writing rows here. Reads come back
+// out via `GET /me/group-trails` further below.
 // ---------------------------------------------------------------------------
 
 router.put(
