@@ -34,9 +34,103 @@ export interface TrailBbox {
 // Module-level cache shared across PlannerMap and MapTab.
 const gpxCache = new Map<string, Waypoint[]>();
 const bboxCache = new Map<string, TrailBbox | null>();
+// Cache the [lat, lng] points used for rendering. Populated from the
+// pre-simplified columns (migration 0008) when present, with a fallback to
+// parsing `gpx_data` on the device.
+const latLngCache = new Map<string, [number, number][]>();
 // Cache simplified polyline arrays per trail per zoom-bucket to avoid redoing
 // Douglas–Peucker on every pan.
 const simplifiedCache = new Map<string, Map<number, [number, number][]>>();
+
+/**
+ * Decode a Google encoded polyline (precision 5) into `[lat, lng]` pairs.
+ *
+ * Used to read the `simplified_path` column written by the migration 0008
+ * trigger. Mirrors the algorithm from the @googlemaps/polyline-codec
+ * reference implementation, kept inline to avoid pulling a dependency.
+ */
+export function decodePolyline(encoded: string): [number, number][] {
+  const points: [number, number][] = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+  const len = encoded.length;
+  while (index < len) {
+    let result = 0;
+    let shift = 0;
+    let b: number;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20 && index < len);
+    const dLat = (result & 1) !== 0 ? ~(result >> 1) : result >> 1;
+    lat += dLat;
+
+    result = 0;
+    shift = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20 && index < len);
+    const dLng = (result & 1) !== 0 ? ~(result >> 1) : result >> 1;
+    lng += dLng;
+
+    points.push([lat / 1e5, lng / 1e5]);
+  }
+  return points;
+}
+
+/**
+ * Return the points the Map / Planner layers should render for `trail`.
+ *
+ * Order of preference:
+ *   1. `trail.simplified_path` — encoded polyline written by migration 0008
+ *      (instant decode, no XML parse, much smaller than gpx_data).
+ *   2. `trail.path_geojson`    — GeoJSON LineString counterpart from the
+ *      same migration. Coordinates are `[lng, lat]` per the GeoJSON spec
+ *      and we flip them to Leaflet's `[lat, lng]`.
+ *   3. `parseGPX(trail.gpx_data)` — legacy fall-back used until the bbox
+ *      / simplified-path migration is applied to a given DB.
+ */
+export function getTrailLatLngs(trail: Trail): [number, number][] {
+  const cached = latLngCache.get(trail.id);
+  if (cached) return cached;
+
+  if (typeof trail.simplified_path === "string" && trail.simplified_path.length > 0) {
+    try {
+      const decoded = decodePolyline(trail.simplified_path);
+      if (decoded.length >= 2) {
+        latLngCache.set(trail.id, decoded);
+        return decoded;
+      }
+    } catch {
+      // Fall through to the next source if decoding throws.
+    }
+  }
+
+  const geo = trail.path_geojson;
+  if (
+    geo &&
+    typeof geo === "object" &&
+    Array.isArray((geo as { coordinates?: unknown }).coordinates)
+  ) {
+    const coords = (geo as { coordinates: Array<[number, number]> }).coordinates;
+    if (coords.length >= 2) {
+      const flipped: [number, number][] = coords.map(
+        ([lng, lat]) => [lat, lng] as [number, number],
+      );
+      latLngCache.set(trail.id, flipped);
+      return flipped;
+    }
+  }
+
+  const wps = getTrailWaypoints(trail);
+  const flipped: [number, number][] = wps.map((w) => [w.lat, w.lon]);
+  latLngCache.set(trail.id, flipped);
+  return flipped;
+}
 
 export function getTrailWaypoints(trail: Trail): Waypoint[] {
   const cached = gpxCache.get(trail.id);
@@ -48,17 +142,17 @@ export function getTrailWaypoints(trail: Trail): Waypoint[] {
 
 export function getTrailBbox(trail: Trail): TrailBbox | null {
   if (bboxCache.has(trail.id)) return bboxCache.get(trail.id) ?? null;
-  const wps = getTrailWaypoints(trail);
-  if (wps.length === 0) {
+  const latlngs = getTrailLatLngs(trail);
+  if (latlngs.length === 0) {
     bboxCache.set(trail.id, null);
     return null;
   }
   let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
-  for (const w of wps) {
-    if (w.lat < minLat) minLat = w.lat;
-    if (w.lat > maxLat) maxLat = w.lat;
-    if (w.lon < minLng) minLng = w.lon;
-    if (w.lon > maxLng) maxLng = w.lon;
+  for (const [lat, lng] of latlngs) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
   }
   const bbox = { minLat, maxLat, minLng, maxLng };
   bboxCache.set(trail.id, bbox);
@@ -124,9 +218,8 @@ export function toleranceForZoom(zoom: number): { tol: number; bucket: number } 
 }
 
 export function getSimplifiedLatLngs(trail: Trail, zoom: number): [number, number][] {
-  const wps = getTrailWaypoints(trail);
-  if (wps.length === 0) return [];
-  const full: [number, number][] = wps.map((w) => [w.lat, w.lon]);
+  const full = getTrailLatLngs(trail);
+  if (full.length === 0) return [];
   const { tol, bucket } = toleranceForZoom(zoom);
   if (tol === 0 || full.length < 50) return full;
   let perTrail = simplifiedCache.get(trail.id);
@@ -195,7 +288,7 @@ export function renderTrailLayer(
   for (const trail of trails) {
     const latlngs = options.simplifyForZoom != null
       ? getSimplifiedLatLngs(trail, options.simplifyForZoom)
-      : getTrailWaypoints(trail).map((w) => [w.lat, w.lon] as [number, number]);
+      : getTrailLatLngs(trail);
     if (latlngs.length < 2) continue;
 
     const isSelected = selectedIds.has(trail.id);

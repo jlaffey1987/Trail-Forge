@@ -62,6 +62,21 @@ export interface Trail {
   ai_grade_rationale?: string | null;
   ai_grade_model?: string | null;
   ai_graded_at?: string | null;
+  /**
+   * Pre-simplified Google encoded polyline (precision 5) derived from
+   * `gpx_data` by the trigger added in migration 0008. The Map tab decodes
+   * this directly so it can render trails without an XML parse pass.
+   */
+  simplified_path?: string | null;
+  /**
+   * GeoJSON LineString counterpart of `simplified_path`, also written by
+   * the migration 0008 trigger. Either column is sufficient on its own —
+   * the polyline form is more compact, the GeoJSON form is structured for
+   * consumers that prefer it.
+   */
+  path_geojson?: { type: "LineString"; coordinates: [number, number][] } | null;
+  /** Number of points stored in the simplified path. */
+  path_point_count?: number | null;
 }
 
 export interface MapBbox {
