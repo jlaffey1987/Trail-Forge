@@ -10,7 +10,7 @@ import {
   getTrailStart,
   type TrailRoute,
 } from "@/lib/gpx";
-import type { Trail } from "@/lib/supabase";
+import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -39,11 +39,51 @@ export default function RouteBuilder({ selectedTrails, onReorder, onRemove, onCl
   const [downloading, setDownloading] = useState(false);
   const [gpxReady, setGpxReady] = useState(false);
   const [transitDistances, setTransitDistances] = useState<number[]>([]);
+  // The Map tab no longer ships `gpx_data` with bbox responses, so trails
+  // added to the planner from the map arrive without it. We hydrate the
+  // missing GPX here on demand so the combined GPX export and the per-trail
+  // start/end points used for transit math work correctly.
+  const [hydratedTrails, setHydratedTrails] = useState<Trail[]>(selectedTrails);
+  const [loadingGpx, setLoadingGpx] = useState(false);
 
-  const routes = selectedTrails.map(trailToRoute);
-  const totalTrailKm = selectedTrails.reduce((s, t) => s + (t.distance_km ?? 0), 0);
+  const routes = hydratedTrails.map(trailToRoute);
+  const totalTrailKm = hydratedTrails.reduce((s, t) => s + (t.distance_km ?? 0), 0);
   const totalWithTransit = calcRouteDistanceKm(routes);
   const transitKm = totalWithTransit - totalTrailKm;
+
+  useEffect(() => {
+    setHydratedTrails(selectedTrails);
+    const missing = Array.from(
+      new Set(
+        selectedTrails.filter((t) => t.gpx_data == null).map((t) => t.id),
+      ),
+    );
+    if (missing.length === 0) {
+      // Nothing to hydrate — make sure we don't leave the button stuck in
+      // a "Loading…" state from a previous run that got cancelled.
+      setLoadingGpx(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingGpx(true);
+    void fetchTrailGpxByIds(missing).then((gpxMap) => {
+      if (cancelled) return;
+      setHydratedTrails((prev) =>
+        prev.map((t) => {
+          if (t.gpx_data != null) return t;
+          const g = gpxMap.get(t.id);
+          return g != null ? { ...t, gpx_data: g } : t;
+        }),
+      );
+      setLoadingGpx(false);
+    });
+    return () => {
+      // Mark this fetch cancelled. The next effect run is responsible for
+      // resetting `loadingGpx` based on whether new hydration is needed,
+      // which keeps the button state consistent with the latest selection.
+      cancelled = true;
+    };
+  }, [selectedTrails]);
 
   useEffect(() => {
     const dists: number[] = [];
@@ -61,8 +101,11 @@ export default function RouteBuilder({ selectedTrails, onReorder, onRemove, onCl
       }
     }
     setTransitDistances(dists);
-    setGpxReady(routes.every((r) => r.waypoints.length > 0));
-  }, [selectedTrails]);
+    setGpxReady(
+      hydratedTrails.length > 0 &&
+        routes.every((r) => r.waypoints.length > 0),
+    );
+  }, [hydratedTrails]);
 
   const moveUp = (idx: number) => {
     if (idx === 0) return;
@@ -261,14 +304,19 @@ export default function RouteBuilder({ selectedTrails, onReorder, onRemove, onCl
           {/* Download GPX */}
           <button
             onClick={handleDownloadGPX}
-            disabled={downloading || !gpxReady}
+            disabled={downloading || loadingGpx || !gpxReady}
             className="w-full py-3.5 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2"
-            style={{ background: gpxReady ? "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" : "hsl(22,15%,16%)", color: gpxReady ? "#1a0e05" : "#6b7280" }}
+            style={{ background: gpxReady && !loadingGpx ? "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" : "hsl(22,15%,16%)", color: gpxReady && !loadingGpx ? "#1a0e05" : "#6b7280" }}
           >
             {downloading ? (
               <>
                 <span className="w-4 h-4 border-2 border-stone-900/50 border-t-stone-900 rounded-full animate-spin"></span>
                 Generating GPX...
+              </>
+            ) : loadingGpx ? (
+              <>
+                <span className="w-4 h-4 border-2 border-stone-500/40 border-t-stone-300 rounded-full animate-spin"></span>
+                Loading trail data...
               </>
             ) : (
               <>
@@ -282,7 +330,7 @@ export default function RouteBuilder({ selectedTrails, onReorder, onRemove, onCl
             )}
           </button>
 
-          {!gpxReady && (
+          {!gpxReady && !loadingGpx && (
             <p className="text-[10px] text-stone-600 text-center">GPX data unavailable for some trails</p>
           )}
 

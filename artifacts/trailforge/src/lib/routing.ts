@@ -1,4 +1,4 @@
-import type { Trail } from "@/lib/supabase";
+import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
 import { parseGPX } from "@/lib/gpx";
 
 export interface GeoPoint {
@@ -166,8 +166,25 @@ export async function assembleMultiModalRoute(
   const totalSteps = trails.length * 2 + 1;
   let stepNo = 0;
 
-  for (let i = 0; i < trails.length; i++) {
-    const trail = trails[i];
+  // Trails coming from the slim Map-tab fetch don't carry `gpx_data`. We
+  // need the full GPX here to build the trail polyline, so lazy-fetch it
+  // for any trail that's missing it before we start assembling.
+  const missingGpxIds = Array.from(
+    new Set(trails.filter((t) => t.gpx_data == null).map((t) => t.id)),
+  );
+  let workingTrails = trails;
+  if (missingGpxIds.length > 0) {
+    onProgress?.(0, totalSteps, "Loading trail data");
+    const gpxMap = await fetchTrailGpxByIds(missingGpxIds);
+    workingTrails = trails.map((t) => {
+      if (t.gpx_data != null) return t;
+      const g = gpxMap.get(t.id);
+      return g != null ? { ...t, gpx_data: g } : t;
+    });
+  }
+
+  for (let i = 0; i < workingTrails.length; i++) {
+    const trail = workingTrails[i];
     const waypoints = parseGPX(trail.gpx_data);
     if (waypoints.length < 2) {
       skippedTrails.push(trail.name);
@@ -225,7 +242,7 @@ export async function assembleMultiModalRoute(
   onProgress?.(stepNo, totalSteps, `Routing final road to ${end.label || "destination"}`);
   const finalRoute = await getRoadRoute([currentPoint, end]);
   if (finalRoute) {
-    const fromLabel = trails.length === 0 ? (start.label || "Start") : `Trail ${trails.length} exit`;
+    const fromLabel = workingTrails.length === 0 ? (start.label || "Start") : `Trail ${workingTrails.length} exit`;
     sections.push({
       kind: "road",
       index: sectionIdx++,

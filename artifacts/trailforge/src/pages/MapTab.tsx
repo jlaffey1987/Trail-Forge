@@ -7,7 +7,7 @@ import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTr
 import SaveTrailForm from "@/components/contribute/SaveTrailForm";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import MapRoutePanel from "@/components/MapRoutePanel";
-import { parseGPX, getTrailStart, getTrailEnd } from "@/lib/gpx";
+import { getTrailLatLngs } from "@/lib/trailLayer";
 import { useLeaflet } from "@/lib/useLeaflet";
 import {
   addTrail,
@@ -412,19 +412,23 @@ export default function MapTab() {
     const newLines: import("leaflet").Polyline[] = [];
     try {
       for (let i = 0; i < routeTrails.length - 1; i++) {
-        const fromWp = parseGPX(routeTrails[i].gpx_data);
-        const toWp = parseGPX(routeTrails[i + 1].gpx_data);
-        const fromEnd = getTrailEnd(fromWp);
-        const toStart = getTrailStart(toWp);
-        if (!fromEnd || !toStart) continue;
+        // Prefer simplified_path / path_geojson — bbox responses no longer
+        // include gpx_data, and route-connector lines only need the trail
+        // endpoints. Falls back to parseGPX(gpx_data) automatically when
+        // the simplified columns aren't populated yet.
+        const fromLatLngs = getTrailLatLngs(routeTrails[i]);
+        const toLatLngs = getTrailLatLngs(routeTrails[i + 1]);
+        if (fromLatLngs.length < 1 || toLatLngs.length < 1) continue;
+        const fromEndPt = fromLatLngs[fromLatLngs.length - 1];
+        const toStartPt = toLatLngs[0];
         if (
-          !Number.isFinite(fromEnd.lat) || !Number.isFinite(fromEnd.lon) ||
-          !Number.isFinite(toStart.lat) || !Number.isFinite(toStart.lon)
+          !Number.isFinite(fromEndPt[0]) || !Number.isFinite(fromEndPt[1]) ||
+          !Number.isFinite(toStartPt[0]) || !Number.isFinite(toStartPt[1])
         ) continue;
         const pl = L.polyline(
           [
-            [fromEnd.lat, fromEnd.lon],
-            [toStart.lat, toStart.lon],
+            [fromEndPt[0], fromEndPt[1]],
+            [toStartPt[0], toStartPt[1]],
           ],
           {
             color: "#f0a832",

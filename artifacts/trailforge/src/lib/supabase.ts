@@ -35,7 +35,14 @@ export interface Trail {
   distance_km: number | null;
   terrain: string | null;
   legal_status: string | null;
-  gpx_data: unknown | null;
+  /**
+   * Raw GPX XML for the trail. Heavy. Intentionally OMITTED from the bbox
+   * Map-tab fetch (`fetchTrailsInBbox`) — the Map renders from
+   * `simplified_path` / `path_geojson` instead, which are much smaller.
+   * Fetched lazily via `fetchTrailGpxByIds` when the user opens a trail or
+   * starts route planning.
+   */
+  gpx_data?: unknown | null;
   is_public: boolean;
   created_at: string;
   bbox_min_lat?: number | null;
@@ -93,12 +100,55 @@ export interface BboxFetchOptions {
 }
 
 /**
+ * Slim projection used by the Map tab — every Trail column EXCEPT `gpx_data`.
+ *
+ * The raw GPX XML is the dominant payload (often 50–500 KB per trail), and
+ * the Map tab now renders trails using the much smaller `simplified_path` /
+ * `path_geojson` columns added by migration 0008. Fetching `gpx_data` for
+ * every trail in the viewport was wasting 5–20× more bandwidth than needed
+ * on slow connections. `gpx_data` is fetched lazily via `fetchTrailGpxByIds`
+ * when the user opens a trail or starts route planning.
+ */
+const TRAIL_SLIM_COLUMNS = [
+  "id",
+  "user_id",
+  "owner_user_id",
+  "name",
+  "type",
+  "difficulty",
+  "distance_km",
+  "terrain",
+  "legal_status",
+  "is_public",
+  "created_at",
+  "bbox_min_lat",
+  "bbox_max_lat",
+  "bbox_min_lng",
+  "bbox_max_lng",
+  "description",
+  "deleted_at",
+  "gpx_object_path",
+  "source",
+  "source_url",
+  "verification_status",
+  "ai_grade",
+  "ai_grade_rationale",
+  "ai_grade_model",
+  "ai_graded_at",
+  "simplified_path",
+  "path_geojson",
+  "path_point_count",
+].join(",");
+
+/**
  * Fetch public trails whose bounding box intersects the given viewport.
  *
  * Uses the bbox columns added by `supabase/migrations/0001_trail_bbox.sql`
- * when present. If the columns are missing (migration not yet applied),
- * gracefully falls back to fetching all public trails (capped) so the Map
- * tab still works — the caller can filter client-side using the GPX cache.
+ * and the slim projection (no `gpx_data`) so the Map tab stays fast on slow
+ * connections. If the bbox columns are missing (migration not yet applied)
+ * we fall back to fetching all public trails (capped). If the simplified
+ * path columns from migration 0008 are also missing we further fall back
+ * to `select("*")` so older databases keep working.
  */
 export async function fetchTrailsInBbox(
   bbox: MapBbox,
@@ -106,48 +156,106 @@ export async function fetchTrailsInBbox(
 ): Promise<{ trails: Trail[]; usedBbox: boolean }> {
   const limit = opts.limit ?? 200;
 
-  let q = supabase
-    .from("trails")
-    .select("*")
-    .eq("is_public", true)
-    .lte("bbox_min_lat", bbox.maxLat)
-    .gte("bbox_max_lat", bbox.minLat)
-    .lte("bbox_min_lng", bbox.maxLng)
-    .gte("bbox_max_lng", bbox.minLng);
+  const buildBbox = (cols: string) => {
+    let q = supabase
+      .from("trails")
+      .select(cols)
+      .eq("is_public", true)
+      .lte("bbox_min_lat", bbox.maxLat)
+      .gte("bbox_max_lat", bbox.minLat)
+      .lte("bbox_min_lng", bbox.maxLng)
+      .gte("bbox_max_lng", bbox.minLng);
+    if (opts.difficulties && opts.difficulties.length > 0) {
+      q = q.in("difficulty", opts.difficulties);
+    }
+    if (opts.trailTypes && opts.trailTypes.length > 0) {
+      q = q.in("legal_status", opts.trailTypes);
+    }
+    return q.limit(limit);
+  };
 
-  if (opts.difficulties && opts.difficulties.length > 0) {
-    q = q.in("difficulty", opts.difficulties);
+  const buildAll = (cols: string) => {
+    let q = supabase.from("trails").select(cols).eq("is_public", true);
+    if (opts.difficulties && opts.difficulties.length > 0) {
+      q = q.in("difficulty", opts.difficulties);
+    }
+    if (opts.trailTypes && opts.trailTypes.length > 0) {
+      q = q.in("legal_status", opts.trailTypes);
+    }
+    return q.limit(limit);
+  };
+
+  // Try slim + bbox first (the fast path).
+  let { data, error } = await buildBbox(TRAIL_SLIM_COLUMNS);
+  if (!error) {
+    return { trails: (data as unknown as Trail[]) || [], usedBbox: true };
   }
-  if (opts.trailTypes && opts.trailTypes.length > 0) {
-    q = q.in("legal_status", opts.trailTypes);
-  }
 
-  const { data, error } = await q.limit(limit);
+  const msg = error.message ?? "";
+  const isMissingColumn = error.code === "42703" || /column/i.test(msg);
 
-  if (error) {
-    if (
-      error.code === "42703" ||
-      /bbox|column/i.test(error.message ?? "")
-    ) {
-      let fallback = supabase.from("trails").select("*").eq("is_public", true);
-      if (opts.difficulties && opts.difficulties.length > 0) {
-        fallback = fallback.in("difficulty", opts.difficulties);
+  if (isMissingColumn) {
+    // Bbox columns missing → fall back to fetching all public trails.
+    if (/bbox/i.test(msg)) {
+      let r = await buildAll(TRAIL_SLIM_COLUMNS);
+      if (r.error && (r.error.code === "42703" || /column/i.test(r.error.message ?? ""))) {
+        // simplified_path / path_geojson also missing → final fallback to "*".
+        r = await buildAll("*");
       }
-      if (opts.trailTypes && opts.trailTypes.length > 0) {
-        fallback = fallback.in("legal_status", opts.trailTypes);
-      }
-      const { data: allData, error: fallbackErr } = await fallback.limit(limit);
-      if (fallbackErr) {
-        console.error("Trail bbox fallback fetch failed:", fallbackErr.message);
+      if (r.error) {
+        console.error("Trail bbox fallback fetch failed:", r.error.message);
         return { trails: [], usedBbox: false };
       }
-      return { trails: (allData as Trail[]) || [], usedBbox: false };
+      return { trails: (r.data as unknown as Trail[]) || [], usedBbox: false };
     }
-    console.error("Trail bbox fetch failed:", error.message);
+
+    // Slim columns missing (migration 0008 not applied) → retry bbox with "*".
+    const r = await buildBbox("*");
+    if (!r.error) {
+      return { trails: (r.data as unknown as Trail[]) || [], usedBbox: true };
+    }
+    if (r.error.code === "42703" && /bbox/i.test(r.error.message ?? "")) {
+      const all = await buildAll("*");
+      if (all.error) {
+        console.error("Trail bbox fallback fetch failed:", all.error.message);
+        return { trails: [], usedBbox: false };
+      }
+      return { trails: (all.data as unknown as Trail[]) || [], usedBbox: false };
+    }
+    console.error("Trail bbox fetch failed:", r.error.message);
     return { trails: [], usedBbox: false };
   }
 
-  return { trails: (data as Trail[]) || [], usedBbox: true };
+  console.error("Trail bbox fetch failed:", msg);
+  return { trails: [], usedBbox: false };
+}
+
+/**
+ * Lazy-fetch the raw `gpx_data` XML for the given trail ids.
+ *
+ * Used by the planner / route-builder flows that need full GPX (combined
+ * GPX export, multi-modal road routing, etc) for trails that came from the
+ * slim Map-tab response. Anon-key reads are constrained by RLS to public
+ * trails — for private group-shared trails the gpx_data is already
+ * populated when the trail row arrives via `/api/me/group-trails`.
+ */
+export async function fetchTrailGpxByIds(
+  trailIds: string[],
+): Promise<Map<string, unknown>> {
+  const out = new Map<string, unknown>();
+  if (trailIds.length === 0) return out;
+  const { data, error } = await supabase
+    .from("trails")
+    .select("id, gpx_data")
+    .in("id", trailIds);
+  if (error) {
+    console.error("fetchTrailGpxByIds error:", error.message);
+    return out;
+  }
+  for (const row of (data as Array<{ id: string; gpx_data: unknown }>) || []) {
+    out.set(row.id, row.gpx_data);
+  }
+  return out;
 }
 
 export async function fetchCommunityTrails(): Promise<Trail[]> {
