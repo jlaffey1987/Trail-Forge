@@ -16,8 +16,13 @@ import {
 import { mapBboxStore } from "@/lib/mapBboxStore";
 import {
   renderTrailLayer,
+  renderTrailClusters,
+  clusterTrails,
   type TrailLayerHandle,
+  type ClusterLayerHandle,
+  type TrailCluster,
   DIFFICULTY_BUCKETS,
+  CLUSTER_ZOOM_THRESHOLD,
   getTrailBbox,
   bboxesIntersect,
 } from "@/lib/trailLayer";
@@ -66,6 +71,7 @@ export default function MapTab() {
   const tileLayerRef = useRef<import("leaflet").TileLayer | null>(null);
   const layerPolylinesRef = useRef<Map<string, import("leaflet").Polyline[]>>(new Map());
   const trailLayerHandleRef = useRef<TrailLayerHandle | null>(null);
+  const clusterLayerHandleRef = useRef<ClusterLayerHandle | null>(null);
   const fetchSeqRef = useRef(0);
   const fetchDebounceRef = useRef<number | null>(null);
 
@@ -303,17 +309,68 @@ export default function MapTab() {
     // currentZoom included so recompute when viewport changes.
   }, [visibleTrails, currentZoom]);
 
-  // (Re)render trail layer whenever inputs change. The layer renders in every
-  // mode; only Explore makes the polylines clickable.
+  // (Re)render trail layer whenever inputs change. Below the cluster zoom
+  // threshold we render aggregated cluster markers instead of every polyline
+  // so the country / region view stays readable. The polyline layer renders
+  // in every mode; only Explore makes the polylines clickable.
   useEffect(() => {
     if (!mapRef.current || !window.L) return;
     trailLayerHandleRef.current?.clear();
     trailLayerHandleRef.current = null;
+    clusterLayerHandleRef.current?.clear();
+    clusterLayerHandleRef.current = null;
 
     if (trailsForRender.length === 0) return;
 
     const isExplore = mapMode === "explore";
-    const handle = renderTrailLayer(mapRef.current, trailsForRender, {
+    const map = mapRef.current;
+
+    if (currentZoom < CLUSTER_ZOOM_THRESHOLD) {
+      const clusters = clusterTrails(trailsForRender, currentZoom);
+      const handle = renderTrailClusters(map, clusters, {
+        pane: "trailsPane",
+        interactive: isExplore,
+        onClusterClick: isExplore
+          ? (cluster: TrailCluster) => {
+              try {
+                // Single-trail clusters: jump straight to the trail bbox.
+                if (cluster.count === 1) {
+                  const L = window.L;
+                  const bounds = L.latLngBounds(
+                    [cluster.bbox.minLat, cluster.bbox.minLng],
+                    [cluster.bbox.maxLat, cluster.bbox.maxLng],
+                  );
+                  map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+                  return;
+                }
+                // Multi-trail clusters: zoom into the cluster bbox, but cap
+                // at one level past the threshold so users can keep drilling.
+                const L = window.L;
+                const bounds = L.latLngBounds(
+                  [cluster.bbox.minLat, cluster.bbox.minLng],
+                  [cluster.bbox.maxLat, cluster.bbox.maxLng],
+                );
+                const targetMax = Math.max(
+                  CLUSTER_ZOOM_THRESHOLD,
+                  Math.min(CLUSTER_ZOOM_THRESHOLD + 2, currentZoom + 3),
+                );
+                map.fitBounds(bounds, { padding: [40, 40], maxZoom: targetMax });
+              } catch {
+                // fitBounds can throw on degenerate bboxes — fall back to
+                // a simple setView at the cluster centroid.
+                map.setView(
+                  [cluster.lat, cluster.lng],
+                  Math.min(CLUSTER_ZOOM_THRESHOLD + 1, currentZoom + 3),
+                );
+              }
+            }
+          : undefined,
+      });
+      clusterLayerHandleRef.current = handle;
+      return;
+    }
+
+    const handle = renderTrailLayer(map, trailsForRender, {
       selectedIds: routeIdSet,
       selectedColor: "#f0a832",
       showLabels: false,
@@ -331,6 +388,7 @@ export default function MapTab() {
     return () => {
       if (fetchDebounceRef.current != null) window.clearTimeout(fetchDebounceRef.current);
       trailLayerHandleRef.current?.clear();
+      clusterLayerHandleRef.current?.clear();
     };
   }, []);
 
@@ -629,6 +687,11 @@ ${trkpts}
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
                 <span data-testid="map-trail-count">{trailsForRender.length}</span> trail{trailsForRender.length !== 1 ? "s" : ""} in view
+                {currentZoom < CLUSTER_ZOOM_THRESHOLD && trailsForRender.length > 0 && (
+                  <span className="text-stone-400 ml-1" data-testid="map-cluster-hint">
+                    · clustered, zoom in for detail
+                  </span>
+                )}
                 {usedServerBbox === false && allTrails.length >= 200 && (
                   <span className="text-amber-400 ml-1" title="Apply the bbox migration for faster loads">⚠</span>
                 )}

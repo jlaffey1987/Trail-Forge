@@ -232,6 +232,214 @@ export function getSimplifiedLatLngs(trail: Trail, zoom: number): [number, numbe
 }
 
 // ---------------------------------------------------------------------------
+// Trail clustering — at low zoom levels we collapse trails into a small
+// number of grid-cell clusters instead of drawing every polyline. This keeps
+// the country / region view readable and panning smooth.
+// ---------------------------------------------------------------------------
+
+/** Below this zoom level the Map renders clusters instead of polylines. */
+export const CLUSTER_ZOOM_THRESHOLD = 10;
+
+export interface TrailCluster {
+  /** Cluster centroid (mean of member trail centers). */
+  lat: number;
+  lng: number;
+  /** Number of trails aggregated into this cluster. */
+  count: number;
+  /** IDs of the trails grouped here. */
+  trailIds: string[];
+  /** Average difficulty (1..10) across members with a difficulty set. */
+  avgDifficulty: number | null;
+  /** Color matching the difficulty bucket of `avgDifficulty`. */
+  color: string;
+  /** Bounding box covering all member trails — used to zoom in on tap. */
+  bbox: TrailBbox;
+}
+
+/**
+ * Cell size in degrees used to grid-bucket trails into clusters at the given
+ * Leaflet zoom. Smaller cells at higher zoom so clusters split apart as the
+ * user zooms in. Tuned so a typical phone viewport shows ~3-8 clusters at
+ * each zoom step below the threshold.
+ */
+export function clusterCellSize(zoom: number): number {
+  if (zoom <= 3) return 16;
+  if (zoom <= 4) return 8;
+  if (zoom <= 5) return 4;
+  if (zoom <= 6) return 2;
+  if (zoom <= 7) return 1;
+  if (zoom <= 8) return 0.5;
+  return 0.25; // zoom 9
+}
+
+// Exported so the bucket mapping is unit-testable and reusable.
+export function bucketColorForDifficulty(d: number | null): string {
+  if (d == null) return "#a3a3a3";
+  // Cluster averages are fractional (e.g. 3.5, 6.5). Round to the nearest
+  // integer first so a value lands in exactly one bucket — without this,
+  // 3.5 / 6.5 / 8.5 would fall through every range check and incorrectly
+  // pick the last bucket. Clamp to the valid 1..10 difficulty domain.
+  const rounded = Math.max(1, Math.min(10, Math.round(d)));
+  for (const b of DIFFICULTY_BUCKETS) {
+    if (rounded >= b.range[0] && rounded <= b.range[1]) return b.color;
+  }
+  // Unreachable given DIFFICULTY_BUCKETS covers 1..10 — defensive fallback.
+  return DIFFICULTY_BUCKETS[DIFFICULTY_BUCKETS.length - 1].color;
+}
+
+/**
+ * Group `trails` into spatial clusters based on their bbox centers.
+ * Trails without a usable bbox are skipped (same as polyline rendering).
+ */
+export function clusterTrails(trails: Trail[], zoom: number): TrailCluster[] {
+  const cellSize = clusterCellSize(zoom);
+  interface Bucket {
+    latSum: number;
+    lngSum: number;
+    diffSum: number;
+    diffCount: number;
+    ids: string[];
+    minLat: number;
+    maxLat: number;
+    minLng: number;
+    maxLng: number;
+  }
+  const cells = new Map<string, Bucket>();
+
+  for (const t of trails) {
+    const bbox = getTrailBbox(t);
+    if (!bbox) continue;
+    const cLat = (bbox.minLat + bbox.maxLat) / 2;
+    const cLng = (bbox.minLng + bbox.maxLng) / 2;
+    const key = `${Math.floor(cLat / cellSize)}:${Math.floor(cLng / cellSize)}`;
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = {
+        latSum: 0,
+        lngSum: 0,
+        diffSum: 0,
+        diffCount: 0,
+        ids: [],
+        minLat: bbox.minLat,
+        maxLat: bbox.maxLat,
+        minLng: bbox.minLng,
+        maxLng: bbox.maxLng,
+      };
+      cells.set(key, cell);
+    }
+    cell.latSum += cLat;
+    cell.lngSum += cLng;
+    cell.ids.push(t.id);
+    if (t.difficulty != null) {
+      cell.diffSum += t.difficulty;
+      cell.diffCount += 1;
+    }
+    if (bbox.minLat < cell.minLat) cell.minLat = bbox.minLat;
+    if (bbox.maxLat > cell.maxLat) cell.maxLat = bbox.maxLat;
+    if (bbox.minLng < cell.minLng) cell.minLng = bbox.minLng;
+    if (bbox.maxLng > cell.maxLng) cell.maxLng = bbox.maxLng;
+  }
+
+  const out: TrailCluster[] = [];
+  for (const cell of cells.values()) {
+    const count = cell.ids.length;
+    const avg = cell.diffCount > 0 ? cell.diffSum / cell.diffCount : null;
+    out.push({
+      lat: cell.latSum / count,
+      lng: cell.lngSum / count,
+      count,
+      trailIds: cell.ids,
+      avgDifficulty: avg,
+      color: bucketColorForDifficulty(avg),
+      bbox: {
+        minLat: cell.minLat,
+        maxLat: cell.maxLat,
+        minLng: cell.minLng,
+        maxLng: cell.maxLng,
+      },
+    });
+  }
+  return out;
+}
+
+export interface RenderClusterLayerOptions {
+  onClusterClick?: (cluster: TrailCluster) => void;
+  pane?: string;
+  interactive?: boolean;
+}
+
+export interface ClusterLayerHandle {
+  layers: import("leaflet").Layer[];
+  clear: () => void;
+}
+
+function clusterMarkerSize(count: number): number {
+  if (count >= 100) return 56;
+  if (count >= 25) return 48;
+  if (count >= 10) return 42;
+  if (count >= 5) return 36;
+  return 32;
+}
+
+export function renderTrailClusters(
+  map: import("leaflet").Map,
+  clusters: TrailCluster[],
+  options: RenderClusterLayerOptions = {},
+): ClusterLayerHandle {
+  const L = window.L;
+  const layers: import("leaflet").Layer[] = [];
+  const interactive = options.interactive ?? true;
+  const pane = options.pane;
+
+  for (const c of clusters) {
+    const size = clusterMarkerSize(c.count);
+    const fontSize = c.count >= 100 ? 13 : c.count >= 10 ? 14 : 15;
+    const html = `<div style="
+        width:${size}px;height:${size}px;
+        border-radius:50%;
+        background:${c.color};
+        border:3px solid rgba(0,0,0,0.7);
+        box-shadow:0 2px 8px rgba(0,0,0,0.55);
+        color:#0a0a0a;
+        font-family:system-ui,-apple-system,sans-serif;
+        font-weight:900;
+        font-size:${fontSize}px;
+        display:flex;align-items:center;justify-content:center;
+        cursor:${interactive && options.onClusterClick ? "pointer" : "default"};
+      ">${c.count}</div>`;
+
+    const icon = L.divIcon({
+      html,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
+      className: "trail-cluster-marker",
+    });
+
+    const marker = L.marker([c.lat, c.lng], {
+      icon,
+      interactive,
+      ...(pane ? { pane } : {}),
+    } as Parameters<typeof L.marker>[1]).addTo(map);
+
+    if (interactive && options.onClusterClick) {
+      const handler = options.onClusterClick;
+      marker.on("click", () => handler(c));
+    }
+
+    layers.push(marker);
+  }
+
+  return {
+    layers,
+    clear: () => {
+      for (const l of layers) {
+        try { l.remove(); } catch {/**/}
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Layer renderer — used by both PlannerMap and MapTab so polyline + label
 // rendering and layer-management code is not duplicated.
 // ---------------------------------------------------------------------------
