@@ -1,5 +1,6 @@
 import { useCallback, useState, useEffect } from "react";
 import { fetchCommunityTrails, type Trail } from "@/lib/supabase";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
   fetchTrailActivityCounts,
   type TrailActivityCounts,
@@ -9,6 +10,7 @@ import {
   fetchGroupTrails,
   type SharedTrail,
 } from "@/lib/groups";
+import TrailDetailSheet from "@/components/TrailDetailSheet";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -45,12 +47,14 @@ function getPostedTime(created_at: string) {
 }
 
 export default function DiscoverTab() {
+  const { isSignedIn } = useCurrentUser();
   const [activeFilter, setActiveFilter] = useState("All");
   const [liked, setLiked] = useState<Set<string>>(new Set());
   const [trails, setTrails] = useState<SharedTrail[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [activityCounts, setActivityCounts] = useState<Record<string, TrailActivityCounts>>({});
+  const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -179,10 +183,32 @@ export default function DiscoverTab() {
               const isLiked = liked.has(trail.id);
               const likesBase = 100 + (idx * 73 + diff * 37) % 800;
 
+              const canOpenDetail = isSignedIn;
+              const openDetail = () => {
+                if (canOpenDetail) setSelectedTrail(trail);
+              };
               return (
                 <div
                   key={trail.id}
-                  className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden hover:border-amber-500/20 transition-colors"
+                  onClick={canOpenDetail ? openDetail : undefined}
+                  role={canOpenDetail ? "button" : undefined}
+                  tabIndex={canOpenDetail ? 0 : undefined}
+                  onKeyDown={
+                    canOpenDetail
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openDetail();
+                          }
+                        }
+                      : undefined
+                  }
+                  data-testid={`discover-card-${trail.id}`}
+                  className={`bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden transition-colors ${
+                    canOpenDetail
+                      ? "cursor-pointer hover:border-amber-500/40 focus:outline-none focus:border-amber-500/60"
+                      : "hover:border-amber-500/20"
+                  }`}
                 >
                   {/* Map Preview Strip */}
                   <div className={`h-20 ${preview} relative flex items-end p-2`}>
@@ -249,7 +275,13 @@ export default function DiscoverTab() {
 
                     <div className="flex items-center justify-between pt-2 border-t border-[hsl(30,12%,16%)]">
                       <div className="flex items-center gap-3">
-                        <button onClick={() => toggleLike(trail.id)} className="flex items-center gap-1 transition-colors">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleLike(trail.id);
+                          }}
+                          className="flex items-center gap-1 transition-colors"
+                        >
                           <svg viewBox="0 0 24 24" className={`w-4 h-4 ${isLiked ? "fill-red-500 stroke-red-500" : "stroke-stone-500"}`} fill="none" strokeWidth="2">
                             <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
                           </svg>
@@ -264,7 +296,16 @@ export default function DiscoverTab() {
                           <span className="text-xs text-stone-500">{Math.floor(likesBase * 0.13)}</span>
                         </div>
                       </div>
-                      <button className="text-xs text-amber-400 font-semibold hover:text-amber-300 transition-colors">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (canOpenDetail) openDetail();
+                        }}
+                        disabled={!canOpenDetail}
+                        className="text-xs text-amber-400 font-semibold hover:text-amber-300 transition-colors disabled:text-stone-500 disabled:cursor-not-allowed"
+                        title={canOpenDetail ? undefined : "Sign in to view trail details"}
+                        data-testid={`discover-card-view-${trail.id}`}
+                      >
                         View Trail
                       </button>
                     </div>
@@ -274,6 +315,13 @@ export default function DiscoverTab() {
             })
           )}
         </div>
+      )}
+
+      {selectedTrail && (
+        <TrailDetailSheet
+          trail={selectedTrail}
+          onClose={() => setSelectedTrail(null)}
+        />
       )}
     </div>
   );

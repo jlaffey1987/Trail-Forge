@@ -16,6 +16,7 @@ import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTr
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import EditTrailDialog from "@/components/contribute/EditTrailDialog";
 import GroupsSection from "@/components/groups/GroupsSection";
+import TrailDetailSheet from "@/components/TrailDetailSheet";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -37,6 +38,7 @@ export default function MyTrailsTab() {
   const [ownedTrails, setOwnedTrails] = useState<Trail[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
   const [activityCounts, setActivityCounts] = useState<Record<string, TrailActivityCounts>>({});
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showUploadGpx, setShowUploadGpx] = useState(false);
@@ -197,48 +199,61 @@ export default function MyTrailsTab() {
                   className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden"
                   data-testid={`owned-trail-${trail.id}`}
                 >
-                  <button
-                    className="w-full p-3 text-left"
-                    onClick={() => setExpandedId(isExpanded ? null : `owned-${trail.id}`)}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span
-                            className="w-5 h-5 rounded text-xs font-bold text-black flex items-center justify-center shrink-0"
-                            style={{ backgroundColor: DIFFICULTY_COLORS[diff] ?? "#fbbf24" }}
-                          >
-                            {diff}
-                          </span>
-                          <h3 className="text-sm font-bold text-stone-100 truncate">{trail.name}</h3>
-                        </div>
-                        <p className="text-xs text-stone-500">{formatDate(trail.created_at)}</p>
-                      </div>
-                      <div className="flex flex-col items-end gap-1 shrink-0">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                          trail.is_public ? "text-green-400 bg-green-900/30" : "text-stone-400 bg-stone-700/30"
-                        }`}>
-                          {trail.is_public ? "Public" : "Private"}
+                  <div className="p-3 flex items-start gap-2">
+                    <button
+                      type="button"
+                      className="flex-1 min-w-0 text-left"
+                      onClick={() => setSelectedTrail(trail)}
+                      data-testid={`owned-trail-open-${trail.id}`}
+                      aria-label={`View details for ${trail.name}`}
+                      title="View trail details"
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span
+                          className="w-5 h-5 rounded text-xs font-bold text-black flex items-center justify-center shrink-0"
+                          style={{ backgroundColor: DIFFICULTY_COLORS[diff] ?? "#fbbf24" }}
+                        >
+                          {diff}
                         </span>
+                        <h3 className="text-sm font-bold text-stone-100 truncate">{trail.name}</h3>
+                      </div>
+                      <p className="text-xs text-stone-500">{formatDate(trail.created_at)}</p>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-xs">
+                        <span className="text-stone-400">{formatDistance(trail.distance_km)}</span>
+                        <span className="text-stone-600">·</span>
+                        <span className="text-stone-400">{trail.terrain || "Mixed"}</span>
+                        <span className="text-stone-600">·</span>
+                        <span className={trail.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}>
+                          {trail.legal_status || trail.type || "Trail"}
+                        </span>
+                      </div>
+                    </button>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                        trail.is_public ? "text-green-400 bg-green-900/30" : "text-stone-400 bg-stone-700/30"
+                      }`}>
+                        {trail.is_public ? "Public" : "Private"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedId(isExpanded ? null : `owned-${trail.id}`)
+                        }
+                        className="p-1 -m-1 text-stone-500 hover:text-stone-300"
+                        aria-label={isExpanded ? "Hide actions" : "Show actions"}
+                        aria-expanded={isExpanded}
+                        data-testid={`owned-trail-toggle-${trail.id}`}
+                      >
                         <svg
                           viewBox="0 0 24 24"
-                          className={`w-4 h-4 text-stone-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                          className={`w-4 h-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
                           fill="none" stroke="currentColor" strokeWidth="2"
                         >
                           <polyline points="6 9 12 15 18 9" />
                         </svg>
-                      </div>
+                      </button>
                     </div>
-                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-xs">
-                      <span className="text-stone-400">{formatDistance(trail.distance_km)}</span>
-                      <span className="text-stone-600">·</span>
-                      <span className="text-stone-400">{trail.terrain || "Mixed"}</span>
-                      <span className="text-stone-600">·</span>
-                      <span className={trail.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}>
-                        {trail.legal_status || trail.type || "Trail"}
-                      </span>
-                    </div>
-                  </button>
+                  </div>
                   {isExpanded && (
                     <div className="border-t border-[hsl(30,12%,16%)] p-3 space-y-2">
                       {trail.description && (
@@ -310,56 +325,67 @@ export default function MyTrailsTab() {
               <div
                 key={trail.id}
                 className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden"
+                data-testid={`saved-trail-${trail.id}`}
               >
-                <button
-                  className="w-full p-3 text-left"
-                  onClick={() => setExpandedId(isExpanded ? null : trail.id)}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span
-                          className="w-5 h-5 rounded text-xs font-bold text-black flex items-center justify-center shrink-0"
-                          style={{ backgroundColor: DIFFICULTY_COLORS[diff] ?? "#fbbf24" }}
-                        >
-                          {diff}
-                        </span>
-                        <h3 className="text-sm font-bold text-stone-100">{trail.name}</h3>
-                      </div>
-                      <p className="text-xs text-stone-500">{formatDate(trail.created_at)}</p>
-                    </div>
-                    <div className="flex flex-col items-end gap-1">
-                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30">
-                        Planned
+                <div className="p-3 flex items-start gap-2">
+                  <button
+                    type="button"
+                    className="flex-1 min-w-0 text-left"
+                    onClick={() => setSelectedTrail(trail)}
+                    data-testid={`saved-trail-open-${trail.id}`}
+                    aria-label={`View details for ${trail.name}`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span
+                        className="w-5 h-5 rounded text-xs font-bold text-black flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: DIFFICULTY_COLORS[diff] ?? "#fbbf24" }}
+                      >
+                        {diff}
                       </span>
+                      <h3 className="text-sm font-bold text-stone-100">{trail.name}</h3>
+                    </div>
+                    <p className="text-xs text-stone-500">{formatDate(trail.created_at)}</p>
+
+                    <div className="flex gap-3 mt-2">
+                      <span className="text-xs text-stone-400">{formatDistance(trail.distance_km)}</span>
+                      <span className="text-xs text-stone-600">·</span>
+                      <span className="text-xs text-stone-400">{trail.terrain || "Off-road"}</span>
+                      <span className="text-xs text-stone-600">·</span>
+                      <span className={`text-xs ${trail.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}`}>
+                        {trail.legal_status || trail.type || "Trail"}
+                      </span>
+                    </div>
+                    <div
+                      className="text-[10px] text-stone-500 mt-1"
+                      data-testid={`trail-card-counts-${trail.id}`}
+                    >
+                      {(activityCounts[trail.id]?.notes ?? 0)} notes ·{" "}
+                      {(activityCounts[trail.id]?.photos ?? 0)} photos ·{" "}
+                      {(activityCounts[trail.id]?.pending ?? 0)} pending
+                    </div>
+                  </button>
+                  <div className="flex flex-col items-end gap-1 shrink-0">
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30">
+                      Planned
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedId(isExpanded ? null : trail.id)}
+                      className="p-1 -m-1 text-stone-500 hover:text-stone-300"
+                      aria-label={isExpanded ? "Hide actions" : "Show actions"}
+                      aria-expanded={isExpanded}
+                      data-testid={`saved-trail-toggle-${trail.id}`}
+                    >
                       <svg
                         viewBox="0 0 24 24"
-                        className={`w-4 h-4 text-stone-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                        className={`w-4 h-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
                         fill="none" stroke="currentColor" strokeWidth="2"
                       >
                         <polyline points="6 9 12 15 18 9" />
                       </svg>
-                    </div>
+                    </button>
                   </div>
-
-                  <div className="flex gap-3 mt-2">
-                    <span className="text-xs text-stone-400">{formatDistance(trail.distance_km)}</span>
-                    <span className="text-xs text-stone-600">·</span>
-                    <span className="text-xs text-stone-400">{trail.terrain || "Off-road"}</span>
-                    <span className="text-xs text-stone-600">·</span>
-                    <span className={`text-xs ${trail.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}`}>
-                      {trail.legal_status || trail.type || "Trail"}
-                    </span>
-                  </div>
-                  <div
-                    className="text-[10px] text-stone-500 mt-1"
-                    data-testid={`trail-card-counts-${trail.id}`}
-                  >
-                    {(activityCounts[trail.id]?.notes ?? 0)} notes ·{" "}
-                    {(activityCounts[trail.id]?.photos ?? 0)} photos ·{" "}
-                    {(activityCounts[trail.id]?.pending ?? 0)} pending
-                  </div>
-                </button>
+                </div>
 
                 {isExpanded && (
                   <div className="border-t border-[hsl(30,12%,16%)] p-3">
@@ -457,6 +483,13 @@ export default function MyTrailsTab() {
             </div>
           </div>
         </div>
+      )}
+
+      {selectedTrail && (
+        <TrailDetailSheet
+          trail={selectedTrail}
+          onClose={() => setSelectedTrail(null)}
+        />
       )}
     </div>
   );
