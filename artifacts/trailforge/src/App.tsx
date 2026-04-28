@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   ClerkProvider,
   SignIn,
@@ -77,6 +77,37 @@ const clerkAppearance = {
 
 type Tab = "planner" | "map" | "trails" | "discover" | "ai";
 
+// Each tab has a canonical URL path. The Planner tab is also the index ("/")
+// so visiting the root or "/planner" both render Planner. All other tabs map
+// 1:1 to their slug so /map, /trails, /discover, /ai are deep-linkable.
+const TAB_PATHS: Record<Tab, string> = {
+  planner: "/",
+  map: "/map",
+  trails: "/trails",
+  discover: "/discover",
+  ai: "/ai",
+};
+
+function pathToTab(path: string): Tab {
+  // Strip a single trailing slash (except for the root) so "/ai/" still works.
+  const normalized = path.length > 1 ? path.replace(/\/$/, "") : path;
+  switch (normalized) {
+    case "/map":
+      return "map";
+    case "/trails":
+      return "trails";
+    case "/discover":
+      return "discover";
+    case "/ai":
+      return "ai";
+    case "/":
+    case "":
+    case "/planner":
+    default:
+      return "planner";
+  }
+}
+
 interface NavItem {
   id: Tab;
   label: string;
@@ -149,12 +180,13 @@ function TabContent({ tab }: { tab: Tab }) {
 }
 
 function MainShell() {
-  const [activeTab, setActiveTab] = useState<Tab>("planner");
+  const [location, setLocation] = useLocation();
+  const activeTab = pathToTab(location);
 
   // Cross-tab navigation bridge: other tabs (e.g. My Trails → "Record" / "Draw")
-  // can dispatch `trailforge:open-add-trail` with a chosen mode. We switch to
-  // the Map tab and add `?mode=...` to the URL so MapTab's mount-effect
-  // auto-opens the matching contribute flow.
+  // can dispatch `trailforge:open-add-trail` with a chosen mode. We navigate to
+  // the Map tab path with `?mode=...` so MapTab's mount-effect auto-opens the
+  // matching contribute flow.
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ mode?: string }>).detail ?? {};
@@ -163,16 +195,13 @@ function MainShell() {
       const params = new URLSearchParams(window.location.search);
       params.set("mode", mode);
       const qs = params.toString();
-      const newUrl =
-        window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
-      window.history.replaceState(null, "", newUrl);
-      setActiveTab("map");
+      setLocation(`${TAB_PATHS.map}${qs ? `?${qs}` : ""}`);
     };
     window.addEventListener("trailforge:open-add-trail", handler as EventListener);
     return () => {
       window.removeEventListener("trailforge:open-add-trail", handler as EventListener);
     };
-  }, []);
+  }, [setLocation]);
 
   // Cross-tab navigation bridge: the notifications bell dispatches
   // `trailforge:open-trail` with a trail id when the user taps a "shared a
@@ -186,10 +215,7 @@ function MainShell() {
       const params = new URLSearchParams(window.location.search);
       params.set("trail", trailId);
       const qs = params.toString();
-      const newUrl =
-        window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
-      window.history.replaceState(null, "", newUrl);
-      setActiveTab("discover");
+      setLocation(`${TAB_PATHS.discover}${qs ? `?${qs}` : ""}`);
     };
     window.addEventListener("trailforge:open-trail", handler as EventListener);
     return () => {
@@ -198,7 +224,7 @@ function MainShell() {
         handler as EventListener,
       );
     };
-  }, []);
+  }, [setLocation]);
 
   // Cross-tab navigation bridge: Map tab dispatches `trailforge:open-planner`
   // when a user taps "Build Route" on the on-map route panel. We switch to
@@ -207,21 +233,18 @@ function MainShell() {
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ build?: boolean }>).detail ?? {};
+      const params = new URLSearchParams(window.location.search);
       if (detail.build) {
-        const params = new URLSearchParams(window.location.search);
         params.set("build", "1");
-        const qs = params.toString();
-        const newUrl =
-          window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
-        window.history.replaceState(null, "", newUrl);
       }
-      setActiveTab("planner");
+      const qs = params.toString();
+      setLocation(`${TAB_PATHS.planner}${qs ? `?${qs}` : ""}`);
     };
     window.addEventListener("trailforge:open-planner", handler as EventListener);
     return () => {
       window.removeEventListener("trailforge:open-planner", handler as EventListener);
     };
-  }, []);
+  }, [setLocation]);
 
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
@@ -280,7 +303,7 @@ function MainShell() {
             return (
               <button
                 key={item.id}
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => setLocation(TAB_PATHS[item.id])}
                 className="flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 relative transition-all"
                 data-testid={`nav-${item.id}`}
               >

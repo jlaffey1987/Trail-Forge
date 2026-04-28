@@ -263,11 +263,18 @@ export default function MapTab() {
         : TILE_URLS.satellite; // fallback
     }
 
-    const newTile = L.tileLayer(url, {
+    // Only pass `subdomains` when the URL actually uses {s}. Passing
+    // `undefined` would *override* Leaflet's default ('abc') and trip
+    // `_getSubdomain` reading `.length` on undefined the next time the
+    // layer is re-added (e.g. when MapTab is remounted via tab navigation).
+    const tileOptions: Parameters<typeof L.tileLayer>[1] = {
       attribution: TILE_ATTRS[baseMap],
       maxZoom: 20,
-      subdomains: baseMap === "topo" ? ["a", "b", "c"] : undefined,
-    } as Parameters<typeof L.tileLayer>[1]);
+    };
+    if (baseMap === "topo") {
+      (tileOptions as { subdomains: string[] }).subdomains = ["a", "b", "c"];
+    }
+    const newTile = L.tileLayer(url, tileOptions);
 
     newTile.addTo(map);
     tileLayerRef.current = newTile;

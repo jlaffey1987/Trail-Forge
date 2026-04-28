@@ -89,10 +89,10 @@ export default function MyTrailsTab() {
       setShowUploadGpx(true);
     } else {
       // Record / Draw both happen on the Map. Dispatch a global event that
-      // MainShell listens for: it switches the active tab to "map" and sets
-      // ?mode= in the URL so MapTab's mount-effect auto-opens the flow.
-      // (Wouter's setLocation alone doesn't switch tabs because the shell is
-      //  state-driven, not route-driven.)
+      // MainShell listens for: it navigates to /map and sets ?mode= in the URL
+      // so MapTab's mount-effect auto-opens the matching flow. (We could call
+      // setLocation directly now that the shell is route-driven, but the
+      // bridge keeps the URL composition logic in one place.)
       window.dispatchEvent(
         new CustomEvent("trailforge:open-add-trail", { detail: { mode: choice } }),
       );
