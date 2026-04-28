@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="trailforge-test"
+     xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <metadata>
+    <name>Test Sample Trail</name>
+    <time>2026-04-28T00:00:00Z</time>
+  </metadata>
+  <trk>
+    <name>Test Sample Trail</name>
+    <trkseg>
+      <trkpt lat="53.6100" lon="-2.5500"><ele>180</ele></trkpt>
+      <trkpt lat="53.6105" lon="-2.5495"><ele>182</ele></trkpt>
+      <trkpt lat="53.6112" lon="-2.5488"><ele>185</ele></trkpt>
+      <trkpt lat="53.6118" lon="-2.5479"><ele>188</ele></trkpt>
+      <trkpt lat="53.6125" lon="-2.5470"><ele>190</ele></trkpt>
+      <trkpt lat="53.6133" lon="-2.5462"><ele>192</ele></trkpt>
+      <trkpt lat="53.6141" lon="-2.5455"><ele>193</ele></trkpt>
+      <trkpt lat="53.6150" lon="-2.5448"><ele>194</ele></trkpt>
+      <trkpt lat="53.6158" lon="-2.5440"><ele>195</ele></trkpt>
+      <trkpt lat="53.6165" lon="-2.5430"><ele>196</ele></trkpt>
+    </trkseg>
+  </trk>
+</gpx>
