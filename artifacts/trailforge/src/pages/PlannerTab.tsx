@@ -152,6 +152,13 @@ export default function PlannerTab() {
   const isInRoute = (id: string) => routeTrails.some((t) => t.id === id);
 
   const toggleRouteTrail = useCallback((trail: Trail) => {
+    if (trail.verification_status === "ai-approximated") {
+      // Approximated trails are reference-only — never used in navigation.
+      setPlanError(
+        `"${trail.name}" is an AI-approximated route — reference only, cannot be used for navigation. A moderator must verify it first.`,
+      );
+      return;
+    }
     setRouteTrails((prev) => {
       if (prev.some((t) => t.id === trail.id)) return prev.filter((t) => t.id !== trail.id);
       return [...prev, trail];
@@ -195,6 +202,18 @@ export default function PlannerTab() {
 
     if (routeTrails.length === 0) {
       setPlanError("Add at least one trail to your route before planning navigation.");
+      return;
+    }
+
+    // Hard block: AI-approximated routes are reference-only — never let
+    // them slip into a turn-by-turn route. (toggleRouteTrail already
+    // refuses, but defend in depth in case a trail's verification status
+    // changes after it was added.)
+    const approximated = routeTrails.find((t) => t.verification_status === "ai-approximated");
+    if (approximated) {
+      setPlanError(
+        `"${approximated.name}" is AI-approximated and reference only. Remove it from the route or wait for moderator verification before planning navigation.`,
+      );
       return;
     }
 

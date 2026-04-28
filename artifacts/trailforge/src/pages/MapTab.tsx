@@ -13,6 +13,7 @@ import {
   type Trail,
   type MapBbox,
 } from "@/lib/supabase";
+import { mapBboxStore } from "@/lib/mapBboxStore";
 import {
   renderTrailLayer,
   type TrailLayerHandle,
@@ -122,6 +123,7 @@ export default function MapTab() {
       maxLng: b.getEast(),
     };
     setCurrentBbox(bbox);
+    mapBboxStore.set(bbox);
     const seq = ++fetchSeqRef.current;
     setTrailsLoading(true);
     const [{ trails, usedBbox }, groupTrails] = await Promise.all([

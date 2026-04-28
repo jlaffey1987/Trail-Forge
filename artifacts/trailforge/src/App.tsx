@@ -22,6 +22,7 @@ import UserMenu from "@/components/UserMenu";
 import SavedTrailsMergePrompt from "@/components/SavedTrailsMergePrompt";
 import InvitesBadge from "@/components/groups/InvitesBadge";
 import InviteAcceptPage from "@/components/groups/InviteAcceptPage";
+import AdminPage from "@/pages/AdminPage";
 import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
 
@@ -347,6 +348,7 @@ function ClerkProviderWithRoutes() {
         <Route path="/invite/:token">
           {(params) => <InviteAcceptPage token={params.token ?? ""} />}
         </Route>
+        <Route path="/admin" component={AdminPage} />
         <Route component={MainShell} />
       </Switch>
     </ClerkProvider>

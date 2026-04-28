@@ -50,6 +50,18 @@ export interface Trail {
   gpx_object_path?: string | null;
   /** Decorated by /api/me/group-trails — list of groups this trail is shared into that the viewer also belongs to. */
   shared_groups?: Array<{ id: string; name: string }>;
+  /** Provenance: 'user' (default) | 'tet' | 'act' | 'ai-forum' | 'ai-approx'. Added in migration 0007. */
+  source?: string | null;
+  /** Deep link back to the original source page (TET, ACT, forum thread, etc). Added in migration 0007. */
+  source_url?: string | null;
+  /** 'verified' | 'ai-approximated' | 'unverified'. Added in migration 0007. */
+  verification_status?: string | null;
+  /** Cached AI-derived difficulty 1-10. Added in migration 0007. */
+  ai_grade?: number | null;
+  /** Short rationale paired with `ai_grade`. */
+  ai_grade_rationale?: string | null;
+  ai_grade_model?: string | null;
+  ai_graded_at?: string | null;
 }
 
 export interface MapBbox {

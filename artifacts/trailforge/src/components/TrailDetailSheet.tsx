@@ -40,10 +40,35 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [counts, setCounts] = useState<TrailActivityCounts>({ notes: 0, photos: 0, pending: 0 });
   const [perms, setPerms] = useState<TrailPermissions>({ isOwner: false, isModerator: false, canModerate: false });
+  const [isSystemAdmin, setIsSystemAdmin] = useState(false);
 
   useEffect(() => {
     return subscribeRouteTrails(() => setInPlannerRoute(isInRoute(trail.id)));
   }, [trail.id]);
+
+  // Pull the system-admin flag from the API so admins can re-grade ANY
+  // trail, not just their own. Owner-only re-grade was a UI regression
+  // (the backend route at POST /api/trails/:id/grade-ai already permits
+  // owner OR system admin). Failing closed (admin=false) on network
+  // error is fine — admins can still re-grade through the AdminPage.
+  useEffect(() => {
+    let cancelled = false;
+    if (!isSignedIn) {
+      setIsSystemAdmin(false);
+      return;
+    }
+    fetch("/api/admin/whoami", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { isAdmin?: boolean } | null) => {
+        if (!cancelled) setIsSystemAdmin(Boolean(j?.isAdmin));
+      })
+      .catch(() => {
+        if (!cancelled) setIsSystemAdmin(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn]);
 
   const refreshCounts = useCallback(() => {
     fetchTrailActivityCounts([trail.id]).then((map) => {
@@ -62,6 +87,10 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
   const diffLabel = DIFFICULTY_LABELS[diff] ?? "Medium";
 
   const handleAddToPlanner = () => {
+    if (trail.verification_status === "ai-approximated") {
+      // Approximated trails are reference-only — never used in navigation.
+      return;
+    }
     if (inPlannerRoute) {
       removeRouteTrail(trail.id);
       return;
@@ -87,6 +116,10 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
     { key: "photos", label: "Photos", badge: counts.photos },
     { key: "amendments", label: "Edits", badge: counts.pending },
   ];
+
+  const isExternalSource = trail.source && trail.source !== "user";
+  const isApproximated = trail.verification_status === "ai-approximated";
+  const isUnverified = trail.verification_status === "unverified";
 
   return (
     <div
@@ -207,6 +240,11 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
               handleAddToPlanner={handleAddToPlanner}
               handleSave={handleSave}
               setLocation={setLocation}
+              isOwner={perms.isOwner}
+              isSystemAdmin={isSystemAdmin}
+              isExternalSource={Boolean(isExternalSource)}
+              isApproximated={isApproximated}
+              isUnverified={isUnverified}
             />
           ) : null}
           {activeTab === "notes" ? (
@@ -238,6 +276,11 @@ interface OverviewProps {
   handleAddToPlanner: () => void;
   handleSave: () => void;
   setLocation: (path: string) => void;
+  isOwner: boolean;
+  isSystemAdmin: boolean;
+  isExternalSource: boolean;
+  isApproximated: boolean;
+  isUnverified: boolean;
 }
 
 function OverviewPanel({
@@ -250,9 +293,79 @@ function OverviewPanel({
   handleAddToPlanner,
   handleSave,
   setLocation,
+  isOwner,
+  isSystemAdmin,
+  isExternalSource,
+  isApproximated,
+  isUnverified,
 }: OverviewProps) {
+  // Re-grade is allowed for the trail's owner OR a system admin —
+  // mirrors the backend permission check at POST /api/trails/:id/grade-ai.
+  const canRegrade = isOwner || isSystemAdmin;
+  const [regradeStatus, setRegradeStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [regradeResult, setRegradeResult] = useState<{ grade: number; rationale: string } | null>(
+    trail.ai_grade != null
+      ? { grade: trail.ai_grade, rationale: trail.ai_grade_rationale ?? "" }
+      : null,
+  );
+
+  const handleRegrade = async () => {
+    setRegradeStatus("loading");
+    try {
+      const res = await fetch(`/api/trails/${trail.id}/grade-ai`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        setRegradeStatus("error");
+        return;
+      }
+      const json = (await res.json()) as { grade: number; rationale: string };
+      setRegradeResult(json);
+      setRegradeStatus("done");
+    } catch {
+      setRegradeStatus("error");
+    }
+  };
+
   return (
     <div data-testid="trail-overview-panel">
+      {(isExternalSource || isApproximated || isUnverified) ? (
+        <div className="px-4 pt-3">
+          <div
+            className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-[11px] ${
+              isApproximated
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                : "border-stone-700 bg-stone-900/40 text-stone-300"
+            }`}
+            data-testid="trail-detail-source-badge"
+          >
+            {isExternalSource ? (
+              <span className="font-bold uppercase tracking-wider">
+                {trail.source === "tet" ? "TET" : trail.source === "act" ? "ACT" : "AI-discovered"}
+              </span>
+            ) : null}
+            {isApproximated ? (
+              <span className="font-bold uppercase tracking-wider">⚠ AI-approximated route — verify before navigating</span>
+            ) : isUnverified ? (
+              <span className="font-bold uppercase tracking-wider">Unverified</span>
+            ) : null}
+            {trail.source_url ? (
+              <a
+                href={trail.source_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="ml-auto underline text-amber-300 hover:text-amber-200"
+                data-testid="trail-detail-source-link"
+              >
+                {trail.source === "tet" || trail.source === "act"
+                  ? `Get GPX from ${(trail.source ?? "source").toUpperCase()}`
+                  : "View source →"}
+              </a>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       <div className="px-4 pt-3 pb-3 grid grid-cols-2 gap-2">
         <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg px-3 py-2">
           <div className="text-[9px] text-stone-500 uppercase tracking-wider">Type</div>
@@ -280,7 +393,61 @@ function OverviewPanel({
         </div>
       </div>
 
+      {(regradeResult || canRegrade) ? (
+        <div className="px-4 pb-2">
+          <div
+            className="rounded-lg border border-[hsl(30,12%,18%)] bg-[hsl(22,15%,12%)] px-3 py-2"
+            data-testid="trail-detail-ai-grade"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[10px] uppercase tracking-wider text-stone-500">
+                AI grade{isSystemAdmin && !isOwner ? " · admin" : ""}
+              </div>
+              {canRegrade ? (
+                <button
+                  onClick={handleRegrade}
+                  disabled={regradeStatus === "loading"}
+                  className="text-[10px] uppercase tracking-wider text-amber-400 hover:text-amber-300 disabled:opacity-60"
+                  data-testid="trail-detail-regrade"
+                >
+                  {regradeStatus === "loading"
+                    ? "Grading…"
+                    : regradeStatus === "error"
+                    ? "Retry grading"
+                    : regradeResult
+                    ? "Re-grade"
+                    : "Grade with AI"}
+                </button>
+              ) : null}
+            </div>
+            {regradeResult ? (
+              <div className="mt-1">
+                <div className="text-sm font-bold text-stone-200">{regradeResult.grade}/10</div>
+                {regradeResult.rationale ? (
+                  <div className="text-[11px] text-stone-400 mt-0.5">{regradeResult.rationale}</div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="text-[11px] text-stone-500 mt-0.5">
+                {canRegrade
+                  ? "No AI grade yet — click to generate one."
+                  : "No AI grade yet."}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
       <div className="px-4 pb-5 pt-1 grid grid-cols-2 gap-2">
+        {isApproximated ? (
+          <div
+            className="py-3 px-2 rounded-xl text-[11px] font-bold uppercase tracking-wider text-stone-500 border border-dashed border-stone-700 bg-stone-900/40 flex items-center justify-center text-center leading-tight"
+            data-testid="trail-detail-add-planner-disabled"
+            title="AI-approximated trails are reference only and cannot be used for navigation. A moderator must verify the route first."
+          >
+            Reference only — cannot navigate
+          </div>
+        ) : (
         <button
           onClick={handleAddToPlanner}
           className={`group py-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
@@ -318,6 +485,7 @@ function OverviewPanel({
             </>
           )}
         </button>
+        )}
         <button
           onClick={handleSave}
           disabled={saveStatus === "saving" || saveStatus === "saved"}

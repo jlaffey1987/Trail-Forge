@@ -5,6 +5,7 @@ import meRouter from "./me";
 import trailsRouter from "./trails";
 import trailContentRouter from "./trailContent";
 import groupsRouter from "./groups";
+import aiRouter from "./ai";
 
 const router: IRouter = Router();
 
@@ -14,5 +15,6 @@ router.use(meRouter);
 router.use(trailsRouter);
 router.use(trailContentRouter);
 router.use(groupsRouter);
+router.use(aiRouter);
 
 export default router;

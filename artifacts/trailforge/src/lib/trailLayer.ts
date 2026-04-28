@@ -212,11 +212,19 @@ export function renderTrailLayer(
       layers.push(sh);
     }
 
+    // Approximated AI-discovered trails are rendered with a dashed line so
+    // they're visually distinct from verified routes. They're still
+    // interactive (so you can open and review them) but the user sees at a
+    // glance that the geometry is not real.
+    const isApprox = trail.verification_status === "ai-approximated";
+    const baseDash =
+      !isSelected && selectedIds.size > 0 ? "8 4" : isApprox ? "4 6" : undefined;
+
     const main = L.polyline(latlngs, {
       color: isSelected ? selectedColor : diffColor,
       weight: isSelected ? selectedWeight : baseWeight,
-      opacity: isSelected ? 1 : 0.85,
-      dashArray: !isSelected && selectedIds.size > 0 ? "8 4" : undefined,
+      opacity: isSelected ? 1 : isApprox ? 0.65 : 0.85,
+      dashArray: baseDash,
       interactive,
       ...(pane ? { pane } : {}),
     }).addTo(map);

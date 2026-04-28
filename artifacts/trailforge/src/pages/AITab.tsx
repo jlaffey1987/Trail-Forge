@@ -1,10 +1,18 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { mapBboxStore } from "@/lib/mapBboxStore";
 
 interface Message {
   id: number;
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+}
+
+interface GroundingTrail {
+  id: string;
+  name: string;
+  difficulty: number | null;
+  distance_km: number | null;
 }
 
 const QUICK_PROMPTS = [
@@ -14,22 +22,8 @@ const QUICK_PROMPTS = [
   "Plan a weekend trip",
 ];
 
-const MOCK_RESPONSES: Record<string, string> = {
-  default: "I can help you plan off-road motorcycle trails, advise on gear, conditions, and routes across the UK. What would you like to explore?",
-  beginner: "For enduro beginners, I'd recommend starting with **Shropshire Hills** and **Forest of Dean**. Difficulty 3-5 trails give you great terrain without the technical nightmare. Look for green lanes first — they're legal, well-mapped, and forgiving. Make sure you have an A2-legal or unrestricted bike appropriate for the terrain, and always ride with a buddy when starting out.",
-  dartmoor: "Dartmoor requires **serious preparation**. Key gear: full enduro kit (helmet, chest protector, knee guards), waterproofs (Dartmoor weather changes fast), map and compass as backup, emergency bivvy, and a reliable dual-sport or enduro bike. The terrain is boggy moorland with rocky descents. Stick to legal BOATs and check Natural England access maps before you go. Water crossings are common — know your bike's wade depth.",
-  boats: "**BOATs** (Byways Open to All Traffic) are fully legal unsealed routes open to all vehicles including motorbikes. They appear on OS maps as double-dashed lines. **Green lanes** is an informal term for unsurfaced tracks — some are BOATs, some are Restricted Byways (foot, horse, non-motorised only), some are Bridleways. Always check the definitive map at your local council. Riding an illegal route can result in a fixed penalty and damage access rights for all riders.",
-  weekend: "Great choice! Here's a **Peak District Weekend** plan:\n\n**Day 1**: Base yourself near Buxton. Morning: Goyt Valley BOATs (difficulty 5). Afternoon: Axe Edge Moor traverse (difficulty 7). Pub stop in Longnor.\n\n**Day 2**: Early start for The Roaches circuit (difficulty 7), then finish with Flash Bottom green lane (difficulty 4). Evening drive home.\n\nTotal: ~85km, mix of technical and flowing. Book accommodation in advance — weekends fill fast in summer.",
-};
-
-function getResponse(message: string): string {
-  const lower = message.toLowerCase();
-  if (lower.includes("beginner") || lower.includes("start")) return MOCK_RESPONSES.beginner;
-  if (lower.includes("dartmoor") || lower.includes("gear")) return MOCK_RESPONSES.dartmoor;
-  if (lower.includes("boat") || lower.includes("green lane")) return MOCK_RESPONSES.boats;
-  if (lower.includes("weekend") || lower.includes("trip") || lower.includes("plan")) return MOCK_RESPONSES.weekend;
-  return MOCK_RESPONSES.default;
-}
+const WELCOME_MESSAGE =
+  "Hey rider! I'm your TrailForge AI — expert in UK off-road motorcycle routes, BOATs, green lanes, and trail planning. I can see the trails on your current map, so feel free to ask 'which of these is best for a beginner?' too.";
 
 function formatTime() {
   const now = new Date();
@@ -81,15 +75,13 @@ function MessageBubble({ msg }: { msg: Message }) {
 
 export default function AITab() {
   const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 1,
-      role: "assistant",
-      content: "Hey rider! I'm your TrailForge AI — expert in UK off-road motorcycle routes, BOATs, green lanes, and trail planning. Ask me anything.",
-      timestamp: formatTime(),
-    },
+    { id: 1, role: "assistant", content: WELCOME_MESSAGE, timestamp: formatTime() },
   ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [groundingTrails, setGroundingTrails] = useState<GroundingTrail[]>([]);
+  const [groundingCount, setGroundingCount] = useState<number | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -97,40 +89,84 @@ export default function AITab() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
 
-  const sendMessage = (text: string) => {
-    if (!text.trim()) return;
+  const sendMessage = useCallback(
+    async (text: string) => {
+      if (!text.trim() || isTyping) return;
 
-    const userMsg: Message = {
-      id: Date.now(),
-      role: "user",
-      content: text.trim(),
-      timestamp: formatTime(),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    setIsTyping(true);
-
-    setTimeout(() => {
-      setIsTyping(false);
-      const response = getResponse(text);
-      const aiMsg: Message = {
-        id: Date.now() + 1,
-        role: "assistant",
-        content: response,
+      const userMsg: Message = {
+        id: Date.now(),
+        role: "user",
+        content: text.trim(),
         timestamp: formatTime(),
       };
-      setMessages((prev) => [...prev, aiMsg]);
-    }, 1000 + Math.random() * 800);
-  };
+
+      const nextHistory = [...messages, userMsg];
+      setMessages(nextHistory);
+      setInput("");
+      setIsTyping(true);
+      setErrorMsg(null);
+
+      const apiMessages = nextHistory
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .slice(-12)
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      const bbox = mapBboxStore.get();
+
+      try {
+        const res = await fetch("/api/ai/chat", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: apiMessages, bbox }),
+        });
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "");
+          setIsTyping(false);
+          setErrorMsg(
+            res.status === 429
+              ? "I'm hitting my rate limit — give me a moment and try again."
+              : `Sorry — the AI service returned ${res.status}. ${errText.slice(0, 120)}`,
+          );
+          return;
+        }
+        const json = (await res.json()) as {
+          reply: string;
+          groundingCount: number;
+          groundingTrails: GroundingTrail[];
+        };
+        setIsTyping(false);
+        setGroundingTrails(json.groundingTrails ?? []);
+        setGroundingCount(json.groundingCount ?? 0);
+        const aiMsg: Message = {
+          id: Date.now() + 1,
+          role: "assistant",
+          content: json.reply,
+          timestamp: formatTime(),
+        };
+        setMessages((prev) => [...prev, aiMsg]);
+      } catch (err) {
+        setIsTyping(false);
+        setErrorMsg(err instanceof Error ? err.message : "Failed to reach AI service");
+      }
+    },
+    [isTyping, messages],
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    sendMessage(input);
+    void sendMessage(input);
+  };
+
+  const resetChat = () => {
+    setMessages([{ id: Date.now(), role: "assistant", content: WELCOME_MESSAGE, timestamp: formatTime() }]);
+    setGroundingTrails([]);
+    setGroundingCount(null);
+    setErrorMsg(null);
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" data-testid="ai-tab">
       {/* Header */}
       <div className="px-4 pt-4 pb-2 border-b border-[hsl(30,12%,16%)] flex items-center justify-between">
         <div>
@@ -139,17 +175,17 @@ export default function AITab() {
           </h1>
           <div className="flex items-center gap-1.5 mt-0.5">
             <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></div>
-            <span className="text-xs text-stone-400">Online · UK Trail Expert</span>
+            <span className="text-xs text-stone-400" data-testid="ai-tab-status">
+              {groundingCount == null
+                ? "Online · UK Trail Expert"
+                : `Grounded in ${groundingCount} trail${groundingCount === 1 ? "" : "s"} from your map`}
+            </span>
           </div>
         </div>
         <button
-          onClick={() => setMessages([{
-            id: Date.now(),
-            role: "assistant",
-            content: "Hey rider! I'm your TrailForge AI — expert in UK off-road motorcycle routes, BOATs, green lanes, and trail planning. Ask me anything.",
-            timestamp: formatTime(),
-          }])}
+          onClick={resetChat}
           className="p-2 rounded-lg text-stone-500 hover:text-stone-300 hover:bg-stone-800/50 transition-colors"
+          aria-label="Reset chat"
         >
           <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="1 4 1 10 7 10" />
@@ -165,7 +201,7 @@ export default function AITab() {
         ))}
 
         {isTyping && (
-          <div className="flex items-start mb-3">
+          <div className="flex items-start mb-3" data-testid="ai-tab-typing">
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-amber-600 to-amber-900 flex items-center justify-center shrink-0 mr-2">
               <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-amber-200" fill="currentColor">
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
@@ -178,6 +214,19 @@ export default function AITab() {
             </div>
           </div>
         )}
+        {errorMsg ? (
+          <div
+            className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 mb-3"
+            data-testid="ai-tab-error"
+          >
+            {errorMsg}
+          </div>
+        ) : null}
+        {groundingTrails.length > 0 ? (
+          <div className="text-[10px] text-stone-500 mt-1 mb-2">
+            Mentioned trails: {groundingTrails.map((t) => t.name).join(", ")}
+          </div>
+        ) : null}
         <div ref={messagesEndRef} />
       </div>
 
@@ -189,7 +238,7 @@ export default function AITab() {
             {QUICK_PROMPTS.map((prompt) => (
               <button
                 key={prompt}
-                onClick={() => sendMessage(prompt)}
+                onClick={() => void sendMessage(prompt)}
                 className="px-3 py-1.5 bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,20%)] rounded-full text-xs text-stone-300 hover:border-amber-500/40 hover:text-amber-300 transition-colors"
               >
                 {prompt}
@@ -209,12 +258,14 @@ export default function AITab() {
             onChange={(e) => setInput(e.target.value)}
             placeholder="Ask about trails, gear, routes..."
             className="flex-1 bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,20%)] rounded-xl px-4 py-3 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/20 transition-colors"
+            data-testid="ai-tab-input"
           />
           <button
             type="submit"
             disabled={!input.trim() || isTyping}
             className="w-11 h-11 rounded-xl flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
             style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+            data-testid="ai-tab-send"
           >
             <svg viewBox="0 0 24 24" className="w-4 h-4 text-stone-900" fill="none" stroke="currentColor" strokeWidth="2.5">
               <line x1="22" y1="2" x2="11" y2="13" />
