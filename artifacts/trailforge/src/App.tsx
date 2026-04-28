@@ -21,6 +21,7 @@ import AITab from "@/pages/AITab";
 import UserMenu from "@/components/UserMenu";
 import SavedTrailsMergePrompt from "@/components/SavedTrailsMergePrompt";
 import InvitesBadge from "@/components/groups/InvitesBadge";
+import NotificationsBell from "@/components/groups/NotificationsBell";
 import InviteAcceptPage from "@/components/groups/InviteAcceptPage";
 import AdminPage from "@/pages/AdminPage";
 import { syncCurrentUser } from "@/lib/users";
@@ -173,6 +174,32 @@ function MainShell() {
     };
   }, []);
 
+  // Cross-tab navigation bridge: the notifications bell dispatches
+  // `trailforge:open-trail` with a trail id when the user taps a "shared a
+  // trail" entry. We jump to the Discover tab and pass the id via ?trail=...
+  // so DiscoverTab can open its TrailDetailSheet on the matching row.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ trailId?: string }>).detail ?? {};
+      const trailId = detail.trailId;
+      if (!trailId) return;
+      const params = new URLSearchParams(window.location.search);
+      params.set("trail", trailId);
+      const qs = params.toString();
+      const newUrl =
+        window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+      window.history.replaceState(null, "", newUrl);
+      setActiveTab("discover");
+    };
+    window.addEventListener("trailforge:open-trail", handler as EventListener);
+    return () => {
+      window.removeEventListener(
+        "trailforge:open-trail",
+        handler as EventListener,
+      );
+    };
+  }, []);
+
   // Cross-tab navigation bridge: Map tab dispatches `trailforge:open-planner`
   // when a user taps "Build Route" on the on-map route panel. We switch to
   // the Planner tab and write `?build=1` so PlannerTab's mount-effect can
@@ -231,6 +258,7 @@ function MainShell() {
             <div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>
             <span className="text-[10px] text-stone-400">GPS Active</span>
           </div>
+          <NotificationsBell />
           <InvitesBadge />
           <UserMenu />
         </div>

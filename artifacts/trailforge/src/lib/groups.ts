@@ -74,6 +74,40 @@ export interface SharedTrail extends Trail {
   shared_groups?: Array<{ id: string; name: string }>;
 }
 
+/** A single entry in the in-app group activity feed. */
+export type GroupNotification =
+  | {
+      type: "trail_shared";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      trail: { id: string; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
+      type: "member_joined";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    };
+
+export interface NotificationActor {
+  id: string;
+  display_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+}
+
+export interface NotificationsResponse {
+  items: GroupNotification[];
+  unreadCount: number;
+  lastReadAt: string | null;
+  nextBefore: string | null;
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T | null> {
   try {
     const res = await fetch(url, {
@@ -366,6 +400,35 @@ export async function fetchGroupTrails(
     console.error("fetchGroupTrails error", err);
     return [];
   }
+}
+
+export async function fetchGroupNotifications(opts?: {
+  limit?: number;
+  before?: string | null;
+}): Promise<NotificationsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.before) params.set("before", opts.before);
+  const qs = params.toString();
+  const data = await jsonFetch<NotificationsResponse>(
+    `/api/me/notifications${qs ? `?${qs}` : ""}`,
+  );
+  return (
+    data ?? {
+      items: [],
+      unreadCount: 0,
+      lastReadAt: null,
+      nextBefore: null,
+    }
+  );
+}
+
+export async function markAllNotificationsRead(): Promise<string | null> {
+  const res = await jsonFetch<{ ok: boolean; last_read_at: string }>(
+    "/api/me/notifications/read",
+    { method: "POST" },
+  );
+  return res?.last_read_at ?? null;
 }
 
 export function buildInviteUrl(token: string): string {

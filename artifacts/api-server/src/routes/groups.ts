@@ -1023,6 +1023,363 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// LIST recent activity ("notifications") for groups the caller belongs to.
+//
+// The feed is computed on demand from the existing append-only source rows
+// (no separate event log) — each tick we union together:
+//
+//   * trail_shares  → "<actor> shared <trail> into <group>"
+//   * group_members → "<actor> joined <group>"   (covers accepted invites,
+//                       which simply create a group_members row)
+//
+// Self-events are filtered out (you don't need a notification for an action
+// you took yourself). Trails that have been soft-deleted are dropped from
+// the page so we never hand out a deep-link the user can't open.
+//
+// Pagination: client passes ?before=<ISO occurred_at> to walk older events.
+// Returns the page itself plus a `nextBefore` cursor and a server-side
+// `unreadCount` (total events newer than `users.notifications_read_at`,
+// across all the caller's groups — not just the current page).
+//
+//   GET /api/me/notifications?limit=20&before=2026-04-01T00:00:00Z
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/me/notifications",
+  requireAuth(async (req, res, userId) => {
+    const supa = getSupabaseAdmin();
+
+    const limitRaw = Number.parseInt(String(req.query.limit ?? "20"), 10);
+    const limit = Math.min(
+      Math.max(Number.isFinite(limitRaw) ? limitRaw : 20, 1),
+      100,
+    );
+    // Cursor format: "<iso>" (legacy, no tie-breaker) or "<iso>|<id>". The
+    // composite form lets us page deterministically through events that share
+    // an `occurred_at` timestamp without dropping rows on the boundary.
+    const beforeRaw =
+      typeof req.query.before === "string" ? req.query.before : null;
+    let beforeIso: string | null = null;
+    let beforeId: string | null = null;
+    if (beforeRaw) {
+      const pipe = beforeRaw.indexOf("|");
+      const isoPart = pipe >= 0 ? beforeRaw.slice(0, pipe) : beforeRaw;
+      const idPart = pipe >= 0 ? beforeRaw.slice(pipe + 1) : "";
+      if (!Number.isNaN(Date.parse(isoPart))) {
+        beforeIso = isoPart;
+        beforeId = idPart || null;
+      }
+    }
+
+    // -- group memberships --
+    const { data: memberships, error: mErr } = await supa
+      .from("group_members")
+      .select("group_id")
+      .eq("user_id", userId);
+    if (mErr && !isMissingTableError(mErr)) {
+      req.log.error({ err: mErr }, "notifications memberships load failed");
+      res.status(500).json({ error: "Failed to load notifications" });
+      return;
+    }
+    const groupIds = ((memberships ?? []) as Array<{ group_id: string }>).map(
+      (m) => m.group_id,
+    );
+
+    // -- last-read cursor (used both for unread badge + per-item flag) --
+    let lastReadAt: string | null = null;
+    {
+      const { data: userRow, error: uErr } = await supa
+        .from("users")
+        .select("notifications_read_at")
+        .eq("id", userId)
+        .maybeSingle();
+      if (uErr && !isMissingTableError(uErr) && uErr.code !== "42703") {
+        req.log.warn({ err: uErr }, "notifications read-cursor load failed");
+      }
+      const v = (userRow as { notifications_read_at?: string | null } | null)
+        ?.notifications_read_at;
+      if (typeof v === "string") lastReadAt = v;
+    }
+
+    if (groupIds.length === 0) {
+      res.json({
+        items: [],
+        unreadCount: 0,
+        lastReadAt,
+        nextBefore: null,
+      });
+      return;
+    }
+
+    // Over-fetch a bit so we still hit `limit` after merge + deleted-trail drops.
+    const fetchLimit = limit * 2 + 5;
+
+    // We use `.lte` here (not `.lt`) so rows that share the boundary
+    // timestamp aren't dropped. Final tie-break filtering happens after the
+    // union, using the composite `(occurred_at, id)` cursor.
+    let sharesQ = supa
+      .from("trail_shares")
+      .select("trail_id, group_id, shared_by_user_id, shared_at")
+      .in("group_id", groupIds)
+      .neq("shared_by_user_id", userId)
+      .order("shared_at", { ascending: false })
+      .limit(fetchLimit);
+    if (beforeIso) sharesQ = sharesQ.lte("shared_at", beforeIso);
+
+    let joinsQ = supa
+      .from("group_members")
+      .select("user_id, group_id, joined_at, role")
+      .in("group_id", groupIds)
+      .neq("user_id", userId)
+      .order("joined_at", { ascending: false })
+      .limit(fetchLimit);
+    if (beforeIso) joinsQ = joinsQ.lte("joined_at", beforeIso);
+
+    const [sharesRes, joinsRes] = await Promise.all([sharesQ, joinsQ]);
+
+    if (sharesRes.error && !isMissingTableError(sharesRes.error)) {
+      req.log.error(
+        { err: sharesRes.error },
+        "notifications trail_shares load failed",
+      );
+      res.status(500).json({ error: "Failed to load notifications" });
+      return;
+    }
+    if (joinsRes.error && !isMissingTableError(joinsRes.error)) {
+      req.log.error(
+        { err: joinsRes.error },
+        "notifications group_members load failed",
+      );
+      res.status(500).json({ error: "Failed to load notifications" });
+      return;
+    }
+
+    interface ShareRow {
+      trail_id: string;
+      group_id: string;
+      shared_by_user_id: string;
+      shared_at: string;
+    }
+    interface JoinRow {
+      user_id: string;
+      group_id: string;
+      joined_at: string;
+      role: string;
+    }
+    const shareRows = (sharesRes.data ?? []) as ShareRow[];
+    const joinRows = (joinsRes.data ?? []) as JoinRow[];
+
+    // Hydrate referenced trails / groups / users in three parallel batches.
+    const trailIds = [...new Set(shareRows.map((r) => r.trail_id))];
+    const groupSet = new Set<string>();
+    shareRows.forEach((r) => groupSet.add(r.group_id));
+    joinRows.forEach((r) => groupSet.add(r.group_id));
+    const userIdSet = new Set<string>();
+    shareRows.forEach((r) => userIdSet.add(r.shared_by_user_id));
+    joinRows.forEach((r) => userIdSet.add(r.user_id));
+
+    const [trailsRes, groupsRes, usersRes] = await Promise.all([
+      trailIds.length > 0
+        ? supa
+            .from("trails")
+            .select("id, name, deleted_at")
+            .in("id", trailIds)
+        : Promise.resolve({
+            data: [] as Array<Record<string, unknown>>,
+            error: null,
+          }),
+      groupSet.size > 0
+        ? supa.from("groups").select("id, name").in("id", [...groupSet])
+        : Promise.resolve({
+            data: [] as Array<Record<string, unknown>>,
+            error: null,
+          }),
+      userIdSet.size > 0
+        ? supa
+            .from("users")
+            .select("id, display_name, email, avatar_url")
+            .in("id", [...userIdSet])
+        : Promise.resolve({
+            data: [] as Array<Record<string, unknown>>,
+            error: null,
+          }),
+    ]);
+
+    interface TrailLite {
+      id: string;
+      name: string | null;
+      deleted_at: string | null;
+    }
+    interface GroupLite {
+      id: string;
+      name: string;
+    }
+    interface UserLite {
+      id: string;
+      display_name: string | null;
+      email: string | null;
+      avatar_url: string | null;
+    }
+    const trails = new Map<string, TrailLite>();
+    for (const t of (trailsRes.data ?? []) as TrailLite[]) trails.set(t.id, t);
+    const groups = new Map<string, GroupLite>();
+    for (const g of (groupsRes.data ?? []) as GroupLite[]) groups.set(g.id, g);
+    const users = new Map<string, UserLite>();
+    for (const u of (usersRes.data ?? []) as UserLite[]) users.set(u.id, u);
+
+    interface NotifBase {
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: {
+        id: string;
+        display_name: string | null;
+        email: string | null;
+        avatar_url: string | null;
+      };
+      unread: boolean;
+    }
+    type Notif =
+      | (NotifBase & {
+          type: "trail_shared";
+          trail: { id: string; name: string };
+        })
+      | (NotifBase & { type: "member_joined" });
+
+    const isUnread = (iso: string) =>
+      !lastReadAt || new Date(iso).getTime() > new Date(lastReadAt).getTime();
+
+    const items: Notif[] = [];
+
+    for (const r of shareRows) {
+      const tr = trails.get(r.trail_id);
+      if (!tr || tr.deleted_at != null) continue; // skip deleted trails
+      const g = groups.get(r.group_id);
+      if (!g) continue;
+      const u = users.get(r.shared_by_user_id);
+      items.push({
+        id: `share:${r.trail_id}:${r.group_id}`,
+        type: "trail_shared",
+        occurred_at: r.shared_at,
+        group: { id: g.id, name: g.name },
+        trail: { id: tr.id, name: tr.name ?? "Trail" },
+        actor: {
+          id: r.shared_by_user_id,
+          display_name: u?.display_name ?? null,
+          email: u?.email ?? null,
+          avatar_url: u?.avatar_url ?? null,
+        },
+        unread: isUnread(r.shared_at),
+      });
+    }
+    for (const r of joinRows) {
+      const g = groups.get(r.group_id);
+      if (!g) continue;
+      const u = users.get(r.user_id);
+      items.push({
+        id: `join:${r.user_id}:${r.group_id}`,
+        type: "member_joined",
+        occurred_at: r.joined_at,
+        group: { id: g.id, name: g.name },
+        actor: {
+          id: r.user_id,
+          display_name: u?.display_name ?? null,
+          email: u?.email ?? null,
+          avatar_url: u?.avatar_url ?? null,
+        },
+        unread: isUnread(r.joined_at),
+      });
+    }
+
+    // Sort by `(occurred_at desc, id desc)` — the composite key matches the
+    // tuple comparison we do for the cursor below.
+    items.sort((a, b) => {
+      const c = b.occurred_at.localeCompare(a.occurred_at);
+      return c !== 0 ? c : b.id.localeCompare(a.id);
+    });
+
+    // Tuple-cursor filter: keep items strictly less-than the previous page's
+    // last item under `(occurred_at, id)` ordering. Without this, rows that
+    // share a timestamp with the boundary row would be returned twice (since
+    // we used `.lte` above to avoid silently dropping ties).
+    const filtered =
+      beforeIso && beforeId
+        ? items.filter(
+            (it) =>
+              it.occurred_at < beforeIso ||
+              (it.occurred_at === beforeIso && it.id < beforeId),
+          )
+        : items;
+
+    const page = filtered.slice(0, limit);
+    const nextBefore =
+      page.length === limit
+        ? `${page[page.length - 1].occurred_at}|${page[page.length - 1].id}`
+        : null;
+
+    // Server-side total unread count (across all groups, not just this page).
+    // Aligns with the visible feed: the share count uses an inner-join on
+    // `trails` filtered by `deleted_at IS NULL` so soft-deleted trails don't
+    // inflate the badge over what the panel actually displays. Run in
+    // parallel to keep the request snappy.
+    const cutoff = lastReadAt ?? "1970-01-01T00:00:00Z";
+    const [unreadSharesRes, unreadJoinsRes] = await Promise.all([
+      supa
+        .from("trail_shares")
+        .select("trail_id, trails!inner(deleted_at)", {
+          head: true,
+          count: "exact",
+        })
+        .in("group_id", groupIds)
+        .neq("shared_by_user_id", userId)
+        .gt("shared_at", cutoff)
+        .is("trails.deleted_at", null),
+      supa
+        .from("group_members")
+        .select("user_id", { head: true, count: "exact" })
+        .in("group_id", groupIds)
+        .neq("user_id", userId)
+        .gt("joined_at", cutoff),
+    ]);
+    const unreadCount =
+      (unreadSharesRes.count ?? 0) + (unreadJoinsRes.count ?? 0);
+
+    res.json({ items: page, unreadCount, lastReadAt, nextBefore });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// MARK ALL notifications read — bumps users.notifications_read_at to now().
+// Subsequent /me/notifications calls will report `unreadCount: 0` until new
+// activity occurs.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/me/notifications/read",
+  requireAuth(async (req, res, userId) => {
+    const supa = getSupabaseAdmin();
+    const nowIso = new Date().toISOString();
+    const { error } = await supa
+      .from("users")
+      .update({ notifications_read_at: nowIso })
+      .eq("id", userId);
+    if (error) {
+      if (isMissingTableError(error) || error.code === "42703") {
+        res.status(503).json({
+          error:
+            "Notifications feature not yet provisioned — apply migration 0010_group_notifications.sql",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "mark notifications read failed");
+      res.status(500).json({ error: "Failed to mark notifications read" });
+      return;
+    }
+    res.json({ ok: true, last_read_at: nowIso });
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // AUTO-ACCEPT pending email invites for the caller. Called on sign-in via the
 // existing /me/sync flow. Returns count of newly-joined groups.
 // ---------------------------------------------------------------------------
