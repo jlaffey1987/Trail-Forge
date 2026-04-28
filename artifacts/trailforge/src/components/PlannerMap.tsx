@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Trail } from "@/lib/supabase";
 import { type GeoPoint } from "@/lib/routing";
 import { renderTrailLayer, type TrailLayerHandle } from "@/lib/trailLayer";
@@ -29,8 +29,17 @@ interface Props {
 }
 
 export default function PlannerMap({ start, end, trails, selectedIds, onToggle }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<import("leaflet").Map | null>(null);
+  // Callback ref so the init effect re-fires the moment the container actually
+  // mounts. The component does an early return when nothing to show, so the
+  // container only appears after the first search — we cannot rely on a plain
+  // useRef being populated by the time `leafletLoaded` flips to true.
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+  const setContainerRef = useCallback((el: HTMLDivElement | null) => {
+    setContainerEl(el);
+  }, []);
+  // Map instance lives in state (not a ref) so the markers/trails effect can
+  // re-run when the map is (re-)created — refs don't trigger re-renders.
+  const [map, setMap] = useState<import("leaflet").Map | null>(null);
   const markerLayersRef = useRef<import("leaflet").Layer[]>([]);
   const trailLayerRef = useRef<TrailLayerHandle | null>(null);
   const [leafletLoaded, setLeafletLoaded] = useState(false);
@@ -57,45 +66,40 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     return () => clearInterval(check);
   }, []);
 
-  // Init map
+  // Init map — also tears down when the container unmounts (e.g. parent's
+  // early return fires after results are cleared) so a future re-mount can
+  // bind a fresh map instance.
   useEffect(() => {
-    if (!leafletLoaded || !containerRef.current || mapRef.current) return;
+    if (!leafletLoaded || !containerEl) return;
     const L = window.L;
-    const map = L.map(containerRef.current, { center: [54, -3], zoom: 6, zoomControl: true });
+    const instance = L.map(containerEl, { center: [54, -3], zoom: 6, zoomControl: true });
     L.tileLayer(
       "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       { attribution: "Tiles © Esri", maxZoom: 19 }
-    ).addTo(map);
-    mapRef.current = map;
-  }, [leafletLoaded]);
-
-  // Cleanup on unmount
-  useEffect(() => {
+    ).addTo(instance);
+    setMap(instance);
     return () => {
-      if (mapRef.current) {
-        try { mapRef.current.remove(); } catch { /* ignore */ }
-        mapRef.current = null;
-      }
+      try { instance.remove(); } catch { /* ignore */ }
       markerLayersRef.current = [];
       trailLayerRef.current?.clear();
       trailLayerRef.current = null;
+      setMap(null);
     };
-  }, []);
+  }, [leafletLoaded, containerEl]);
 
   // Trigger size recalc when collapsed/expanded toggles
   useEffect(() => {
-    if (mapRef.current && expanded) {
-      setTimeout(() => mapRef.current?.invalidateSize(), 100);
+    if (map && expanded) {
+      setTimeout(() => map.invalidateSize(), 100);
     }
-  }, [expanded]);
+  }, [expanded, map]);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
   // Render markers + trails
   useEffect(() => {
-    if (!mapRef.current || !window.L) return;
+    if (!map || !window.L) return;
     const L = window.L;
-    const map = mapRef.current;
 
     // Clear previous start/end markers + connection
     markerLayersRef.current.forEach((l) => l.remove());
@@ -156,7 +160,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     } else if (allBounds.length === 1) {
       map.setView(allBounds[0], 12);
     }
-  }, [start, end, trails, selectedIdSet, onToggle, leafletLoaded]);
+  }, [start, end, trails, selectedIdSet, onToggle, map]);
 
   if (!start && !end && trails.length === 0) return null;
 
@@ -187,7 +191,7 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
       {/* Container always mounted; collapse just hides via display:none so map stays valid */}
       <div style={{ display: expanded ? "block" : "none" }}>
         <div className="relative" style={{ height: "320px" }}>
-          <div ref={containerRef} className="absolute inset-0 bg-stone-900" />
+          <div ref={setContainerRef} className="absolute inset-0 bg-stone-900" />
           {!leafletLoaded && (
             <div className="absolute inset-0 flex items-center justify-center bg-[hsl(22,15%,8%)]">
               <div className="text-center">
