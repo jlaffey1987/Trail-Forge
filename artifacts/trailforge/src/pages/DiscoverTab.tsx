@@ -1,9 +1,14 @@
-import { useState, useEffect } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { fetchCommunityTrails, type Trail } from "@/lib/supabase";
 import {
   fetchTrailActivityCounts,
   type TrailActivityCounts,
 } from "@/lib/trailContent";
+import {
+  GROUPS_MEMBERSHIP_CHANGED_EVENT,
+  fetchGroupTrails,
+  type SharedTrail,
+} from "@/lib/groups";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -42,20 +47,52 @@ function getPostedTime(created_at: string) {
 export default function DiscoverTab() {
   const [activeFilter, setActiveFilter] = useState("All");
   const [liked, setLiked] = useState<Set<string>>(new Set());
-  const [trails, setTrails] = useState<Trail[]>([]);
+  const [trails, setTrails] = useState<SharedTrail[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [activityCounts, setActivityCounts] = useState<Record<string, TrailActivityCounts>>({});
 
-  useEffect(() => {
-    fetchCommunityTrails().then((data) => {
-      setTrails(data);
-      setLoading(false);
-      if (data.length > 0) {
-        fetchTrailActivityCounts(data.map((t) => t.id)).then(setActivityCounts);
-      }
-    });
+  const refresh = useCallback(() => {
+    setLoading(true);
+    void Promise.all([fetchCommunityTrails(), fetchGroupTrails()]).then(
+      ([community, groupTrails]) => {
+        // Merge: group-shared trails go first so the user sees private picks
+        // from their groups at the top of the feed alongside the public list.
+        const seen = new Set<string>();
+        const merged: SharedTrail[] = [];
+        for (const t of groupTrails) {
+          if (seen.has(t.id)) continue;
+          seen.add(t.id);
+          merged.push(t);
+        }
+        for (const t of community) {
+          if (seen.has(t.id)) continue;
+          seen.add(t.id);
+          merged.push(t);
+        }
+        setTrails(merged);
+        setLoading(false);
+        if (merged.length > 0) {
+          void fetchTrailActivityCounts(merged.map((t) => t.id)).then(
+            setActivityCounts,
+          );
+        }
+      },
+    );
   }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Invalidate the discover feed when group membership changes so removed
+  // members no longer see private trails from a group they just left.
+  useEffect(() => {
+    const handler = () => refresh();
+    window.addEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
+    return () =>
+      window.removeEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
+  }, [refresh]);
 
   const toggleLike = (id: string) => {
     setLiked((prev) => {
@@ -182,13 +219,23 @@ export default function DiscoverTab() {
                       <span className="text-xs text-stone-400">{authorName}</span>
                     </div>
 
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
                       <span className="text-xs text-stone-400 bg-stone-800/80 px-2 py-0.5 rounded">
                         {formatDistance(trail.distance_km)}
                       </span>
                       <span className="text-xs text-stone-500 bg-stone-800/40 px-2 py-0.5 rounded">
                         {trail.terrain || "Mixed"}
                       </span>
+                      {trail.shared_groups && trail.shared_groups.length > 0 && (
+                        <span
+                          className="text-[10px] font-bold uppercase tracking-wider text-amber-300 bg-amber-900/40 border border-amber-500/30 px-2 py-0.5 rounded-full"
+                          title={`Shared via ${trail.shared_groups.map((g) => g.name).join(", ")}`}
+                          data-testid={`discover-card-group-${trail.id}`}
+                        >
+                          Group · {trail.shared_groups[0]!.name}
+                          {trail.shared_groups.length > 1 ? ` +${trail.shared_groups.length - 1}` : ""}
+                        </span>
+                      )}
                     </div>
 
                     <div

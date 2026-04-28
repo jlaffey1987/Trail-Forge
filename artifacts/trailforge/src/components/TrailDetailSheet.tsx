@@ -125,6 +125,35 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
               <p className="text-[10px] text-stone-500 mt-0.5" data-testid="trail-detail-counts">
                 {counts.notes} notes · {counts.photos} photos · {counts.pending} pending edits
               </p>
+              {trail.shared_groups && trail.shared_groups.length > 0 ? (
+                <div
+                  className="flex flex-wrap gap-1 mt-1.5"
+                  data-testid="trail-detail-shared-groups"
+                >
+                  {trail.shared_groups.map((g) => (
+                    <span
+                      key={g.id}
+                      className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-300 bg-amber-500/15 border border-amber-500/40 rounded-full px-1.5 py-0.5"
+                      title={`Shared into ${g.name}`}
+                      data-testid={`trail-detail-shared-group-${g.id}`}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        className="w-2.5 h-2.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                      >
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                      </svg>
+                      {g.name}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
             <button
               onClick={onClose}

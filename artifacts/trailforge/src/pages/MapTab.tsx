@@ -21,6 +21,11 @@ import {
   bboxesIntersect,
 } from "@/lib/trailLayer";
 import { useRouteTrails } from "@/lib/plannerRouteStore";
+import {
+  GROUPS_MEMBERSHIP_CHANGED_EVENT,
+  fetchGroupTrails,
+  setTrailShares,
+} from "@/lib/groups";
 
 interface Waypoint {
   id: number;
@@ -119,14 +124,28 @@ export default function MapTab() {
     setCurrentBbox(bbox);
     const seq = ++fetchSeqRef.current;
     setTrailsLoading(true);
-    const { trails, usedBbox } = await fetchTrailsInBbox(bbox, {
-      difficulties: filters.difficulties.length > 0 ? filters.difficulties : undefined,
-      trailTypes: filters.trailTypes.length > 0 ? filters.trailTypes : undefined,
-      limit: 200,
-    });
+    const [{ trails, usedBbox }, groupTrails] = await Promise.all([
+      fetchTrailsInBbox(bbox, {
+        difficulties: filters.difficulties.length > 0 ? filters.difficulties : undefined,
+        trailTypes: filters.trailTypes.length > 0 ? filters.trailTypes : undefined,
+        limit: 200,
+      }),
+      fetchGroupTrails({
+        minLat: bbox.minLat,
+        maxLat: bbox.maxLat,
+        minLng: bbox.minLng,
+        maxLng: bbox.maxLng,
+      }),
+    ]);
     if (seq !== fetchSeqRef.current) return; // stale
     setUsedServerBbox(usedBbox);
-    setAllTrails(trails);
+    // Merge public + group-shared trails. Group trails win on collision so
+    // the `shared_groups` decoration is preserved when the same trail is
+    // both public and shared into a group the user belongs to.
+    const merged = new Map<string, Trail>();
+    for (const t of trails) merged.set(t.id, t);
+    for (const t of groupTrails) merged.set(t.id, t);
+    setAllTrails(Array.from(merged.values()));
     setTrailsLoading(false);
   }, [filters.difficulties, filters.trailTypes]);
 
@@ -199,6 +218,23 @@ export default function MapTab() {
   useEffect(() => {
     if (!mapRef.current) return;
     void fetchTrailsForCurrentView();
+  }, [fetchTrailsForCurrentView]);
+
+  // Invalidate the trail cache as soon as group membership changes (member
+  // removed, ownership transferred, invite accepted/declined, or share
+  // assignments updated). Without this, a user removed from a group could
+  // still see that group's private trails until they panned/zoomed.
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const handler = () => {
+      // Drop any selected trail in case it was a group-shared private trail
+      // we no longer have access to; the next fetch will repopulate.
+      setSelectedTrail((prev) => (prev && !prev.is_public ? null : prev));
+      void fetchTrailsForCurrentView();
+    };
+    window.addEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
+    return () =>
+      window.removeEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
   }, [fetchTrailsForCurrentView]);
 
   // Switch base map tile layer
@@ -799,10 +835,13 @@ ${trkpts}
         gpxData={showDrawSave ? buildDrawnGpx() : ""}
         prefill={{ distanceKm: totalKm }}
         onCancel={() => setShowDrawSave(false)}
-        onSave={async ({ input }) => {
+        onSave={async ({ input, selectedGroupIds }) => {
           const trail = await addTrail(input);
           if (!trail) {
             return { ok: false, error: "Could not save trail. Are you signed in?" };
+          }
+          if (selectedGroupIds.length > 0) {
+            await setTrailShares(trail.id, selectedGroupIds);
           }
           setShowDrawSave(false);
           clearWaypoints();

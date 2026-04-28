@@ -8,6 +8,13 @@ import {
   type UpdateTrailInput,
 } from "@/lib/supabase";
 import { validateGpxString } from "@/lib/gpx";
+import {
+  type Group,
+  type GroupShare,
+  getTrailShares,
+  listMyGroups,
+  setTrailShares,
+} from "@/lib/groups";
 
 const TRAIL_TYPES = ["BOAT", "Green Lane", "UCR", "Other"];
 const SURFACES = ["Mixed", "Gravel", "Dirt", "Mud", "Rocky", "Sand", "Grass", "Tarmac"];
@@ -20,8 +27,9 @@ interface Props {
   onChanged: (updated: Trail) => void;
 }
 
-function inferPrivacy(trail: Trail): TrailPrivacy {
-  return trail.is_public ? "public" : "private";
+function inferPrivacy(trail: Trail, hasShares: boolean): TrailPrivacy {
+  if (trail.is_public) return "public";
+  return hasShares ? "group" : "private";
 }
 
 export default function EditTrailDialog({ open, trail, onClose, onChanged }: Props) {
@@ -36,6 +44,10 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
   const [error, setError] = useState<string | null>(null);
   const [replacing, setReplacing] = useState(false);
 
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+
   useEffect(() => {
     if (!open || !trail) return;
     setName(trail.name ?? "");
@@ -44,11 +56,31 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
     setTerrain(trail.terrain ?? "Mixed");
     setDistanceKm((trail.distance_km ?? 0).toString());
     setDescription(trail.description ?? "");
-    setPrivacy(inferPrivacy(trail));
     setError(null);
     setSubmitting(false);
     setReplacing(false);
+    setGroupsLoading(true);
+    let cancelled = false;
+    Promise.all([listMyGroups(), getTrailShares(trail.id)]).then(
+      ([gs, shares]) => {
+        if (cancelled) return;
+        setGroups(gs.items);
+        const ids = (shares ?? []).map((s: GroupShare) => s.group_id);
+        setSelectedGroupIds(ids);
+        setPrivacy(inferPrivacy(trail, ids.length > 0));
+        setGroupsLoading(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
   }, [open, trail]);
+
+  const toggleGroup = (id: string) => {
+    setSelectedGroupIds((prev) =>
+      prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id],
+    );
+  };
 
   if (!open || !trail) return null;
 
@@ -63,6 +95,10 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
       setError("Distance must be a number");
       return;
     }
+    if (privacy === "group" && selectedGroupIds.length === 0) {
+      setError("Pick at least one group to share into, or choose Private/Public.");
+      return;
+    }
     setSubmitting(true);
     const input: UpdateTrailInput = {
       name: name.trim(),
@@ -75,9 +111,18 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
       privacy,
     };
     const updated = await updateOwnedTrail(trail.id, input);
-    setSubmitting(false);
     if (!updated) {
+      setSubmitting(false);
       setError("Could not update trail");
+      return;
+    }
+    // Sync shares: when privacy=group save the picked ids; otherwise clear.
+    const sharesToWrite = privacy === "group" ? selectedGroupIds : [];
+    const sharesOk = await setTrailShares(trail.id, sharesToWrite);
+    setSubmitting(false);
+    if (!sharesOk) {
+      setError("Trail saved, but could not update group shares.");
+      onChanged(updated);
       return;
     }
     onChanged(updated);
@@ -243,28 +288,64 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
             <label className="block text-[11px] font-bold uppercase tracking-wider text-stone-500 mb-1">Visibility</label>
             <div className="grid grid-cols-3 gap-2">
               {(["private", "public", "group"] as const).map((p) => {
-                const disabled = p === "group";
                 const active = privacy === p;
                 return (
                   <button
                     key={p}
                     type="button"
-                    disabled={disabled}
                     onClick={() => setPrivacy(p)}
                     className={`px-2 py-2.5 rounded-lg border text-xs font-bold uppercase tracking-wider ${
-                      disabled
-                        ? "border-stone-800 text-stone-700"
-                        : active
+                      active
                         ? "border-amber-500 bg-amber-500/10 text-amber-300"
                         : "border-stone-700 text-stone-300"
                     }`}
                     data-testid={`edit-trail-privacy-${p}`}
                   >
-                    {p === "group" ? "Group (soon)" : p}
+                    {p}
                   </button>
                 );
               })}
             </div>
+            {privacy === "group" && (
+              <div className="mt-3 bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,20%)] rounded-lg p-3" data-testid="edit-trail-group-picker">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-stone-400 mb-2">
+                  Share into groups
+                </div>
+                {groupsLoading ? (
+                  <div className="text-[11px] text-stone-500 py-2 text-center">Loading…</div>
+                ) : groups.length === 0 ? (
+                  <p className="text-[11px] text-stone-500">
+                    You're not in any groups yet. Create one from My Trails first.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                    {groups.map((g) => {
+                      const checked = selectedGroupIds.includes(g.id);
+                      return (
+                        <label
+                          key={g.id}
+                          className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer border ${
+                            checked
+                              ? "border-amber-500/50 bg-amber-500/10"
+                              : "border-stone-700 hover:border-stone-500"
+                          }`}
+                          data-testid={`edit-trail-group-${g.id}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleGroup(g.id)}
+                            className="accent-amber-500"
+                          />
+                          <span className="flex-1 text-xs text-stone-200 truncate">{g.name}</span>
+                          <span className="text-[9px] uppercase tracking-wider text-stone-500">{g.role}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Replace GPX */}

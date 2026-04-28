@@ -20,7 +20,10 @@ import DiscoverTab from "@/pages/DiscoverTab";
 import AITab from "@/pages/AITab";
 import UserMenu from "@/components/UserMenu";
 import SavedTrailsMergePrompt from "@/components/SavedTrailsMergePrompt";
+import InvitesBadge from "@/components/groups/InvitesBadge";
+import InviteAcceptPage from "@/components/groups/InviteAcceptPage";
 import { syncCurrentUser } from "@/lib/users";
+import { autoAcceptEmailInvites } from "@/lib/groups";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
@@ -204,6 +207,7 @@ function MainShell() {
             <div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>
             <span className="text-[10px] text-stone-400">GPS Active</span>
           </div>
+          <InvitesBadge />
           <UserMenu />
         </div>
       </header>
@@ -297,7 +301,12 @@ function ClerkUserSync() {
     if (!isLoaded || !isSignedIn || !user) return;
     if (lastSyncedRef.current === user.id) return;
     lastSyncedRef.current = user.id;
-    syncCurrentUser();
+    void (async () => {
+      await syncCurrentUser();
+      // After we know the Supabase user row exists, also sweep any
+      // pending email-bound group invites for this user.
+      await autoAcceptEmailInvites();
+    })();
   }, [isLoaded, isSignedIn, user]);
 
   return null;
@@ -335,6 +344,9 @@ function ClerkProviderWithRoutes() {
       <Switch>
         <Route path="/sign-in/*?" component={SignInPage} />
         <Route path="/sign-up/*?" component={SignUpPage} />
+        <Route path="/invite/:token">
+          {(params) => <InviteAcceptPage token={params.token ?? ""} />}
+        </Route>
         <Route component={MainShell} />
       </Switch>
     </ClerkProvider>

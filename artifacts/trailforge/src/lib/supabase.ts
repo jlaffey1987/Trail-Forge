@@ -48,6 +48,8 @@ export interface Trail {
   deleted_at?: string | null;
   /** Object-storage path for the original GPX artifact. Added in migration 0005. */
   gpx_object_path?: string | null;
+  /** Decorated by /api/me/group-trails — list of groups this trail is shared into that the viewer also belongs to. */
+  shared_groups?: Array<{ id: string; name: string }>;
 }
 
 export interface MapBbox {

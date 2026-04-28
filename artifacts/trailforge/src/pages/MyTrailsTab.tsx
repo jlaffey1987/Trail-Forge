@@ -15,6 +15,7 @@ import {
 import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTrailMenu";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import EditTrailDialog from "@/components/contribute/EditTrailDialog";
+import GroupsSection from "@/components/groups/GroupsSection";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -278,6 +279,8 @@ export default function MyTrailsTab() {
           </div>
         )}
       </section>
+
+      <GroupsSection signedIn={!!isSignedIn} />
 
       {/* Saved (planned) trails section */}
       <section className="px-4 pb-6 space-y-3">

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Waypoint } from "@/lib/gpx";
 import { distanceKmFromWaypoints, bboxFromWaypoints } from "@/lib/gpx";
 import { uploadGpxToStorage, type CreateTrailInput, type TrailPrivacy } from "@/lib/supabase";
+import { type Group, listMyGroups } from "@/lib/groups";
 
 const TRAIL_TYPES: { value: string; label: string }[] = [
   { value: "BOAT", label: "BOAT" },
@@ -24,6 +25,12 @@ const SURFACE_OPTIONS = [
 export interface SaveTrailFormResult {
   /** Final input ready to send to `addTrail()`. */
   input: CreateTrailInput;
+  /**
+   * Group ids the user picked to share into. The caller is responsible for
+   * persisting these via `setTrailShares(trailId, selectedGroupIds)` after
+   * the trail row has been created.
+   */
+  selectedGroupIds: string[];
 }
 
 export interface SaveTrailFormPrefill {
@@ -80,6 +87,10 @@ export default function SaveTrailForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+
   // Re-prefill when the modal is re-opened with different data.
   useEffect(() => {
     if (!open) return;
@@ -90,12 +101,35 @@ export default function SaveTrailForm({
     setDistanceKm(autoDistanceKm.toFixed(2));
     setDescription(prefill?.description ?? "");
     setPrivacy("private");
+    setSelectedGroupIds([]);
     setError(null);
     setSubmitting(false);
     // We intentionally re-key on `open` (not prefill) so user edits aren't
     // wiped while the form is open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Lazily load the user's groups once the form opens; needed for the
+  // group multi-select that appears when privacy = "group".
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setGroupsLoading(true);
+    listMyGroups().then((res) => {
+      if (cancelled) return;
+      setGroups(res.items);
+      setGroupsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const toggleGroup = (id: string) => {
+    setSelectedGroupIds((prev) =>
+      prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id],
+    );
+  };
 
   if (!open) return null;
 
@@ -113,6 +147,10 @@ export default function SaveTrailForm({
     const distNum = parseFloat(distanceKm);
     if (isNaN(distNum) || distNum <= 0) {
       setError("Distance must be a positive number");
+      return;
+    }
+    if (privacy === "group" && selectedGroupIds.length === 0) {
+      setError("Pick at least one group to share into, or choose Private/Public.");
       return;
     }
 
@@ -147,7 +185,10 @@ export default function SaveTrailForm({
       bbox_max_lng: bbox?.maxLng ?? null,
     };
 
-    const result = await onSave({ input });
+    const result = await onSave({
+      input,
+      selectedGroupIds: privacy === "group" ? selectedGroupIds : [],
+    });
     if (!result.ok) {
       setSubmitting(false);
       setError(result.error ?? "Could not save trail");
@@ -332,14 +373,56 @@ export default function SaveTrailForm({
                 current={privacy}
                 onSelect={setPrivacy}
                 title="Group"
-                subtitle="Coming soon"
+                subtitle="Pick groups"
                 testId="save-trail-privacy-group"
-                disabled
               />
             </div>
             <p className="text-[10px] text-stone-600 mt-1.5">
-              Private trails are stored only on your account. Public trails appear in Discover and the Map for everyone.
+              Private trails are stored only on your account. Public trails appear in Discover and the Map for everyone. Group trails are shared only with the groups you pick.
             </p>
+
+            {privacy === "group" && (
+              <div className="mt-3 bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg p-3" data-testid="save-trail-group-picker">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-stone-400 mb-2">
+                  Share into groups
+                </div>
+                {groupsLoading ? (
+                  <div className="text-[11px] text-stone-500 py-2 text-center">Loading…</div>
+                ) : groups.length === 0 ? (
+                  <p className="text-[11px] text-stone-500">
+                    You're not in any groups yet. Create one from My Trails first, then come back to share.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                    {groups.map((g) => {
+                      const checked = selectedGroupIds.includes(g.id);
+                      return (
+                        <label
+                          key={g.id}
+                          className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer border ${
+                            checked
+                              ? "border-amber-500/50 bg-amber-500/10"
+                              : "border-stone-700 hover:border-stone-500"
+                          }`}
+                          data-testid={`save-trail-group-${g.id}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleGroup(g.id)}
+                            className="accent-amber-500"
+                          />
+                          <span className="flex-1 text-xs text-stone-200 truncate">{g.name}</span>
+                          <span className="text-[9px] uppercase tracking-wider text-stone-500">
+                            {g.role}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {error && (
