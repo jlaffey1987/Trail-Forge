@@ -1,0 +1,25 @@
+{
+  "bundles": [
+    {
+      "file": "act-uk-v05.gpx",
+      "sha256": "a36780a39a1c2008de1a0688aa319b83f4c152f9fceda795d250ebb5f24f5168",
+      "bytes": 2259015,
+      "source": "act",
+      "region": "uk",
+      "sourceUrl": "https://adventurecountrytracks.com/"
+    },
+    {
+      "file": "tet-uk.gpx",
+      "sha256": "c0dc06a264377814dc1ae3cf855566022dbdf363d587dab5fdc71b53a6a4f228",
+      "bytes": 6796619,
+      "source": "tet",
+      "region": "uk",
+      "sourceUrl": "https://transeurotrail.org/"
+    }
+  ],
+  "notes": [
+    "ACT_It_V08_1777293954365.gpx (Italy) was byte-identical to ACT_It_V08_1777293954349.gpx and was dropped during dedup.",
+    "Italy and Pyrenees ACT bundles are intentionally NOT shipped in this fixture set — only the UK bundles are wired in to keep import time and external API cost bounded. Drop additional .gpx files into this directory and add an entry here to enable them.",
+    "Per ACT terms (link-out only) and TET licensing, we do NOT redistribute the original .gpx; trails store derived geometry + a link back to the source site (adventurecountrytracks.com / transeurotrail.org)."
+  ]
+}

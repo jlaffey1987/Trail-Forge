@@ -688,6 +688,10 @@ importers:
         version: 7.1.1
 
   scripts:
+    dependencies:
+      '@workspace/integrations-anthropic-ai':
+        specifier: workspace:*
+        version: link:../lib/integrations-anthropic-ai
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
