@@ -1,8 +1,11 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { getAuth, clerkClient } from "@clerk/express";
-import { randomBytes } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
+
+const objectStorage = new ObjectStorageService();
 
 const router: IRouter = Router();
 
@@ -339,6 +342,170 @@ router.patch(
     if (error) {
       res.status(500).json({ error: "Failed to update group" });
       return;
+    }
+    res.json(data);
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// COVER PHOTO upload (owner / admin only)
+//
+// Three-step flow that mirrors trail photos:
+//   1. POST /groups/:id/cover/upload-url → returns signed PUT URL + storageKey
+//   2. Client PUTs the JPEG bytes directly to that URL
+//   3. POST /groups/:id/cover { storageKey } → stamps the ACL public, writes
+//      `groups.cover_photo_key`, and best-effort deletes any prior cover.
+//
+// Storage key convention: `groups/{groupId}/cover/{uuid}.jpg`.
+// ---------------------------------------------------------------------------
+
+const CoverFinalizeBody = z.object({ storageKey: z.string().min(1).max(512) });
+
+async function loadCoverEditableGroup(
+  req: Request,
+  res: Response,
+  userId: string,
+): Promise<{ groupId: string; currentKey: string | null } | null> {
+  const idParse = GroupIdParam.safeParse(req.params.groupId);
+  if (!idParse.success) {
+    res.status(400).json({ error: "Invalid group id" });
+    return null;
+  }
+  const ms = await fetchMembership(idParse.data, userId);
+  if ("notMember" in ms) {
+    res.status(403).json({ error: "Not a member" });
+    return null;
+  }
+  if ("error" in ms && ms.error) {
+    res.status(500).json({ error: "Failed to load membership" });
+    return null;
+  }
+  if (ms.member.role !== "owner" && ms.member.role !== "admin") {
+    res
+      .status(403)
+      .json({ error: "Only owners or admins can change the cover photo" });
+    return null;
+  }
+  const supa = getSupabaseAdmin();
+  const { data: g, error: gErr } = await supa
+    .from("groups")
+    .select("id, cover_photo_key")
+    .eq("id", idParse.data)
+    .maybeSingle();
+  if (gErr || !g) {
+    res.status(404).json({ error: "Group not found" });
+    return null;
+  }
+  return {
+    groupId: idParse.data,
+    currentKey: (g as { cover_photo_key: string | null }).cover_photo_key,
+  };
+}
+
+router.post(
+  "/groups/:groupId/cover/upload-url",
+  requireAuth(async (req, res, userId) => {
+    const ctx = await loadCoverEditableGroup(req, res, userId);
+    if (!ctx) return;
+    const subPath = `groups/${ctx.groupId}/cover/${randomUUID()}.jpg`;
+    try {
+      const uploadURL = await objectStorage.getObjectEntityUploadURL(subPath);
+      res.json({
+        uploadURL,
+        storageKey: subPath,
+        objectPath: `/objects/${subPath}`,
+      });
+    } catch (err) {
+      req.log.error({ err }, "group cover upload-url failed");
+      res.status(500).json({ error: "Failed to generate upload URL" });
+    }
+  }),
+);
+
+router.post(
+  "/groups/:groupId/cover",
+  requireAuth(async (req, res, userId) => {
+    const ctx = await loadCoverEditableGroup(req, res, userId);
+    if (!ctx) return;
+    const parsed = CoverFinalizeBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid storageKey" });
+      return;
+    }
+    const expectedPrefix = `groups/${ctx.groupId}/cover/`;
+    if (!parsed.data.storageKey.startsWith(expectedPrefix)) {
+      res.status(400).json({ error: "storageKey does not match this group" });
+      return;
+    }
+
+    // Stamp ACL — public so any member viewing the group can render it.
+    // Auth on the GET endpoint still requires a valid object; the path is
+    // an unguessable UUID under the group id.
+    try {
+      await objectStorage.trySetObjectEntityAclPolicy(
+        `/objects/${parsed.data.storageKey}`,
+        { owner: userId, visibility: "public" },
+      );
+    } catch (err) {
+      if (err instanceof ObjectNotFoundError) {
+        res.status(404).json({ error: "Cover upload not completed" });
+        return;
+      }
+      req.log.error({ err }, "set cover ACL failed");
+      res.status(500).json({ error: "Failed to finalize cover photo" });
+      return;
+    }
+
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("groups")
+      .update({ cover_photo_key: parsed.data.storageKey })
+      .eq("id", ctx.groupId)
+      .select()
+      .single();
+    if (error) {
+      req.log.error({ err: error }, "save cover key failed");
+      res.status(500).json({ error: "Failed to save cover photo" });
+      return;
+    }
+
+    // Best-effort: drop the prior cover from object storage so we don't
+    // accumulate orphaned blobs when owners re-upload.
+    if (ctx.currentKey && ctx.currentKey !== parsed.data.storageKey) {
+      try {
+        await objectStorage.deleteObjectEntity(`/objects/${ctx.currentKey}`);
+      } catch (err) {
+        req.log.warn({ err, key: ctx.currentKey }, "delete prior cover failed");
+      }
+    }
+
+    res.json(data);
+  }),
+);
+
+router.delete(
+  "/groups/:groupId/cover",
+  requireAuth(async (req, res, userId) => {
+    const ctx = await loadCoverEditableGroup(req, res, userId);
+    if (!ctx) return;
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("groups")
+      .update({ cover_photo_key: null })
+      .eq("id", ctx.groupId)
+      .select()
+      .single();
+    if (error) {
+      req.log.error({ err: error }, "clear cover key failed");
+      res.status(500).json({ error: "Failed to remove cover photo" });
+      return;
+    }
+    if (ctx.currentKey) {
+      try {
+        await objectStorage.deleteObjectEntity(`/objects/${ctx.currentKey}`);
+      } catch (err) {
+        req.log.warn({ err, key: ctx.currentKey }, "delete cover blob failed");
+      }
     }
     res.json(data);
   }),

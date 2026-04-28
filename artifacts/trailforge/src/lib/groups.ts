@@ -157,6 +157,45 @@ export async function updateGroup(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Cover photo
+// ---------------------------------------------------------------------------
+
+export interface GroupCoverUploadTicket {
+  uploadURL: string;
+  storageKey: string;
+  objectPath: string;
+}
+
+export async function requestGroupCoverUploadUrl(
+  groupId: string,
+): Promise<GroupCoverUploadTicket | null> {
+  return jsonFetch<GroupCoverUploadTicket>(
+    `/api/groups/${groupId}/cover/upload-url`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function finalizeGroupCover(
+  groupId: string,
+  storageKey: string,
+): Promise<Group | null> {
+  return jsonFetch<Group>(`/api/groups/${groupId}/cover`, {
+    method: "POST",
+    body: JSON.stringify({ storageKey }),
+  });
+}
+
+export async function removeGroupCover(groupId: string): Promise<Group | null> {
+  return jsonFetch<Group>(`/api/groups/${groupId}/cover`, { method: "DELETE" });
+}
+
+/** URL the browser should hit to render a group cover photo. */
+export function groupCoverPhotoUrl(coverKey: string | null | undefined): string | null {
+  if (!coverKey) return null;
+  return `/api/storage/objects/${coverKey}`;
+}
+
 /**
  * Custom event fired whenever group membership changes (member added/removed,
  * a group is deleted, ownership is transferred, an invite is accepted/declined,

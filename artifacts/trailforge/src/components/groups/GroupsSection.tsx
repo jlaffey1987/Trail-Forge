@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   type Group,
+  groupCoverPhotoUrl,
   listMyGroups,
 } from "@/lib/groups";
 import CreateGroupDialog from "./CreateGroupDialog";
@@ -83,34 +84,52 @@ export default function GroupsSection({ signedIn }: Props) {
         </div>
       ) : (
         <div className="space-y-2" data-testid="groups-list">
-          {groups.map((g) => (
-            <button
-              key={g.id}
-              onClick={() => setOpenGroupId(g.id)}
-              className="w-full text-left bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-3 hover:border-amber-500/40 transition-colors"
-              data-testid={`group-card-${g.id}`}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-bold text-stone-100 truncate">{g.name}</div>
-                  {g.description && (
-                    <div className="text-[11px] text-stone-500 line-clamp-2 mt-0.5">
-                      {g.description}
+          {groups.map((g) => {
+            const coverUrl = groupCoverPhotoUrl(g.cover_photo_key);
+            return (
+              <button
+                key={g.id}
+                onClick={() => setOpenGroupId(g.id)}
+                className="w-full text-left bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden hover:border-amber-500/40 transition-colors"
+                data-testid={`group-card-${g.id}`}
+              >
+                {coverUrl && (
+                  <div
+                    className="relative w-full aspect-[16/6] bg-stone-800"
+                    data-testid={`group-card-cover-${g.id}`}
+                  >
+                    <img
+                      src={coverUrl}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                  </div>
+                )}
+                <div className="p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-bold text-stone-100 truncate">{g.name}</div>
+                      {g.description && (
+                        <div className="text-[11px] text-stone-500 line-clamp-2 mt-0.5">
+                          {g.description}
+                        </div>
+                      )}
                     </div>
-                  )}
+                    <span className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
+                      g.role === "owner"
+                        ? "bg-amber-500/20 text-amber-300"
+                        : g.role === "admin"
+                        ? "bg-blue-500/20 text-blue-300"
+                        : "bg-stone-700/40 text-stone-400"
+                    }`}>
+                      {g.role}
+                    </span>
+                  </div>
                 </div>
-                <span className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
-                  g.role === "owner"
-                    ? "bg-amber-500/20 text-amber-300"
-                    : g.role === "admin"
-                    ? "bg-blue-500/20 text-blue-300"
-                    : "bg-stone-700/40 text-stone-400"
-                }`}>
-                  {g.role}
-                </span>
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       )}
 

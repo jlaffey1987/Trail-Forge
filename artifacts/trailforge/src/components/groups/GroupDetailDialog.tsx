@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type GroupDetail,
   type GroupInvite,
@@ -6,12 +6,17 @@ import {
   createInvite,
   deleteGroup,
   fetchGroupDetail,
+  finalizeGroupCover,
   formatExpiry,
+  groupCoverPhotoUrl,
   leaveGroup,
+  removeGroupCover,
   removeMember,
+  requestGroupCoverUploadUrl,
   revokeInvite,
   transferGroupOwnership,
 } from "@/lib/groups";
+import { preparePhotoForUpload } from "@/lib/photoUpload";
 
 interface Props {
   groupId: string | null;
@@ -33,6 +38,9 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [transferTargetId, setTransferTargetId] = useState<string | null>(null);
   const [transferring, setTransferring] = useState(false);
+  const [coverUploading, setCoverUploading] = useState(false);
+  const [coverError, setCoverError] = useState<string | null>(null);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
     if (!groupId) return;
@@ -48,6 +56,7 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
       setConfirmDelete(false);
       setConfirmLeave(false);
       setCopiedToken(null);
+      setCoverError(null);
       void refresh();
     } else {
       setDetail(null);
@@ -135,6 +144,47 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
     onClose();
   };
 
+  const handleCoverFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setCoverError(null);
+    setCoverUploading(true);
+    try {
+      const prepared = await preparePhotoForUpload(files[0]);
+      const ticket = await requestGroupCoverUploadUrl(groupId);
+      if (!ticket) throw new Error("Could not get upload URL");
+      const putRes = await fetch(ticket.uploadURL, {
+        method: "PUT",
+        body: prepared.blob,
+        headers: { "Content-Type": "image/jpeg" },
+      });
+      if (!putRes.ok) throw new Error(`Upload failed: ${putRes.status}`);
+      const updated = await finalizeGroupCover(groupId, ticket.storageKey);
+      if (!updated) throw new Error("Failed to save cover photo");
+      await refresh();
+    } catch (err) {
+      console.error("group cover upload failed", err);
+      setCoverError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setCoverUploading(false);
+      if (coverInputRef.current) coverInputRef.current.value = "";
+    }
+  };
+
+  const handleRemoveCover = async () => {
+    setCoverError(null);
+    setCoverUploading(true);
+    try {
+      const updated = await removeGroupCover(groupId);
+      if (!updated) throw new Error("Could not remove cover");
+      await refresh();
+    } catch (err) {
+      console.error("group cover remove failed", err);
+      setCoverError(err instanceof Error ? err.message : "Could not remove");
+    } finally {
+      setCoverUploading(false);
+    }
+  };
+
   const handleLeave = async () => {
     setActionError(null);
     const ok = await leaveGroup(groupId);
@@ -178,6 +228,79 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
 
           {detail && (
             <>
+              {/* Cover photo */}
+              {(() => {
+                const coverUrl = groupCoverPhotoUrl(detail.group.cover_photo_key);
+                const showControls = canManage;
+                if (!coverUrl && !showControls) return null;
+                return (
+                  <div className="space-y-2" data-testid="group-cover-section">
+                    {coverUrl ? (
+                      <div className="relative w-full aspect-[16/7] rounded-xl overflow-hidden bg-stone-800">
+                        <img
+                          src={coverUrl}
+                          alt={`${detail.group.name} cover`}
+                          className="w-full h-full object-cover"
+                          data-testid="group-cover-image"
+                        />
+                      </div>
+                    ) : showControls ? (
+                      <div
+                        className="w-full aspect-[16/7] rounded-xl border border-dashed border-[hsl(30,12%,22%)] bg-[hsl(22,15%,11%)] flex items-center justify-center text-[11px] text-stone-500"
+                        data-testid="group-cover-empty"
+                      >
+                        No cover photo yet
+                      </div>
+                    ) : null}
+                    {showControls && (
+                      <div className="flex items-center gap-2">
+                        <input
+                          ref={coverInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => void handleCoverFiles(e.target.files)}
+                          data-testid="group-cover-input"
+                        />
+                        <button
+                          type="button"
+                          disabled={coverUploading}
+                          onClick={() => coverInputRef.current?.click()}
+                          className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                          style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                          data-testid="group-cover-upload-btn"
+                        >
+                          {coverUploading
+                            ? "Uploading…"
+                            : detail.group.cover_photo_key
+                              ? "Replace cover"
+                              : "Upload cover"}
+                        </button>
+                        {detail.group.cover_photo_key && (
+                          <button
+                            type="button"
+                            disabled={coverUploading}
+                            onClick={() => void handleRemoveCover()}
+                            className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-red-400 border border-red-500/30 disabled:opacity-50"
+                            data-testid="group-cover-remove-btn"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {coverError && (
+                      <p
+                        className="text-[11px] text-red-300"
+                        data-testid="group-cover-error"
+                      >
+                        {coverError}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
+
               {detail.group.description && (
                 <p className="text-xs text-stone-400 whitespace-pre-line">{detail.group.description}</p>
               )}
