@@ -3,7 +3,12 @@ import GpsRecorder from "@/components/GpsRecorder";
 import LayersPanel, { type MapLayer, type BaseMap } from "@/components/LayersPanel";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
 import MapTrailFilters, { type MapTrailFilterState } from "@/components/MapTrailFilters";
+import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTrailMenu";
+import SaveTrailForm from "@/components/contribute/SaveTrailForm";
+import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
+import { useLeaflet } from "@/lib/useLeaflet";
 import {
+  addTrail,
   fetchTrailsInBbox,
   type Trail,
   type MapBbox,
@@ -61,7 +66,9 @@ export default function MapTab() {
   const [mapMode, setMapMode] = useState<MapMode>("explore");
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   const [totalKm, setTotalKm] = useState(0);
-  const [leafletLoaded, setLeafletLoaded] = useState(false);
+  // Shared loader hook — also used by UploadGpxFlow's preview map so the upload
+  // flow works even when the user opens it from My Trails before visiting Map.
+  const leafletLoaded = useLeaflet();
   const [showLayers, setShowLayers] = useState(false);
 
   // Layer state
@@ -83,27 +90,18 @@ export default function MapTab() {
   const [routeTrails] = useRouteTrails();
   const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
 
+  // "+ Add Trail" / contribute flows
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showUploadGpx, setShowUploadGpx] = useState(false);
+  const [showDrawSave, setShowDrawSave] = useState(false);
+  const [savedTrailToast, setSavedTrailToast] = useState<string | null>(null);
+
   const mapModeRef = useRef(mapMode);
   const waypointsRef = useRef(waypoints);
   mapModeRef.current = mapMode;
   waypointsRef.current = waypoints;
 
-  // Load Leaflet
-  useEffect(() => {
-    if (typeof window !== "undefined" && !document.getElementById("leaflet-script")) {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-      document.head.appendChild(link);
-      const script = document.createElement("script");
-      script.id = "leaflet-script";
-      script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-      script.onload = () => setLeafletLoaded(true);
-      document.head.appendChild(script);
-    } else if (window.L) {
-      setLeafletLoaded(true);
-    }
-  }, []);
+  // Leaflet is loaded by the `useLeaflet()` hook above.
 
   // ---------------------------------------------------------------------------
   // Bbox-debounced trail fetch
@@ -391,6 +389,65 @@ export default function MapTab() {
   const activeLayerCount = layers.filter((l) => l.visible).length;
   const filterCount = filters.difficulties.length + filters.trailTypes.length;
 
+  const handleAddChoice = (choice: AddTrailChoice) => {
+    setShowAddMenu(false);
+    if (choice === "upload") {
+      setShowUploadGpx(true);
+    } else if (choice === "record") {
+      setMapMode("record");
+    } else if (choice === "draw") {
+      setMapMode("draw");
+    }
+  };
+
+  // Deep-link handoff from other tabs (e.g. My Trails → "Record" / "Draw").
+  // We read `?mode=upload|record|draw` once on mount, trigger the matching
+  // contribute flow, then strip the param from the URL so a refresh doesn't
+  // re-open the modal.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get("mode");
+    if (mode === "upload" || mode === "record" || mode === "draw") {
+      handleAddChoice(mode as AddTrailChoice);
+      params.delete("mode");
+      const qs = params.toString();
+      const newUrl =
+        window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+      window.history.replaceState(null, "", newUrl);
+    }
+    // Run only on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const drawWaypoints = useMemo(
+    () => waypoints.map((wp) => ({ lat: wp.lat, lon: wp.lng })),
+    [waypoints],
+  );
+
+  const buildDrawnGpx = (): string => {
+    const stamp = new Date().toISOString();
+    const trkpts = waypoints
+      .map((wp) => `      <trkpt lat="${wp.lat}" lon="${wp.lng}"></trkpt>`)
+      .join("\n");
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="TrailForge" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><time>${stamp}</time></metadata>
+  <trk>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>`;
+  };
+
+  // Auto-clear save toast.
+  useEffect(() => {
+    if (!savedTrailToast) return;
+    const t = window.setTimeout(() => setSavedTrailToast(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [savedTrailToast]);
+
   return (
     <div className="flex flex-col h-full relative">
 
@@ -635,8 +692,10 @@ export default function MapTab() {
             </div>
             {waypoints.length >= 2 && (
               <button
+                onClick={() => setShowDrawSave(true)}
                 className="px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900"
                 style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                data-testid="map-save-drawn-trail"
               >
                 Save Trail
               </button>
@@ -647,7 +706,15 @@ export default function MapTab() {
 
       {/* GPS Recorder */}
       {mapMode === "record" && (
-        <GpsRecorder mapRef={mapRef} leafletLoaded={leafletLoaded} />
+        <GpsRecorder
+          mapRef={mapRef}
+          leafletLoaded={leafletLoaded}
+          onSaved={() => {
+            setSavedTrailToast("Trail saved");
+            setMapMode("explore");
+            void fetchTrailsForCurrentView();
+          }}
+        />
       )}
 
       {/* Layers Panel */}
@@ -679,6 +746,72 @@ export default function MapTab() {
           onClose={() => setSelectedTrail(null)}
         />
       )}
+
+      {/* "+ Add Trail" floating button — only in Explore so it doesn't clash
+          with the Draw stats bar or GPS recorder controls. */}
+      {mapMode === "explore" && (
+        <button
+          onClick={() => setShowAddMenu(true)}
+          className="absolute bottom-4 right-3 z-[1100] flex items-center gap-1.5 px-3.5 py-2.5 rounded-full font-bold text-xs uppercase tracking-widest text-stone-900 shadow-lg"
+          style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+          data-testid="map-add-trail"
+        >
+          <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Add Trail
+        </button>
+      )}
+
+      {/* Save toast */}
+      {savedTrailToast && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[1500] bg-green-900/90 border border-green-500/40 text-green-200 text-xs font-bold px-3 py-2 rounded-full shadow-lg flex items-center gap-2">
+          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          {savedTrailToast}
+        </div>
+      )}
+
+      {/* Add Trail chooser */}
+      <AddTrailMenu
+        open={showAddMenu}
+        onClose={() => setShowAddMenu(false)}
+        onChoose={handleAddChoice}
+      />
+
+      {/* Upload GPX flow */}
+      <UploadGpxFlow
+        open={showUploadGpx}
+        onClose={() => setShowUploadGpx(false)}
+        onSaved={() => {
+          setSavedTrailToast("Trail uploaded");
+          void fetchTrailsForCurrentView();
+        }}
+      />
+
+      {/* Save drawn trail */}
+      <SaveTrailForm
+        open={showDrawSave}
+        title="Save Drawn Trail"
+        waypoints={drawWaypoints}
+        gpxData={showDrawSave ? buildDrawnGpx() : ""}
+        prefill={{ distanceKm: totalKm }}
+        onCancel={() => setShowDrawSave(false)}
+        onSave={async ({ input }) => {
+          const trail = await addTrail(input);
+          if (!trail) {
+            return { ok: false, error: "Could not save trail. Are you signed in?" };
+          }
+          setShowDrawSave(false);
+          clearWaypoints();
+          setMapMode("explore");
+          setSavedTrailToast("Trail saved");
+          void fetchTrailsForCurrentView();
+          return { ok: true };
+        }}
+      />
     </div>
   );
 }

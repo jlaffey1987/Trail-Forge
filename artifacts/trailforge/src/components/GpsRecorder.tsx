@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { downloadGPX } from "@/lib/gpx";
 import { addTrail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import SaveTrailForm from "@/components/contribute/SaveTrailForm";
 
 interface RecordedPoint {
   lat: number;
@@ -22,6 +23,12 @@ declare global {
 interface Props {
   mapRef: React.MutableRefObject<import("leaflet").Map | null>;
   leafletLoaded: boolean;
+  /**
+   * Called after a recorded ride is successfully saved as a trail. Lets the
+   * parent (MapTab) refresh the visible trail layer so a newly-public ride
+   * appears immediately, and lets it surface a confirmation toast.
+   */
+  onSaved?: () => void;
 }
 
 function buildGPXFromPoints(points: RecordedPoint[], name: string): string {
@@ -75,8 +82,8 @@ function formatDuration(ms: number): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
-export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
-  const { userId, isSignedIn } = useCurrentUser();
+export default function GpsRecorder({ mapRef, leafletLoaded, onSaved }: Props) {
+  const { isSignedIn } = useCurrentUser();
   const [state, setState] = useState<RecordState>("idle");
   const [points, setPoints] = useState<RecordedPoint[]>([]);
   const [elapsed, setElapsed] = useState(0);
@@ -93,9 +100,8 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
 
   // Save form
   const [trailName, setTrailName] = useState("");
-  const [trailDifficulty, setTrailDifficulty] = useState(5);
-  const [trailType, setTrailType] = useState<"BOAT" | "Green Lane">("BOAT");
   const [saveDone, setSaveDone] = useState(false);
+  const [showSaveForm, setShowSaveForm] = useState(false);
 
   const watchIdRef = useRef<number | null>(null);
   const startTimeRef = useRef<number | null>(null);
@@ -302,38 +308,13 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
     downloadGPX(gpx, filename);
   };
 
-  const handleSaveTrail = async () => {
+  const openSaveForm = () => {
     setSaveError(null);
     if (!isSignedIn) {
       setSaveError("Sign in required to publish a recorded trail.");
       return;
     }
-    setState("saving");
-    const name = trailName || "My Recorded Trail";
-    const gpx = buildGPXFromPoints(editedPoints, name);
-    const distKm = calcDistanceKm(editedPoints);
-    const saved = await addTrail({
-      user_id: null,
-      owner_user_id: userId,
-      name,
-      type: "enduro",
-      difficulty: trailDifficulty,
-      distance_km: parseFloat(distKm.toFixed(2)),
-      terrain: "Mixed",
-      legal_status: trailType,
-      gpx_data: gpx,
-      is_public: true,
-    });
-    if (!saved) {
-      setSaveError("Could not save your trail. Please try again.");
-      setState("idle");
-      return;
-    }
-    clearMapLayers();
-    setPoints([]);
-    setEditedPoints([]);
-    setSaveDone(true);
-    setState("idle");
+    setShowSaveForm(true);
   };
 
   // Cleanup on unmount
@@ -593,81 +574,27 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
               </button>
             </div>
 
-            {/* Trail Details for saving */}
-            <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,20%)] rounded-xl p-3 space-y-3">
-              <h3 className="text-xs font-bold text-stone-200 uppercase tracking-wider">Trail Details</h3>
-              <div>
-                <label className="text-[10px] text-stone-500 uppercase tracking-wider block mb-1">Trail Name</label>
-                <input
-                  type="text"
-                  value={trailName}
-                  onChange={(e) => setTrailName(e.target.value)}
-                  className="w-full bg-[hsl(22,15%,16%)] border border-[hsl(30,12%,22%)] rounded-lg px-3 py-2 text-sm text-stone-200 placeholder:text-stone-600 focus:outline-none focus:border-amber-500/60 transition-colors"
-                  placeholder="Name your trail..."
-                />
+            {saveError && (
+              <div className="bg-red-900/40 border border-red-500/40 rounded-lg px-3 py-2">
+                <p className="text-xs text-red-300" data-testid="gps-save-error">{saveError}</p>
               </div>
-              <div>
-                <label className="text-[10px] text-stone-500 uppercase tracking-wider block mb-2">
-                  Difficulty: {trailDifficulty}
-                </label>
-                <div className="flex gap-1.5">
-                  {Array.from({ length: 10 }, (_, i) => i + 1).map((d) => {
-                    const colors: Record<number, string> = {
-                      1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
-                      6: "#fb923c", 7: "#f97316", 8: "#ef4444", 9: "#dc2626", 10: "#7f1d1d",
-                    };
-                    return (
-                      <button
-                        key={d}
-                        onClick={() => setTrailDifficulty(d)}
-                        className="flex-1 aspect-square rounded text-xs font-bold transition-all"
-                        style={{
-                          backgroundColor: trailDifficulty === d ? colors[d] : "hsl(22,15%,18%)",
-                          color: trailDifficulty === d ? "#000" : colors[d],
-                          border: `1px solid ${colors[d]}40`,
-                          transform: trailDifficulty === d ? "scale(1.1)" : "scale(1)",
-                        }}
-                      >
-                        {d}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div>
-                <label className="text-[10px] text-stone-500 uppercase tracking-wider block mb-1">Trail Type</label>
-                <div className="flex gap-2">
-                  {(["BOAT", "Green Lane"] as const).map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => setTrailType(t)}
-                      className={`flex-1 py-2 rounded-lg text-xs font-semibold border transition-all ${
-                        trailType === t
-                          ? t === "BOAT" ? "bg-amber-500 border-amber-400 text-stone-900" : "bg-green-600 border-green-500 text-white"
-                          : "bg-transparent border-stone-700 text-stone-400"
-                      }`}
-                    >
-                      {t}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Action Buttons */}
           <div className="px-4 pb-6 pt-3 space-y-2 border-t border-[hsl(30,12%,16%)] shrink-0">
             <button
-              onClick={handleSaveTrail}
-              disabled={editedPoints.length < 2 || !trailName.trim()}
+              onClick={openSaveForm}
+              disabled={editedPoints.length < 2}
               className="w-full py-3.5 rounded-xl font-bold text-sm uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-40"
               style={{ background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)", color: "#1a0e05" }}
+              data-testid="gps-save-as-trail"
             >
               <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                 <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
               </svg>
-              Save Trail to Community
+              Save as Trail
             </button>
 
             <button
@@ -684,6 +611,34 @@ export default function GpsRecorder({ mapRef, leafletLoaded }: Props) {
             </button>
           </div>
         </div>
+
+        <SaveTrailForm
+          open={showSaveForm}
+          title="Save Recorded Trail"
+          waypoints={editedPoints.map((p) => ({ lat: p.lat, lon: p.lng, ele: p.ele ?? undefined }))}
+          gpxData={buildGPXFromPoints(editedPoints, trailName || `My Trail ${new Date().toLocaleDateString("en-GB")}`)}
+          prefill={{
+            name: trailName || `My Trail ${new Date().toLocaleDateString("en-GB")}`,
+            distanceKm: editedDistKm,
+            legal_status: "BOAT",
+          }}
+          onCancel={() => setShowSaveForm(false)}
+          onSave={async ({ input }) => {
+            const saved = await addTrail(input);
+            if (!saved) return { ok: false, error: "Could not save trail" };
+            setShowSaveForm(false);
+            clearMapLayers();
+            setPoints([]);
+            setEditedPoints([]);
+            setSaveDone(true);
+            setState("idle");
+            // Notify parent so the visible trail layer refreshes immediately
+            // (a newly-public ride should appear on the map without requiring
+            // a re-pan).
+            onSaved?.();
+            return { ok: true };
+          }}
+        />
       </div>
     );
   }

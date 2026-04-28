@@ -146,6 +146,29 @@ function TabContent({ tab }: { tab: Tab }) {
 function MainShell() {
   const [activeTab, setActiveTab] = useState<Tab>("planner");
 
+  // Cross-tab navigation bridge: other tabs (e.g. My Trails → "Record" / "Draw")
+  // can dispatch `trailforge:open-add-trail` with a chosen mode. We switch to
+  // the Map tab and add `?mode=...` to the URL so MapTab's mount-effect
+  // auto-opens the matching contribute flow.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ mode?: string }>).detail ?? {};
+      const mode = detail.mode;
+      if (mode !== "upload" && mode !== "record" && mode !== "draw") return;
+      const params = new URLSearchParams(window.location.search);
+      params.set("mode", mode);
+      const qs = params.toString();
+      const newUrl =
+        window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+      window.history.replaceState(null, "", newUrl);
+      setActiveTab("map");
+    };
+    window.addEventListener("trailforge:open-add-trail", handler as EventListener);
+    return () => {
+      window.removeEventListener("trailforge:open-add-trail", handler as EventListener);
+    };
+  }, []);
+
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
       <header

@@ -18,9 +18,12 @@ export function parseGPX(gpxString: string | unknown): Waypoint[] {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(gpxString, "application/xml");
-    const trkpts = doc.querySelectorAll("trkpt");
+    // Accept both track points (`<trkpt>`) and route points (`<rtept>`) so
+    // GPX exports from third-party route planners (which often use <rte>)
+    // also work.
+    const points = doc.querySelectorAll("trkpt, rtept");
     const waypoints: Waypoint[] = [];
-    trkpts.forEach((pt) => {
+    points.forEach((pt) => {
       const lat = parseFloat(pt.getAttribute("lat") || "0");
       const lon = parseFloat(pt.getAttribute("lon") || "0");
       const eleEl = pt.querySelector("ele");
@@ -33,6 +36,163 @@ export function parseGPX(gpxString: string | unknown): Waypoint[] {
   } catch {
     return [];
   }
+}
+
+export interface GpxBbox {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+}
+
+export function bboxFromWaypoints(waypoints: Waypoint[]): GpxBbox | null {
+  if (waypoints.length === 0) return null;
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const w of waypoints) {
+    if (w.lat < minLat) minLat = w.lat;
+    if (w.lat > maxLat) maxLat = w.lat;
+    if (w.lon < minLng) minLng = w.lon;
+    if (w.lon > maxLng) maxLng = w.lon;
+  }
+  return { minLat, maxLat, minLng, maxLng };
+}
+
+export function distanceKmFromWaypoints(waypoints: Waypoint[]): number {
+  let total = 0;
+  for (let i = 1; i < waypoints.length; i++) {
+    total += haversineKm(waypoints[i - 1], waypoints[i]);
+  }
+  return total;
+}
+
+export interface GpxValidation {
+  ok: boolean;
+  /** Reason for failure (set when ok=false). */
+  error?: string;
+  /** Number of <trk> tracks found. */
+  trackCount: number;
+  /** Number of <rte> routes found. */
+  routeCount: number;
+  /** Total decoded points (across tracks and routes). */
+  pointCount: number;
+  /** Decoded waypoints (in document order). */
+  waypoints: Waypoint[];
+  /** Bounding box, present when at least one waypoint was decoded. */
+  bbox: GpxBbox | null;
+  /** Total distance in km (haversine over decoded waypoints). */
+  distanceKm: number;
+  /** Detected name (`<metadata><name>` or first `<trk><name>`). */
+  name: string | null;
+}
+
+const MIN_POINTS = 2;
+const MAX_POINTS = 100_000; // sanity ceiling
+const ALLOWED_LAT = 90;
+const ALLOWED_LNG = 180;
+
+export function validateGpxString(gpxString: string): GpxValidation {
+  const empty: GpxValidation = {
+    ok: false,
+    trackCount: 0,
+    routeCount: 0,
+    pointCount: 0,
+    waypoints: [],
+    bbox: null,
+    distanceKm: 0,
+    name: null,
+  };
+
+  if (!gpxString || typeof gpxString !== "string") {
+    return { ...empty, error: "GPX file is empty" };
+  }
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(gpxString, "application/xml");
+  } catch {
+    return { ...empty, error: "Could not parse GPX XML" };
+  }
+  const parserError = doc.querySelector("parsererror");
+  if (parserError) {
+    return { ...empty, error: "GPX file is not valid XML" };
+  }
+  const root = doc.documentElement;
+  if (!root || root.tagName.toLowerCase() !== "gpx") {
+    return { ...empty, error: "Not a GPX file (missing <gpx> root element)" };
+  }
+
+  const trackCount = doc.querySelectorAll("trk").length;
+  const routeCount = doc.querySelectorAll("rte").length;
+  if (trackCount === 0 && routeCount === 0) {
+    return { ...empty, trackCount, routeCount, error: "GPX file has no tracks or routes" };
+  }
+
+  const waypoints = parseGPX(gpxString);
+  if (waypoints.length < MIN_POINTS) {
+    return {
+      ...empty,
+      trackCount,
+      routeCount,
+      pointCount: waypoints.length,
+      error: `Need at least ${MIN_POINTS} points to draw a trail (found ${waypoints.length})`,
+    };
+  }
+  if (waypoints.length > MAX_POINTS) {
+    return {
+      ...empty,
+      trackCount,
+      routeCount,
+      pointCount: waypoints.length,
+      error: `Too many points (${waypoints.length}) — max is ${MAX_POINTS}`,
+    };
+  }
+  // Sane coordinate range — GPX clients sometimes export 0,0 placeholder rows.
+  for (const w of waypoints) {
+    if (
+      Math.abs(w.lat) > ALLOWED_LAT ||
+      Math.abs(w.lon) > ALLOWED_LNG ||
+      Number.isNaN(w.lat) ||
+      Number.isNaN(w.lon)
+    ) {
+      return {
+        ...empty,
+        trackCount,
+        routeCount,
+        pointCount: waypoints.length,
+        error: `Invalid coordinate found: lat=${w.lat}, lon=${w.lon}`,
+      };
+    }
+  }
+  const bbox = bboxFromWaypoints(waypoints);
+  if (
+    !bbox ||
+    bbox.maxLat - bbox.minLat > 20 ||
+    bbox.maxLng - bbox.minLng > 30
+  ) {
+    return {
+      ...empty,
+      trackCount,
+      routeCount,
+      pointCount: waypoints.length,
+      bbox,
+      error: "GPX covers an unreasonably large area — please check the file",
+    };
+  }
+
+  const metaName = doc.querySelector("metadata > name")?.textContent?.trim();
+  const trkName = doc.querySelector("trk > name")?.textContent?.trim();
+  const rteName = doc.querySelector("rte > name")?.textContent?.trim();
+  const name = metaName || trkName || rteName || null;
+
+  return {
+    ok: true,
+    trackCount,
+    routeCount,
+    pointCount: waypoints.length,
+    waypoints,
+    bbox,
+    distanceKm: distanceKmFromWaypoints(waypoints),
+    name,
+  };
 }
 
 export function getTrailStart(waypoints: Waypoint[]): Waypoint | null {

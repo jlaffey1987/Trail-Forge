@@ -42,6 +42,12 @@ export interface Trail {
   bbox_max_lat?: number | null;
   bbox_min_lng?: number | null;
   bbox_max_lng?: number | null;
+  /** Member-authored description / route notes. Added in migration 0005. */
+  description?: string | null;
+  /** Set when the owner soft-deletes the trail. Added in migration 0005. */
+  deleted_at?: string | null;
+  /** Object-storage path for the original GPX artifact. Added in migration 0005. */
+  gpx_object_path?: string | null;
 }
 
 export interface MapBbox {
@@ -212,8 +218,76 @@ export async function fetchSavedTrails(owner: SaveOwner): Promise<Trail[]> {
   }
 }
 
+export type TrailPrivacy = "private" | "public" | "group";
+
+export interface CreateTrailInput {
+  name: string;
+  type: string | null;
+  difficulty: number | null;
+  distance_km: number | null;
+  terrain: string | null;
+  legal_status: string | null;
+  gpx_data: unknown | null;
+  /** Object-storage path returned by `uploadGpxToStorage`. */
+  gpx_object_path?: string | null;
+  description?: string | null;
+  privacy: TrailPrivacy;
+  bbox_min_lat?: number | null;
+  bbox_max_lat?: number | null;
+  bbox_min_lng?: number | null;
+  bbox_max_lng?: number | null;
+}
+
+export interface GpxUploadTicket {
+  uploadURL: string;
+  storageKey: string;
+  objectPath: string;
+}
+
+/**
+ * Two-step upload of a raw GPX file to object storage:
+ *   1) Ask the API server for a signed PUT URL.
+ *   2) PUT the GPX text to that URL with `Content-Type: application/gpx+xml`.
+ *
+ * On success, returns the `objectPath` to send back with `addTrail` /
+ * `replaceOwnedTrailGpx` so the server can finalize the ACL and persist
+ * the artifact reference on the trail row.
+ */
+export async function uploadGpxToStorage(
+  gpxText: string,
+): Promise<GpxUploadTicket | null> {
+  try {
+    const ticketRes = await fetch("/api/trails/gpx/upload-url", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!ticketRes.ok) {
+      console.error("gpx upload-url error:", ticketRes.status, await ticketRes.text());
+      return null;
+    }
+    const ticket = (await ticketRes.json()) as GpxUploadTicket;
+
+    const putRes = await fetch(ticket.uploadURL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/gpx+xml" },
+      body: gpxText,
+    });
+    if (!putRes.ok) {
+      console.error("gpx PUT to storage failed:", putRes.status);
+      return null;
+    }
+
+    return ticket;
+  } catch (err) {
+    console.error("uploadGpxToStorage error:", err);
+    return null;
+  }
+}
+
 export async function addTrail(
-  trail: Omit<Trail, "id" | "created_at">,
+  input: CreateTrailInput,
 ): Promise<Trail | null> {
   try {
     const res = await fetch("/api/trails", {
@@ -221,18 +295,21 @@ export async function addTrail(
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: trail.name,
-        type: trail.type,
-        difficulty: trail.difficulty,
-        distance_km: trail.distance_km,
-        terrain: trail.terrain,
-        legal_status: trail.legal_status,
-        gpx_data: trail.gpx_data,
-        is_public: trail.is_public,
-        bbox_min_lat: trail.bbox_min_lat,
-        bbox_max_lat: trail.bbox_max_lat,
-        bbox_min_lng: trail.bbox_min_lng,
-        bbox_max_lng: trail.bbox_max_lng,
+        name: input.name,
+        type: input.type,
+        difficulty: input.difficulty,
+        distance_km: input.distance_km,
+        terrain: input.terrain,
+        legal_status: input.legal_status,
+        gpx_data: input.gpx_data,
+        gpx_object_path: input.gpx_object_path ?? null,
+        is_public: input.privacy === "public",
+        privacy: input.privacy,
+        description: input.description ?? null,
+        bbox_min_lat: input.bbox_min_lat,
+        bbox_max_lat: input.bbox_max_lat,
+        bbox_min_lng: input.bbox_min_lng,
+        bbox_max_lng: input.bbox_max_lng,
       }),
     });
     if (!res.ok) {
@@ -246,6 +323,102 @@ export async function addTrail(
     return (await res.json()) as Trail;
   } catch (err) {
     console.error("Add trail error:", err);
+    return null;
+  }
+}
+
+/** Fetch trails owned by the currently signed-in user. */
+export async function fetchOwnedTrails(): Promise<Trail[]> {
+  try {
+    const res = await fetch("/api/me/trails", { credentials: "include" });
+    if (!res.ok) {
+      if (res.status === 401) return [];
+      console.error("fetchOwnedTrails error:", res.status);
+      return [];
+    }
+    const json = (await res.json()) as { items: Trail[] };
+    return json.items ?? [];
+  } catch (err) {
+    console.error("fetchOwnedTrails error:", err);
+    return [];
+  }
+}
+
+export interface UpdateTrailInput {
+  name?: string;
+  difficulty?: number | null;
+  type?: string | null;
+  legal_status?: string | null;
+  terrain?: string | null;
+  distance_km?: number | null;
+  description?: string | null;
+  privacy?: TrailPrivacy;
+}
+
+export async function updateOwnedTrail(
+  trailId: string,
+  input: UpdateTrailInput,
+): Promise<Trail | null> {
+  try {
+    const res = await fetch(`/api/trails/${trailId}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      console.error("updateOwnedTrail error:", res.status, await res.text());
+      return null;
+    }
+    return (await res.json()) as Trail;
+  } catch (err) {
+    console.error("updateOwnedTrail error:", err);
+    return null;
+  }
+}
+
+export async function deleteOwnedTrail(trailId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/trails/${trailId}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    return res.ok;
+  } catch (err) {
+    console.error("deleteOwnedTrail error:", err);
+    return false;
+  }
+}
+
+export interface ReplaceGpxInput {
+  gpx_data: string;
+  /** Object-storage path returned by `uploadGpxToStorage`. */
+  gpx_object_path?: string | null;
+  distance_km?: number | null;
+  bbox_min_lat?: number | null;
+  bbox_max_lat?: number | null;
+  bbox_min_lng?: number | null;
+  bbox_max_lng?: number | null;
+}
+
+export async function replaceOwnedTrailGpx(
+  trailId: string,
+  input: ReplaceGpxInput,
+): Promise<Trail | null> {
+  try {
+    const res = await fetch(`/api/trails/${trailId}/gpx`, {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      console.error("replaceOwnedTrailGpx error:", res.status, await res.text());
+      return null;
+    }
+    return (await res.json()) as Trail;
+  } catch (err) {
+    console.error("replaceOwnedTrailGpx error:", err);
     return null;
   }
 }
