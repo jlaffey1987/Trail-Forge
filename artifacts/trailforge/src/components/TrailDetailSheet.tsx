@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation } from "wouter";
-import { type Trail, saveTrail } from "@/lib/supabase";
+import { type Trail, saveTrail, fetchTrailGpxByIds } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { getDifficultyColor } from "@/lib/trailLayer";
 import {
@@ -69,6 +69,13 @@ export default function TrailDetailSheet({
   const [counts, setCounts] = useState<TrailActivityCounts>({ notes: 0, photos: 0, pending: 0 });
   const [perms, setPerms] = useState<TrailPermissions>({ isOwner: false, isModerator: false, canModerate: false });
   const [isSystemAdmin, setIsSystemAdmin] = useState(false);
+  // Trails coming from the slim Map-tab fetch don't carry `gpx_data`. Kick
+  // off a background fetch as soon as the sheet opens so the wait between
+  // "tap trail" and "Add to planner / build route" feels intentional rather
+  // than laggy. The result isn't rendered directly here yet — the spinner
+  // just lets the rider know data is on the way (and the fetch warms the
+  // Supabase row cache for downstream flows like RouteBuilder).
+  const [gpxLoading, setGpxLoading] = useState(false);
 
   // Keep the in-route flag and per-trail save status in sync when the rider
   // jumps to a neighbouring trail via the prev/next arrows. (The lazy
@@ -81,6 +88,26 @@ export default function TrailDetailSheet({
   useEffect(() => {
     return subscribeRouteTrails(() => setInPlannerRoute(isInRoute(trail.id)));
   }, [trail.id]);
+
+  // Lazy-load gpx_data for trails that arrived via the slim Map-tab fetch.
+  // We don't actually consume the result here today, but the spinner the
+  // effect drives makes the brief background fetch feel intentional rather
+  // than silent — and keeps the public API in step with planner / route
+  // builder hydration so a future GPX cache layer can short-circuit both.
+  useEffect(() => {
+    if (trail.gpx_data != null) {
+      setGpxLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setGpxLoading(true);
+    void fetchTrailGpxByIds([trail.id]).finally(() => {
+      if (!cancelled) setGpxLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [trail.id, trail.gpx_data]);
 
   // Pull the system-admin flag from the API so admins can re-grade ANY
   // trail, not just their own. Owner-only re-grade was a UI regression
@@ -256,6 +283,17 @@ export default function TrailDetailSheet({
               <p className="text-[10px] text-stone-500 mt-0.5" data-testid="trail-detail-counts">
                 {counts.notes} notes · {counts.photos} photos · {counts.pending} pending edits
               </p>
+              {gpxLoading ? (
+                <div
+                  className="flex items-center gap-1.5 mt-1 text-[10px] font-bold text-amber-300/90"
+                  data-testid="trail-detail-gpx-loading"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span className="w-2.5 h-2.5 border-[1.5px] border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                  Loading trail data…
+                </div>
+              ) : null}
               {trail.shared_groups && trail.shared_groups.length > 0 ? (
                 <div
                   className="flex flex-wrap gap-1 mt-1.5"
