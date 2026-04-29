@@ -25,14 +25,64 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 - `pnpm --filter @workspace/api-server test` — run backend integration tests (vitest + supertest, in-memory Supabase mock)
 - `pnpm --filter @workspace/trailforge test` — run trailforge UI tests (vitest + jsdom + @testing-library/react)
+- `pnpm --filter @workspace/trailforge run db:migrate <file>` — apply one Supabase migration to the live project (see "Applying Supabase migrations" below)
+- `pnpm --filter @workspace/trailforge run db:migrate:status` — show which migrations are applied vs pending
+- `pnpm --filter @workspace/trailforge run db:migrate:all` — apply every pending Supabase migration in order
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+
+## Applying Supabase migrations
+
+The TrailForge live database is a Supabase project (ref `qgzbppzlwydammxxjyct`,
+EU-West-2 / London). New SQL migrations dropped into
+`artifacts/trailforge/supabase/migrations/` are applied to it with the
+`db:migrate` script in that artifact, which uses `psql --single-transaction
+-v ON_ERROR_STOP=1` and records every successful run in a
+`schema_migrations(filename text PK, applied_at timestamptz)` ledger table on
+the live database. The ledger is locked down with RLS (anon and authenticated
+keys see nothing — only the direct DB connection / service role can read or
+write it), so re-running the script is safe and idempotent.
+
+**Prerequisite**: the script shells out to `psql`. The Replit container
+already has it on PATH (PostgreSQL 16 from nix); if you ever run this
+elsewhere, install the `postgresql-client` package first.
+
+**Setup** (one time): the script reads `SUPABASE_DB_PASSWORD` from secrets
+(plus `SUPABASE_URL` to derive the project ref) and builds the pooler URL
+`postgresql://postgres.<ref>:<password>@aws-1-eu-west-2.pooler.supabase.com:5432/postgres`.
+The direct `db.<ref>.supabase.co:5432` host is IPv6-only and not reachable
+from the Replit container — the pooler is required. Override the host or
+region with `SUPABASE_DB_HOST` / `SUPABASE_DB_REGION` if the project ever
+moves; or set `SUPABASE_DB_URL` to a full connection string to bypass the
+builder entirely.
+
+**Typical flow:**
+
+```bash
+# What's pending?
+pnpm --filter @workspace/trailforge run db:migrate:status
+
+# Apply a single new file (basename, path, or just the prefix all work):
+pnpm --filter @workspace/trailforge run db:migrate 0011_trail_elevation_profile.sql
+
+# Apply every pending migration in order:
+pnpm --filter @workspace/trailforge run db:migrate:all
+
+# Re-apply (only when you really mean it — the migration must be idempotent):
+pnpm --filter @workspace/trailforge run db:migrate 0007_ai_discovery.sql --force
+```
+
+If the `psql` step fails the transaction is rolled back and the ledger is
+not updated, so the script can be safely re-run after fixing the migration.
+The `supabase/migrations/APPLIED.md` log is the historical record from
+before the ledger existed; new migrations no longer need to be appended
+there — `db:migrate:status` is the source of truth.
 
 ## Artifacts
 
 - **trailforge** (`artifacts/trailforge`) — Off-road navigator web app (React + Vite, Supabase, Mapbox/Leaflet).
   - Auth: Clerk (`@clerk/react`) — see `src/App.tsx` for `<ClerkProvider>` + wouter routing, `src/components/UserMenu.tsx`, `src/hooks/useCurrentUser.ts`.
-  - Data: Supabase tables `trails`, `saved_trails`, `users`. Migrations live in `supabase/migrations/` and are applied manually via the Supabase SQL editor.
+  - Data: Supabase tables `trails`, `saved_trails`, `users`. Migrations live in `supabase/migrations/` and are applied with the one-step `db:migrate` command (see "Applying Supabase migrations" below). The legacy "paste into the SQL editor" flow is no longer required.
   - User-account migration `0002_users_and_owner.sql` adds the `users` table (Clerk-keyed), `trails.owner_user_id`, and `saved_trails.user_id`. Apply this before users sign in for the first time.
   - RLS migration `0003_rls_policies.sql` locks down anon access: anon may only `SELECT` public trails. All ownership-sensitive reads/writes go through the API server (service-role key, Clerk-authenticated). Apply after 0002.
   - Saved trails are session-bound for guests and user-bound after sign-in. `SavedTrailsMergePrompt` offers a one-time merge of session bookmarks into a freshly signed-in account.

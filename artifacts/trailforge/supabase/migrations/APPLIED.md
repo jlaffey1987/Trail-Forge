@@ -1,11 +1,24 @@
 # Migration application log
 
+> **Historical only — superseded by `db:migrate` (task 39, 2026-04-29).**
+>
+> The live project (`qgzbppzlwydammxxjyct`) now tracks applied migrations
+> in a `public.schema_migrations(filename text PK, applied_at timestamptz)`
+> ledger table on the database itself, populated by
+> `pnpm --filter @workspace/trailforge run db:migrate <file>`. Run
+> `pnpm --filter @workspace/trailforge run db:migrate:status` to see the
+> authoritative applied vs pending list.
+>
+> The ledger was backfilled with the rows recorded below for migrations
+> 0001–0009 (which were already in place when the script was introduced).
+> No new entries should be appended here — `db:migrate` writes to the
+> ledger automatically.
+
 This file records when each Supabase migration in this directory was
-applied to the live project (`qgzbppzlwydammxxjyct`). The convention for
-this project is **"apply migrations manually via the Supabase SQL editor"**
+applied to the live project (`qgzbppzlwydammxxjyct`). The legacy
+convention was **"apply migrations manually via the Supabase SQL editor"**
 (or equivalently via a service-role HTTP / `psql` round-trip), so this
-log is the only audit trail we have. Append a new entry when you apply a
-migration; do not rewrite history.
+log was the only audit trail we had.
 
 | Migration | Applied at (UTC) | Applied by | Notes |
 | --- | --- | --- | --- |
