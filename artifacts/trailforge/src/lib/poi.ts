@@ -31,6 +31,12 @@ export interface Poi {
   brand?: string;
   /** Optional address fragment (street/town) for popups. */
   addressLine?: string;
+  /**
+   * Distance from the planned route polyline (metres). Only set when
+   * the POI was returned from a corridor search; used in popups so the
+   * rider can see "0.4 km from your route" before adding the stop.
+   */
+  routeDistanceM?: number;
 }
 
 interface OverpassNode {
@@ -237,9 +243,23 @@ export async function searchPoisAlongRoute(
   };
   const candidates = await searchPoisInBbox(kind, bbox);
   const corridorM = corridorKm * 1000;
-  return candidates.filter(
-    (p) => distancePointToPolylineM({ lat: p.lat, lng: p.lng }, polyline) <= corridorM,
+  const out: Poi[] = [];
+  for (const p of candidates) {
+    const d = distancePointToPolylineM(
+      { lat: p.lat, lng: p.lng },
+      polyline,
+    );
+    if (d <= corridorM) {
+      // Stamp the distance so the planner UI can show "0.4 km from
+      // route" in the marker popup. Sorting by it puts the most
+      // route-relevant POIs near the top of any list view.
+      out.push({ ...p, routeDistanceM: d });
+    }
+  }
+  out.sort(
+    (a, b) => (a.routeDistanceM ?? Infinity) - (b.routeDistanceM ?? Infinity),
   );
+  return out;
 }
 
 /**

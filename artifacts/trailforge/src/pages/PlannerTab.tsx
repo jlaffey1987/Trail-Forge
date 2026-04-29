@@ -18,8 +18,10 @@ import {
   useRouteEntries,
   addRouteWaypoint,
   removeRouteWaypoint,
+  setRouteEntries,
 } from "@/lib/plannerRouteStore";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
+import { distancePointToPolylineM } from "@/lib/poi";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -252,11 +254,35 @@ export default function PlannerTab() {
     removeRouteWaypoint(waypointId);
   }, []);
 
-  // Add a POI as a custom waypoint at the end of the current entry list.
-  // (Future: an "insert after trail X" affordance can pass `afterTrailId`.)
-  const handleAddWaypoint = useCallback((wp: RouteWaypoint) => {
-    addRouteWaypoint(wp);
-  }, []);
+  // Add a POI as a custom waypoint. We try to slot it BETWEEN the most
+  // sensible trails by finding the assembled trail section whose polyline
+  // is closest to the waypoint and using its trail id as `afterTrailId`.
+  // That way a fuel stop tapped halfway along the route lands between
+  // trail 2 and trail 3 in the builder, not appended at the end.
+  const handleAddWaypoint = useCallback(
+    (wp: RouteWaypoint) => {
+      let nearestTrailId: string | null = null;
+      if (assembledRoute) {
+        let bestDistM = Infinity;
+        for (const sec of assembledRoute.sections) {
+          if (sec.kind !== "trail") continue;
+          const d = distancePointToPolylineM(
+            { lat: wp.lat, lng: wp.lng },
+            sec.polyline,
+          );
+          if (d < bestDistM) {
+            bestDistM = d;
+            nearestTrailId = sec.trail.id;
+          }
+        }
+      }
+      addRouteWaypoint(
+        wp,
+        nearestTrailId ? { afterTrailId: nearestTrailId } : undefined,
+      );
+    },
+    [assembledRoute],
+  );
 
   // Build a coarse polyline for the POI corridor search. We prefer the
   // assembled route's road+trail polyline when available; otherwise we
@@ -893,6 +919,8 @@ export default function PlannerTab() {
           onClose={() => setShowRouteBuilder(false)}
           waypoints={routeWaypoints}
           onRemoveWaypoint={handleRemoveWaypoint}
+          entries={routeEntries}
+          onReorderEntries={setRouteEntries}
         />
       )}
 

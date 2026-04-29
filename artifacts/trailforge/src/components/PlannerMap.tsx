@@ -346,7 +346,16 @@ export default function PlannerMap({
           className: "",
         }),
       }).addTo(map);
-      const subtitle = [p.brand, p.addressLine].filter(Boolean).join(" · ");
+      const subtitleParts = [p.brand, p.addressLine].filter(Boolean) as string[];
+      const subtitle = subtitleParts.join(" · ");
+      const distanceLine =
+        typeof p.routeDistanceM === "number"
+          ? `<div style=\"font-size:10px;color:#f0a832;margin-top:2px\">${
+              p.routeDistanceM < 1000
+                ? `${Math.round(p.routeDistanceM)} m from route`
+                : `${(p.routeDistanceM / 1000).toFixed(1)} km from route`
+            }</div>`
+          : "";
       const ctaBtn = onAddWaypointRef.current
         ? `<button data-trailforge-add-poi="${esc(p.id)}" style="margin-top:6px;background:${
             p.kind === "fuel" ? FUEL_COLOR : CAMP_COLOR
@@ -356,7 +365,7 @@ export default function PlannerMap({
         : "";
       const popup = `<div style="min-width:160px"><b>${esc(p.name)}</b>${
         subtitle ? `<br><span style=\"font-size:10px;color:#888\">${esc(subtitle)}</span>` : ""
-      }<br>${ctaBtn}</div>`;
+      }${distanceLine}<br>${ctaBtn}</div>`;
       m.bindPopup(popup);
       m.on("popupopen", () => {
         const root = document.querySelector(
@@ -404,7 +413,9 @@ export default function PlannerMap({
       setPoiLoading(true);
       try {
         let results: Poi[] = [];
+        let isCorridorMode = false;
         if (routeCorridorPoints && routeCorridorPoints.length >= 2) {
+          isCorridorMode = true;
           results = await searchPoisAlongRoute(kind, routeCorridorPoints, 8);
         } else {
           const b = map.getBounds();
@@ -416,6 +427,39 @@ export default function PlannerMap({
           });
         }
         setPois(results);
+        // In corridor mode the rider has a planned route, so auto-frame
+        // the relevant POIs on top of it. We pad lightly so the markers
+        // aren't clipped against the panel edges. Bbox mode already
+        // matches the visible viewport so re-fitting would feel jumpy.
+        if (
+          isCorridorMode &&
+          results.length > 0 &&
+          window.L
+        ) {
+          const L = window.L;
+          const pts: Array<[number, number]> = results.map((p) => [
+            p.lat,
+            p.lng,
+          ]);
+          // Include the route corridor endpoints so the route stays in
+          // frame too, not just the POI cluster.
+          if (routeCorridorPoints && routeCorridorPoints.length > 0) {
+            pts.push([routeCorridorPoints[0].lat, routeCorridorPoints[0].lng]);
+            pts.push([
+              routeCorridorPoints[routeCorridorPoints.length - 1].lat,
+              routeCorridorPoints[routeCorridorPoints.length - 1].lng,
+            ]);
+          }
+          try {
+            map.fitBounds(L.latLngBounds(pts), {
+              padding: [40, 40],
+              maxZoom: 13,
+              animate: true,
+            });
+          } catch {
+            /* fitBounds can throw on degenerate input — safe to ignore */
+          }
+        }
         if (results.length === 0) {
           setPoiError(
             kind === "fuel"

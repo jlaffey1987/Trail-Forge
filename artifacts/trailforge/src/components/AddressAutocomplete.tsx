@@ -105,6 +105,12 @@ const AddressAutocomplete = forwardRef<
       onChange(next);
       const q = next.trim();
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      // Bump the sequence on EVERY keystroke (even when we're below the
+      // 2-char threshold) so any older inflight request that lands later
+      // is treated as stale. Without this, shrinking the input from "abc"
+      // back to "a" would leave the previously-fired "abc" request in
+      // flight and let it re-populate the dropdown.
+      const mySeq = ++seqRef.current;
       if (q.length < 2) {
         setSuggestions([]);
         setOpen(false);
@@ -113,7 +119,6 @@ const AddressAutocomplete = forwardRef<
       }
       setOpen(true);
       setLoading(true);
-      const mySeq = ++seqRef.current;
       debounceRef.current = setTimeout(() => {
         void (async () => {
           const results = await searchSuggestions(q);
