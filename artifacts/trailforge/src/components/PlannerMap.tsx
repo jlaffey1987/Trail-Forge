@@ -131,6 +131,9 @@ export default function PlannerMap({
   const markerLayersRef = useRef<import("leaflet").Layer[]>([]);
   const waypointLayersRef = useRef<import("leaflet").Layer[]>([]);
   const poiLayersRef = useRef<import("leaflet").Layer[]>([]);
+  // Monotonic token so a slower earlier POI fetch can't overwrite the
+  // results of a newer toggle (e.g. rider rapidly taps Fuel → Campsites).
+  const poiReqSeqRef = useRef(0);
   const trailLayerRef = useRef<TrailLayerHandle | null>(null);
   const clusterLayerRef = useRef<ClusterLayerHandle | null>(null);
   const [leafletLoaded, setLeafletLoaded] = useState(false);
@@ -401,10 +404,15 @@ export default function PlannerMap({
   const togglePoi = useCallback(
     async (kind: PoiKind) => {
       if (!map) return;
+      // Bump the request token on EVERY toggle (including the "hide"
+      // path) so any in-flight earlier fetch is invalidated before its
+      // response can land.
+      const mySeq = ++poiReqSeqRef.current;
       if (poiKindShown === kind) {
         setPoiKindShown(null);
         setPois([]);
         setPoiError(null);
+        setPoiLoading(false);
         return;
       }
       setPoiKindShown(kind);
@@ -426,6 +434,9 @@ export default function PlannerMap({
             maxLng: b.getEast(),
           });
         }
+        // A newer toggle fired while we were awaiting Overpass — drop
+        // this stale response so it can't overwrite the newer state.
+        if (mySeq !== poiReqSeqRef.current) return;
         setPois(results);
         // In corridor mode the rider has a planned route, so auto-frame
         // the relevant POIs on top of it. We pad lightly so the markers
@@ -468,9 +479,10 @@ export default function PlannerMap({
           );
         }
       } catch {
+        if (mySeq !== poiReqSeqRef.current) return;
         setPoiError("Couldn't load POIs — try again in a moment");
       } finally {
-        setPoiLoading(false);
+        if (mySeq === poiReqSeqRef.current) setPoiLoading(false);
       }
     },
     [map, poiKindShown, routeCorridorPoints],
