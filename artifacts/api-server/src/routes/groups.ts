@@ -5,6 +5,10 @@ import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import {
+  ObjectAccessGroupType,
+  ObjectPermission,
+} from "../lib/objectAcl";
+import {
   notifyMemberJoined,
   notifyTrailShared,
 } from "../lib/pushNotifications";
@@ -693,13 +697,26 @@ router.post(
       return;
     }
 
-    // Stamp ACL — public so any member viewing the group can render it.
-    // Auth on the GET endpoint still requires a valid object; the path is
-    // an unguessable UUID under the group id.
+    // Stamp ACL — private with a GROUP_MEMBER rule so only members of this
+    // group can fetch the bytes. Group covers are arguably more private
+    // than public trail photos (private/invite-only groups exist), so we
+    // gate visibility on membership rather than on key knowledge alone.
     try {
       await objectStorage.trySetObjectEntityAclPolicy(
         `/objects/${parsed.data.storageKey}`,
-        { owner: userId, visibility: "public" },
+        {
+          owner: userId,
+          visibility: "private",
+          aclRules: [
+            {
+              group: {
+                type: ObjectAccessGroupType.GROUP_MEMBER,
+                id: ctx.groupId,
+              },
+              permission: ObjectPermission.READ,
+            },
+          ],
+        },
       );
     } catch (err) {
       if (err instanceof ObjectNotFoundError) {

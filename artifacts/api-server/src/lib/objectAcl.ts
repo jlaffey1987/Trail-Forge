@@ -1,4 +1,5 @@
 import { File } from "@google-cloud/storage";
+import { getSupabaseAdmin } from "./supabaseAdmin";
 
 const ACL_POLICY_METADATA_KEY = "custom:aclPolicy";
 
@@ -10,7 +11,9 @@ const ACL_POLICY_METADATA_KEY = "custom:aclPolicy";
 // - GROUP_MEMBER: the users who are members of a specific group;
 // - SUBSCRIBER: the users who are subscribers of a specific service / content
 //   creator.
-export enum ObjectAccessGroupType {}
+export enum ObjectAccessGroupType {
+  GROUP_MEMBER = "GROUP_MEMBER",
+}
 
 export interface ObjectAccessGroup {
   type: ObjectAccessGroupType;
@@ -55,13 +58,40 @@ abstract class BaseObjectAccessGroup implements ObjectAccessGroup {
   public abstract hasMember(userId: string): Promise<boolean>;
 }
 
+/**
+ * Access group that grants permission to all members of a specific group
+ * (matched against the `group_members` table). The group id is stored in
+ * `id`; membership is checked at request time so revoking access is
+ * immediate (no need to re-stamp objects).
+ */
+class GroupMemberAccessGroup extends BaseObjectAccessGroup {
+  constructor(groupId: string) {
+    super(ObjectAccessGroupType.GROUP_MEMBER, groupId);
+  }
+
+  public async hasMember(userId: string): Promise<boolean> {
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("group_members")
+      .select("user_id")
+      .eq("group_id", this.id)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) {
+      // Treat any lookup failure (missing table, transient) as deny so we
+      // never accidentally leak a private cover photo.
+      return false;
+    }
+    return !!data;
+  }
+}
+
 function createObjectAccessGroup(
   group: ObjectAccessGroup,
 ): BaseObjectAccessGroup {
   switch (group.type) {
-    // Implement per access group type, e.g.:
-    // case "USER_LIST":
-    //   return new UserListAccessGroup(group.id);
+    case ObjectAccessGroupType.GROUP_MEMBER:
+      return new GroupMemberAccessGroup(group.id);
     default:
       throw new Error(`Unknown access group type: ${group.type}`);
   }
