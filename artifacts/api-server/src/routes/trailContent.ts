@@ -518,7 +518,7 @@ router.get(
       const { data, error } = await supa
         .from("trail_amendments")
         .select(
-          "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, status, decided_by, decided_at, decision_reason, created_at, users(id, display_name, avatar_url)",
+          "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, status, decided_by, decided_at, decision_reason, created_at, users!trail_amendments_author_user_id_fkey(id, display_name, avatar_url)",
         )
         .eq("trail_id", trailId)
         .order("created_at", { ascending: false })
@@ -618,7 +618,7 @@ router.post(
         replacement_gpx_storage_key: parsed.data.replacementGpxStorageKey ?? null,
       })
       .select(
-        "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, status, decided_by, decided_at, decision_reason, created_at, users(id, display_name, avatar_url)",
+        "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, status, decided_by, decided_at, decision_reason, created_at, users!trail_amendments_author_user_id_fkey(id, display_name, avatar_url)",
       )
       .single();
     if (error) {
