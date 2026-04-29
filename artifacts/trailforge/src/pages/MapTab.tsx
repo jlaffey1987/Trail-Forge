@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import GpsRecorder from "@/components/GpsRecorder";
 import LayersPanel, { type MapLayer, type BaseMap } from "@/components/LayersPanel";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
+import ClusterTrailListSheet from "@/components/ClusterTrailListSheet";
 import MapTrailFilters, { type MapTrailFilterState } from "@/components/MapTrailFilters";
 import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTrailMenu";
 import SaveTrailForm from "@/components/contribute/SaveTrailForm";
@@ -98,6 +99,7 @@ export default function MapTab() {
   const [showFilters, setShowFilters] = useState(false);
   const [showLegend, setShowLegend] = useState(true);
   const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
+  const [activeCluster, setActiveCluster] = useState<TrailCluster | null>(null);
   const [currentZoom, setCurrentZoom] = useState(7);
   const [, setCurrentBbox] = useState<MapBbox | null>(null);
 
@@ -319,6 +321,55 @@ export default function MapTab() {
     // currentZoom included so recompute when viewport changes.
   }, [visibleTrails, currentZoom]);
 
+  // Shared "zoom into the cluster bbox" used both for single-trail cluster
+  // taps and the "Zoom to area" button in the multi-trail cluster sheet.
+  const zoomToCluster = useCallback((cluster: TrailCluster) => {
+    if (!mapRef.current || !window.L) return;
+    const map = mapRef.current;
+    try {
+      const L = window.L;
+      const bounds = L.latLngBounds(
+        [cluster.bbox.minLat, cluster.bbox.minLng],
+        [cluster.bbox.maxLat, cluster.bbox.maxLng],
+      );
+      if (cluster.count === 1) {
+        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+        return;
+      }
+      // Multi-trail clusters: zoom into the cluster bbox, but cap at one
+      // level past the threshold so users can keep drilling in.
+      const targetMax = Math.max(
+        CLUSTER_ZOOM_THRESHOLD,
+        Math.min(CLUSTER_ZOOM_THRESHOLD + 2, currentZoom + 3),
+      );
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: targetMax });
+    } catch {
+      // fitBounds can throw on degenerate bboxes — fall back to a simple
+      // setView at the cluster centroid.
+      map.setView(
+        [cluster.lat, cluster.lng],
+        Math.min(CLUSTER_ZOOM_THRESHOLD + 1, currentZoom + 3),
+      );
+    }
+  }, [currentZoom]);
+
+  // Trails belonging to the currently open cluster sheet (resolved from the
+  // cluster's `trailIds` against the current viewport trail list). Recomputed
+  // on every render so filter / fetch updates flow through without needing
+  // to re-open the sheet.
+  const clusterTrailsForSheet = useMemo<Trail[]>(() => {
+    if (!activeCluster) return [];
+    const ids = new Set(activeCluster.trailIds);
+    const byId = new Map<string, Trail>();
+    for (const t of allTrails) byId.set(t.id, t);
+    const out: Trail[] = [];
+    for (const id of ids) {
+      const t = byId.get(id);
+      if (t) out.push(t);
+    }
+    return out;
+  }, [activeCluster, allTrails]);
+
   // (Re)render trail layer whenever inputs change. Below the cluster zoom
   // threshold we render aggregated cluster markers instead of every polyline
   // so the country / region view stays readable. The polyline layer renders
@@ -342,37 +393,17 @@ export default function MapTab() {
         interactive: isExplore,
         onClusterClick: isExplore
           ? (cluster: TrailCluster) => {
-              try {
-                // Single-trail clusters: jump straight to the trail bbox.
-                if (cluster.count === 1) {
-                  const L = window.L;
-                  const bounds = L.latLngBounds(
-                    [cluster.bbox.minLat, cluster.bbox.minLng],
-                    [cluster.bbox.maxLat, cluster.bbox.maxLng],
-                  );
-                  map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
-                  return;
-                }
-                // Multi-trail clusters: zoom into the cluster bbox, but cap
-                // at one level past the threshold so users can keep drilling.
-                const L = window.L;
-                const bounds = L.latLngBounds(
-                  [cluster.bbox.minLat, cluster.bbox.minLng],
-                  [cluster.bbox.maxLat, cluster.bbox.maxLng],
-                );
-                const targetMax = Math.max(
-                  CLUSTER_ZOOM_THRESHOLD,
-                  Math.min(CLUSTER_ZOOM_THRESHOLD + 2, currentZoom + 3),
-                );
-                map.fitBounds(bounds, { padding: [40, 40], maxZoom: targetMax });
-              } catch {
-                // fitBounds can throw on degenerate bboxes — fall back to
-                // a simple setView at the cluster centroid.
-                map.setView(
-                  [cluster.lat, cluster.lng],
-                  Math.min(CLUSTER_ZOOM_THRESHOLD + 1, currentZoom + 3),
-                );
+              // Single-trail clusters: zoom straight to the trail bbox —
+              // a list-of-one would be a pointless extra tap.
+              if (cluster.count === 1) {
+                zoomToCluster(cluster);
+                return;
               }
+              // Multi-trail clusters: open a bottom sheet listing the
+              // member trails so users can jump straight into one without
+              // hunting through the post-zoom polylines. The "Zoom to
+              // area" button in the sheet preserves the old behavior.
+              setActiveCluster(cluster);
             }
           : undefined,
       });
@@ -391,7 +422,7 @@ export default function MapTab() {
       onTrailClick: isExplore ? (trail) => setSelectedTrail(trail) : undefined,
     });
     trailLayerHandleRef.current = handle;
-  }, [trailsForRender, mapMode, routeIdSet, currentZoom]);
+  }, [trailsForRender, mapMode, routeIdSet, currentZoom, zoomToCluster]);
 
   // Render dashed connector polylines between consecutive trails in the
   // planner route so the user can preview the order they've chosen on the
@@ -941,6 +972,25 @@ ${trkpts}
         <TrailDetailSheet
           trail={selectedTrail}
           onClose={() => setSelectedTrail(null)}
+        />
+      )}
+
+      {/* Cluster trail list sheet — only for multi-trail clusters. Lets the
+          user jump straight to a member trail's detail sheet, or fall back
+          to the original "zoom into the cluster bbox" behavior. */}
+      {activeCluster && (
+        <ClusterTrailListSheet
+          trails={clusterTrailsForSheet}
+          onSelectTrail={(trail) => {
+            setActiveCluster(null);
+            setSelectedTrail(trail);
+          }}
+          onZoomToArea={() => {
+            const c = activeCluster;
+            setActiveCluster(null);
+            zoomToCluster(c);
+          }}
+          onClose={() => setActiveCluster(null)}
         />
       )}
 
