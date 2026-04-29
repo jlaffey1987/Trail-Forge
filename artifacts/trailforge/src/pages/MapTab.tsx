@@ -31,7 +31,16 @@ import {
   getTrailBbox,
   bboxesIntersect,
 } from "@/lib/trailLayer";
-import { useRouteTrails, removeRouteTrail } from "@/lib/plannerRouteStore";
+import {
+  useRouteTrails,
+  removeRouteTrail,
+  useRouteEntries,
+  removeRouteWaypoint,
+} from "@/lib/plannerRouteStore";
+import {
+  HYBRID_LABEL_TILE_URL,
+  HYBRID_LABEL_TILE_ATTRIBUTION,
+} from "@/lib/routing";
 import {
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
   fetchGroupTrails,
@@ -74,6 +83,9 @@ export default function MapTab() {
   const markersRef = useRef<import("leaflet").Marker[]>([]);
   const drawPolylineRef = useRef<import("leaflet").Polyline | null>(null);
   const tileLayerRef = useRef<import("leaflet").TileLayer | null>(null);
+  // Hybrid place-label overlay shown only over the satellite base. Removed
+  // when topo / OS Outdoor are active (those styles ship their own labels).
+  const labelLayerRef = useRef<import("leaflet").TileLayer | null>(null);
   const layerPolylinesRef = useRef<Map<string, import("leaflet").Polyline[]>>(new Map());
   const trailLayerHandleRef = useRef<TrailLayerHandle | null>(null);
   const clusterLayerHandleRef = useRef<ClusterLayerHandle | null>(null);
@@ -111,6 +123,20 @@ export default function MapTab() {
   const [, setCurrentBbox] = useState<MapBbox | null>(null);
 
   const [routeTrails, setRouteTrails] = useRouteTrails();
+  // Read entries to surface custom waypoint stops in the map's route panel.
+  // Trail order/management still uses `routeTrails` so the existing reorder
+  // and remove flows keep working unchanged.
+  const routeEntriesForMap = useRouteEntries();
+  const routeWaypointsForMap = useMemo(
+    () =>
+      routeEntriesForMap
+        .filter(
+          (e): e is Extract<typeof e, { kind: "waypoint" }> =>
+            e.kind === "waypoint",
+        )
+        .map((e) => e.waypoint),
+    [routeEntriesForMap],
+  );
   const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
   const routeConnectorsRef = useRef<import("leaflet").Polyline[]>([]);
 
@@ -195,6 +221,17 @@ export default function MapTab() {
     const tileLayer = L.tileLayer(TILE_URLS.satellite, { attribution: TILE_ATTRS.satellite, maxZoom: 19 });
     tileLayer.addTo(map);
     tileLayerRef.current = tileLayer;
+
+    // Hybrid place-labels overlay rendered on top of the satellite imagery
+    // so the rider can see town/road names without losing the satellite view.
+    const labelLayer = L.tileLayer(HYBRID_LABEL_TILE_URL, {
+      attribution: HYBRID_LABEL_TILE_ATTRIBUTION,
+      opacity: 0.95,
+      maxZoom: 19,
+      pane: "shadowPane",
+    });
+    labelLayer.addTo(map);
+    labelLayerRef.current = labelLayer;
 
     map.on("click", (e: import("leaflet").LeafletMouseEvent) => {
       if (mapModeRef.current !== "draw") return;
@@ -287,6 +324,28 @@ export default function MapTab() {
 
     newTile.addTo(map);
     tileLayerRef.current = newTile;
+
+    // Show the hybrid place-labels overlay on satellite (and as a graceful
+    // fallback when OS Outdoor falls back to satellite). Hide on topo and
+    // genuine OS Outdoor since both already include their own labels.
+    const wantLabels = baseMap === "satellite" || (baseMap === "os-outdoor" && !osApiKey);
+    if (wantLabels) {
+      if (!labelLayerRef.current) {
+        const labels = L.tileLayer(HYBRID_LABEL_TILE_URL, {
+          attribution: HYBRID_LABEL_TILE_ATTRIBUTION,
+          opacity: 0.95,
+          maxZoom: 19,
+          pane: "shadowPane",
+        });
+        labels.addTo(map);
+        labelLayerRef.current = labels;
+      } else if (!map.hasLayer(labelLayerRef.current)) {
+        labelLayerRef.current.addTo(map);
+      }
+    } else if (labelLayerRef.current) {
+      labelLayerRef.current.remove();
+      labelLayerRef.current = null;
+    }
   }, [baseMap, osApiKey]);
 
   // ---------------------------------------------------------------------------
@@ -860,6 +919,8 @@ ${trkpts}
             setSelectedTrailContext(routeTrails);
             setSelectedTrail(trail);
           }}
+          waypoints={routeWaypointsForMap}
+          onRemoveWaypoint={(id) => removeRouteWaypoint(id)}
         />
       )}
 

@@ -11,8 +11,15 @@ import {
   assembleMultiModalRoute,
   type GeoPoint,
   type AssembledRoute,
+  type RouteWaypoint,
 } from "@/lib/routing";
-import { useRouteTrails } from "@/lib/plannerRouteStore";
+import {
+  useRouteTrails,
+  useRouteEntries,
+  addRouteWaypoint,
+  removeRouteWaypoint,
+} from "@/lib/plannerRouteStore";
+import AddressAutocomplete from "@/components/AddressAutocomplete";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -47,6 +54,19 @@ export default function PlannerTab() {
   // Route linking state — backed by a shared store so trails added from the
   // Map tab also appear here.
   const [routeTrails, setRouteTrails] = useRouteTrails();
+  // Waypoint-aware view of the same store (interleaved trails + custom
+  // stops). Used to render the route builder list and feed assembleRoute.
+  const routeEntries = useRouteEntries();
+  const routeWaypoints = useMemo(
+    () =>
+      routeEntries
+        .filter(
+          (e): e is Extract<typeof e, { kind: "waypoint" }> =>
+            e.kind === "waypoint",
+        )
+        .map((e) => e.waypoint),
+    [routeEntries],
+  );
   const [showRouteBuilder, setShowRouteBuilder] = useState(false);
 
   // Currently-open trail detail sheet (opened by tapping a search-result
@@ -226,6 +246,35 @@ export default function PlannerTab() {
     setRouteTrails((prev) => prev.filter((t) => t.id !== id));
   };
 
+  // Drop a custom waypoint from the route. Same store as trails so the
+  // builder reorders correctly.
+  const handleRemoveWaypoint = useCallback((waypointId: string) => {
+    removeRouteWaypoint(waypointId);
+  }, []);
+
+  // Add a POI as a custom waypoint at the end of the current entry list.
+  // (Future: an "insert after trail X" affordance can pass `afterTrailId`.)
+  const handleAddWaypoint = useCallback((wp: RouteWaypoint) => {
+    addRouteWaypoint(wp);
+  }, []);
+
+  // Build a coarse polyline for the POI corridor search. We prefer the
+  // assembled route's road+trail polyline when available; otherwise we
+  // stitch together a simple chain of start → trail entry/exit points
+  // → waypoints → end so the corridor still tracks the planned trip.
+  const routeCorridorPoints = useMemo<GeoPoint[] | undefined>(() => {
+    if (assembledRoute && assembledRoute.sections.length > 0) {
+      const pts: GeoPoint[] = [];
+      for (const sec of assembledRoute.sections) {
+        if (sec.kind === "road") pts.push(...sec.route.polyline);
+        else if (sec.kind === "trail") pts.push(...sec.polyline);
+        else pts.push(sec.point);
+      }
+      return pts.length > 1 ? pts : undefined;
+    }
+    return undefined;
+  }, [assembledRoute]);
+
   const totalRouteKm = routeTrails.reduce((s, t) => s + (t.distance_km ?? 0), 0);
 
   // ============================================================
@@ -300,11 +349,23 @@ export default function PlannerTab() {
         return;
       }
 
-      // Assemble route
-      const route = await assembleMultiModalRoute(startPt, endPt, routeTrails, (step, total, label) => {
-        const pct = 20 + Math.round((step / total) * 75);
-        setPlanProgress({ step: pct, total: 100, label });
-      });
+      // Assemble route — use the entries-aware overload so any custom
+      // waypoints the rider added (fuel, campsite, etc.) become real road
+      // legs in the trip.
+      const entriesForAssembly = routeEntries.map((e) =>
+        e.kind === "trail"
+          ? { kind: "trail" as const, trail: e.trail }
+          : { kind: "waypoint" as const, waypoint: e.waypoint },
+      );
+      const route = await assembleMultiModalRoute(
+        startPt,
+        endPt,
+        entriesForAssembly,
+        (step, total, label) => {
+          const pct = 20 + Math.round((step / total) * 75);
+          setPlanProgress({ step: pct, total: 100, label });
+        },
+      );
 
       if (route.sections.length === 0) {
         setPlanError("Could not build a route. Check your trails have valid GPX data.");
@@ -399,48 +460,47 @@ export default function PlannerTab() {
               boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
             }}
           >
-            <div className="relative">
-              <div className="absolute left-3 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-green-500"></div>
-              <input
-                ref={startInputRef}
-                type="text"
-                placeholder="Start address (e.g. 9 High Street, Stranraer)"
-                value={startLocation}
-                onChange={(e) => { setStartLocation(e.target.value); setPlanError(null); }}
-                onBlur={() => handleAddressBlur("start")}
-                data-testid="planner-start-address"
-                className={`w-full bg-[hsl(22,15%,11%)] border rounded-lg pl-8 pr-4 py-3 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-1 transition-colors ${
-                  highlightInputs ? "border-amber-500 ring-1 ring-amber-500/50" : "border-[hsl(30,12%,20%)] focus:border-amber-500/60 focus:ring-amber-500/30"
-                }`}
-              />
-              {geocodedStart && geocodedStart.q === startLocation.trim() && (
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 text-green-400">
-                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                </div>
-              )}
-            </div>
-            <div className="relative">
-              <div className="absolute left-3 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-amber-500"></div>
-              <input
-                type="text"
-                placeholder="Destination (e.g. ABR Festival, Ravenstone Manor)"
-                value={endLocation}
-                onChange={(e) => { setEndLocation(e.target.value); setPlanError(null); }}
-                onBlur={() => handleAddressBlur("end")}
-                className={`w-full bg-[hsl(22,15%,11%)] border rounded-lg pl-8 pr-4 py-3 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:ring-1 transition-colors ${
-                  highlightInputs ? "border-amber-500 ring-1 ring-amber-500/50" : "border-[hsl(30,12%,20%)] focus:border-amber-500/60 focus:ring-amber-500/30"
-                }`}
-              />
-              {geocodedEnd && geocodedEnd.q === endLocation.trim() && (
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 text-green-400">
-                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                </div>
-              )}
-            </div>
+            <AddressAutocomplete
+              ref={startInputRef}
+              value={startLocation}
+              onChange={(v) => {
+                setStartLocation(v);
+                setPlanError(null);
+              }}
+              onSelect={(s, pt) => {
+                setGeocodedStart({ q: s.label.trim(), pt });
+                setStartLocation(s.label);
+                // Bump the per-field sequence so a stale blur-fired
+                // geocode can't overwrite this confirmed pick.
+                startSeqRef.current++;
+                setPlanError(null);
+              }}
+              placeholder="Start address (e.g. 9 High Street, Stranraer)"
+              dotColor="#22c55e"
+              highlight={highlightInputs}
+              confirmed={
+                !!geocodedStart && geocodedStart.q === startLocation.trim()
+              }
+              data-testid="planner-start-address"
+            />
+            <AddressAutocomplete
+              value={endLocation}
+              onChange={(v) => {
+                setEndLocation(v);
+                setPlanError(null);
+              }}
+              onSelect={(s, pt) => {
+                setGeocodedEnd({ q: s.label.trim(), pt });
+                setEndLocation(s.label);
+                endSeqRef.current++;
+                setPlanError(null);
+              }}
+              placeholder="Destination (e.g. ABR Festival, Ravenstone Manor)"
+              dotColor="#f0a832"
+              highlight={highlightInputs}
+              confirmed={!!geocodedEnd && geocodedEnd.q === endLocation.trim()}
+              data-testid="planner-end-address"
+            />
             {(geocodedStart || geocodedEnd) && (
               <div className="text-[10px] text-stone-500 px-1 space-y-0.5">
                 {geocodedStart && geocodedStart.q === startLocation.trim() && (
@@ -554,6 +614,10 @@ export default function PlannerTab() {
               trails={results}
               selectedIds={routeIdSet}
               onToggle={toggleRouteTrail}
+              waypoints={routeWaypoints}
+              onAddWaypoint={handleAddWaypoint}
+              onRemoveWaypoint={handleRemoveWaypoint}
+              routeCorridorPoints={routeCorridorPoints}
             />
           </div>
         )}
@@ -827,6 +891,8 @@ export default function PlannerTab() {
           onReorder={setRouteTrails}
           onRemove={removeFromRoute}
           onClose={() => setShowRouteBuilder(false)}
+          waypoints={routeWaypoints}
+          onRemoveWaypoint={handleRemoveWaypoint}
         />
       )}
 

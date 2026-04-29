@@ -8,6 +8,8 @@ import {
   formatDurationMin,
   maneuverArrow,
   haversineM,
+  HYBRID_LABEL_TILE_URL,
+  HYBRID_LABEL_TILE_ATTRIBUTION,
 } from "@/lib/routing";
 import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
 
@@ -15,7 +17,10 @@ import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
 function findNearestSection(route: AssembledRoute, user: GeoPoint): { section: RouteSection; distanceM: number } | null {
   let best: { section: RouteSection; distanceM: number } | null = null;
   for (const sec of route.sections) {
-    const pts = sec.kind === "road" ? sec.route.polyline : sec.polyline;
+    let pts: GeoPoint[];
+    if (sec.kind === "road") pts = sec.route.polyline;
+    else if (sec.kind === "trail") pts = sec.polyline;
+    else pts = [sec.point]; // waypoint — single anchor point
     // Sample at most 30 evenly-spaced points to keep it fast
     const stride = Math.max(1, Math.floor(pts.length / 30));
     let minD = Infinity;
@@ -115,6 +120,14 @@ export default function NavigationView({ route, onClose }: Props) {
       "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       { attribution: "Tiles © Esri", maxZoom: 19 }
     ).addTo(map);
+    // Hybrid place-label overlay so the rider can read town/road names
+    // while navigating on the satellite base layer.
+    L.tileLayer(HYBRID_LABEL_TILE_URL, {
+      attribution: HYBRID_LABEL_TILE_ATTRIBUTION,
+      opacity: 0.95,
+      maxZoom: 19,
+      pane: "shadowPane",
+    }).addTo(map);
     mapRef.current = map;
   }, [leafletLoaded]);
 
@@ -290,6 +303,34 @@ export default function NavigationView({ route, onClose }: Props) {
         sectionLayersRef.current.set(sec.index * 10, shadow);
         sectionLayersRef.current.set(sec.index * 10 + 1, main);
         latlngs.forEach((c) => allBounds.push(c));
+      } else if (sec.kind === "waypoint") {
+        // Custom rider stop — fuel / campsite / generic. No polyline; the
+        // road sections on either side already draw the path. We just drop
+        // a coloured pin so the rider can see where the stop sits along
+        // their route.
+        const wp = sec.waypoint;
+        const color = wp.kind === "fuel" ? "#3b82f6" : wp.kind === "campsite" ? "#22c55e" : "#f0a832";
+        const glyph =
+          wp.kind === "fuel"
+            ? '<path d="M3 12V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14H3v-7zM13 8h2a2 2 0 0 1 2 2v6a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-6l-3-3"/>'
+            : wp.kind === "campsite"
+              ? '<path d="M3 20 12 4l9 16H3z M12 4v16"/>'
+              : '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>';
+        const html = `<div style="width:28px;height:28px;border-radius:50%;background:${color};border:3px solid ${isActive ? "#fff" : "#f0a832"};display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.7);">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${glyph}</svg>
+        </div>`;
+        const wpMarker = L.marker([sec.point.lat, sec.point.lng], {
+          icon: L.divIcon({
+            html,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14],
+            className: "",
+          }),
+          zIndexOffset: 900,
+        }).addTo(map);
+        wpMarker.bindPopup(`<b>${wp.name}</b><br><span style="font-size:10px;color:#888">Stop · ${wp.kind}</span>`);
+        sectionLayersRef.current.set(sec.index * 10, wpMarker);
+        allBounds.push([sec.point.lat, sec.point.lng]);
       } else {
         // Trail section
         const latlngs = sec.polyline.map((p) => [p.lat, p.lng] as [number, number]);
@@ -325,7 +366,10 @@ export default function NavigationView({ route, onClose }: Props) {
         if (activeSection != null) {
           const sec = route.sections.find((s) => s.index === activeSection);
           if (sec) {
-            const pts = sec.kind === "road" ? sec.route.polyline : sec.polyline;
+            let pts: GeoPoint[];
+            if (sec.kind === "road") pts = sec.route.polyline;
+            else if (sec.kind === "trail") pts = sec.polyline;
+            else pts = [sec.point];
             const ll = pts.map((p) => [p.lat, p.lng] as [number, number]);
             map.fitBounds(ll, { padding: [40, 40] });
             return;
@@ -339,27 +383,33 @@ export default function NavigationView({ route, onClose }: Props) {
   }, [route, leafletLoaded, activeSection]);
 
   const handleDownloadFullGPX = () => {
-    // Build a single GPX with all sections (road tracks + trail tracks)
-    const trailRoutes: TrailRoute[] = route.sections.map((sec, i) => {
-      if (sec.kind === "road") {
+    // Build a single GPX with all sections (road tracks + trail tracks).
+    // Waypoint sections are zero-length stops, so we skip them in the GPX
+    // export — the surrounding road sections already include the path that
+    // passes through the waypoint coordinate.
+    const trailRoutes: TrailRoute[] = route.sections
+      .map((sec, i): TrailRoute | null => {
+        if (sec.kind === "road") {
+          return {
+            id: `road-${i}`,
+            name: sec.label,
+            waypoints: sec.route.polyline.map((p) => ({ lat: p.lat, lon: p.lng })),
+            distance_km: sec.route.distanceKm,
+            legal_status: "Road",
+            difficulty: 0,
+          };
+        }
+        if (sec.kind === "waypoint") return null;
         return {
-          id: `road-${i}`,
-          name: sec.label,
-          waypoints: sec.route.polyline.map((p) => ({ lat: p.lat, lon: p.lng })),
-          distance_km: sec.route.distanceKm,
-          legal_status: "Road",
-          difficulty: 0,
+          id: sec.trail.id,
+          name: sec.trail.name,
+          waypoints: sec.polyline.map((p) => ({ lat: p.lat, lon: p.lng })),
+          distance_km: sec.distanceKm,
+          legal_status: sec.trail.legal_status,
+          difficulty: sec.trail.difficulty,
         };
-      }
-      return {
-        id: sec.trail.id,
-        name: sec.trail.name,
-        waypoints: sec.polyline.map((p) => ({ lat: p.lat, lon: p.lng })),
-        distance_km: sec.distanceKm,
-        legal_status: sec.trail.legal_status,
-        difficulty: sec.trail.difficulty,
-      };
-    });
+      })
+      .filter((r): r is TrailRoute => r !== null);
     const gpx = buildCombinedGPX(trailRoutes);
     const filename = `TrailForge-Trip-${new Date().toISOString().slice(0, 10)}.gpx`;
     downloadGPX(gpx, filename);
@@ -590,27 +640,40 @@ export default function NavigationView({ route, onClose }: Props) {
         {activeSection != null && (() => {
           const sec = route.sections.find((s) => s.index === activeSection);
           if (!sec) return null;
+          // Per-kind chrome — colours, badge, title and subtitle so the
+          // overlay reads correctly for road / trail / waypoint sections.
+          let bg: string;
+          let badge: string;
+          let title: string;
+          let subtitle: string;
+          if (sec.kind === "road") {
+            bg = "rgba(59,130,246,0.95)";
+            badge = "RD";
+            title = sec.label;
+            subtitle = `${formatKm(sec.route.distanceKm)} · ${formatDurationMin(sec.route.durationMin)} · ${sec.route.steps.length} turns`;
+          } else if (sec.kind === "trail") {
+            bg = "rgba(249,115,22,0.95)";
+            badge = `T${trailSections.findIndex((t) => t.index === sec.index) + 1}`;
+            title = sec.trail.name;
+            subtitle = `${formatKm(sec.distanceKm)} · Difficulty ${sec.trail.difficulty} · ${sec.trail.legal_status}`;
+          } else {
+            bg = "rgba(240,168,50,0.95)";
+            badge = "ST";
+            title = sec.waypoint.name;
+            subtitle = `Stop · ${sec.waypoint.kind}`;
+          }
           return (
             <div className="absolute top-2 left-2 right-2 z-[500]">
               <div
                 className="rounded-lg p-2 backdrop-blur shadow-lg flex items-center gap-2"
-                style={{
-                  background: sec.kind === "road" ? "rgba(59,130,246,0.95)" : "rgba(249,115,22,0.95)",
-                  color: "#fff",
-                }}
+                style={{ background: bg, color: "#fff" }}
               >
                 <div className="w-7 h-7 rounded-md bg-white/20 flex items-center justify-center text-[11px] font-black">
-                  {sec.kind === "road" ? "RD" : `T${trailSections.findIndex((t) => t.index === sec.index) + 1}`}
+                  {badge}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold truncate">
-                    {sec.kind === "road" ? sec.label : sec.trail.name}
-                  </div>
-                  <div className="text-[10px] opacity-80">
-                    {sec.kind === "road"
-                      ? `${formatKm(sec.route.distanceKm)} · ${formatDurationMin(sec.route.durationMin)} · ${sec.route.steps.length} turns`
-                      : `${formatKm(sec.distanceKm)} · Difficulty ${sec.trail.difficulty} · ${sec.trail.legal_status}`}
-                  </div>
+                  <div className="text-xs font-bold truncate">{title}</div>
+                  <div className="text-[10px] opacity-80 capitalize">{subtitle}</div>
                 </div>
                 <button onClick={() => setActiveSection(null)} className="text-white/80 hover:text-white text-lg leading-none">×</button>
               </div>
@@ -703,6 +766,33 @@ function SectionsList({
             </button>
           );
         }
+        if (sec.kind === "waypoint") {
+          const wp = sec.waypoint;
+          const wpColor = wp.kind === "fuel" ? "text-blue-400 bg-blue-500/15" : wp.kind === "campsite" ? "text-green-400 bg-green-500/15" : "text-amber-400 bg-amber-500/15";
+          return (
+            <button
+              key={sec.index}
+              onClick={() => onSelect(isActive ? null : sec.index)}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all ${
+                isActive ? "border-amber-500/60 bg-amber-500/10" : "border-amber-500/20 bg-amber-900/10 hover:border-amber-500/40"
+              }`}
+            >
+              <div className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${wpColor}`}>
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                  <circle cx="12" cy="10" r="3"/>
+                </svg>
+              </div>
+              <div className="flex-1 min-w-0 text-left">
+                <div className="text-xs font-bold text-stone-200 truncate">{wp.name}</div>
+                <div className="text-[10px] text-stone-500 capitalize">Stop · {wp.kind}</div>
+              </div>
+              <svg viewBox="0 0 24 24" className={`w-4 h-4 transition-transform ${isActive ? "rotate-90" : ""} text-stone-500`} fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+          );
+        }
         const tNum = trailSections.findIndex((t) => t.index === sec.index) + 1;
         return (
           <button
@@ -786,6 +876,28 @@ function TurnByTurnList({
                   </li>
                 ))}
               </ul>
+            </div>
+          );
+        }
+        if (sec.kind === "waypoint") {
+          const wp = sec.waypoint;
+          return (
+            <div key={sec.index} className="rounded-lg overflow-hidden border border-amber-500/30 bg-amber-500/5">
+              <button
+                onClick={() => onSelectSection(sec.index)}
+                className="w-full px-3 py-2.5 bg-amber-500/15 border-b border-amber-500/20 flex items-center gap-2"
+              >
+                <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-300" fill="none" stroke="currentColor" strokeWidth="2.4">
+                  <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                  <circle cx="12" cy="10" r="3"/>
+                </svg>
+                <span className="text-[11px] font-bold text-amber-300 uppercase tracking-wider truncate">
+                  Stop · {wp.name}
+                </span>
+              </button>
+              <div className="px-3 py-2.5 text-[11px] text-stone-300 capitalize">
+                Pause here for <span className="text-amber-300 font-semibold">{wp.kind}</span>
+              </div>
             </div>
           );
         }

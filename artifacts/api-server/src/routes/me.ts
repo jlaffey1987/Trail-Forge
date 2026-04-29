@@ -17,9 +17,29 @@ import { getSupabaseAdmin } from "../lib/supabaseAdmin";
  * identically from another device. `trailIds` is capped at 50 because the
  * planner UI can't usefully chain more than that and the cap keeps the
  * jsonb payload bounded.
+ *
+ * `waypoints` (custom stops — fuel/campsite/custom pins picked off the
+ * POI overlay) and `entryOrder` (the interleaved order of trails and
+ * waypoints) are optional for backward-compat with the Phase-A client
+ * that only knew about `trailIds`. When omitted the server stores
+ * empty arrays and the client falls back to "trails only, in order".
  */
+const PlannerWaypoint = z.object({
+  id: z.string().min(1),
+  lat: z.number().finite().min(-90).max(90),
+  lng: z.number().finite().min(-180).max(180),
+  name: z.string().min(1).max(200),
+  kind: z.enum(["fuel", "campsite", "custom"]),
+  osmId: z.string().min(1).max(100).optional(),
+});
+const PlannerEntryRef = z.object({
+  kind: z.enum(["trail", "waypoint"]),
+  id: z.string().min(1),
+});
 const PutPlannerRouteBody = z.object({
   trailIds: z.array(z.string().min(1)).max(50),
+  waypoints: z.array(PlannerWaypoint).max(50).optional(),
+  entryOrder: z.array(PlannerEntryRef).max(100).optional(),
 });
 
 /**
@@ -414,17 +434,42 @@ router.get("/me/planner-route", async (req: Request, res: Response) => {
 
   try {
     const supa = getSupabaseAdmin();
-    const { data, error } = await supa
-      .from("planner_routes")
-      .select("trail_ids, updated_at")
-      .eq("user_id", auth.userId)
-      .maybeSingle();
+    // Try the wider select first (waypoints + entry_order from migration
+    // 0017). If those columns aren't there yet (older deploy) fall back
+    // to the original 0012 shape so the route still hydrates.
+    let data: Record<string, unknown> | null = null;
+    let error: { code?: string; message?: string } | null = null;
+    {
+      const wide = await supa
+        .from("planner_routes")
+        .select("trail_ids, waypoints, entry_order, updated_at")
+        .eq("user_id", auth.userId)
+        .maybeSingle();
+      if (wide.error?.code === "42703") {
+        const narrow = await supa
+          .from("planner_routes")
+          .select("trail_ids, updated_at")
+          .eq("user_id", auth.userId)
+          .maybeSingle();
+        data = narrow.data as Record<string, unknown> | null;
+        error = narrow.error;
+      } else {
+        data = wide.data as Record<string, unknown> | null;
+        error = wide.error;
+      }
+    }
 
     if (error) {
       if (isMissingTableError(error)) {
         // Migration 0012 not yet applied — behave as if the row is empty
         // so the client falls back to localStorage-only mode silently.
-        res.json({ trailIds: [], trails: [], updatedAt: null });
+        res.json({
+          trailIds: [],
+          trails: [],
+          waypoints: [],
+          entryOrder: [],
+          updatedAt: null,
+        });
         return;
       }
       req.log.error({ err: error }, "fetchPlannerRoute failed");
@@ -436,11 +481,65 @@ router.get("/me/planner-route", async (req: Request, res: Response) => {
     const trailIds = Array.isArray(rawIds)
       ? rawIds.filter((v): v is string => typeof v === "string")
       : [];
+    // Sanitize waypoints — service-role bypasses RLS but the column is
+    // user-controlled, so re-validate shapes before echoing them back.
+    const rawWps = (data?.waypoints ?? []) as unknown;
+    const waypoints: Array<{
+      id: string;
+      lat: number;
+      lng: number;
+      name: string;
+      kind: "fuel" | "campsite" | "custom";
+      osmId?: string;
+    }> = Array.isArray(rawWps)
+      ? rawWps.flatMap((w) => {
+          if (!w || typeof w !== "object") return [];
+          const obj = w as Record<string, unknown>;
+          const id = typeof obj.id === "string" ? obj.id : null;
+          const lat = typeof obj.lat === "number" ? obj.lat : NaN;
+          const lng = typeof obj.lng === "number" ? obj.lng : NaN;
+          const name = typeof obj.name === "string" ? obj.name : "";
+          const kind = obj.kind;
+          if (
+            !id ||
+            !Number.isFinite(lat) ||
+            !Number.isFinite(lng) ||
+            !name ||
+            (kind !== "fuel" && kind !== "campsite" && kind !== "custom")
+          ) {
+            return [];
+          }
+          const out: {
+            id: string;
+            lat: number;
+            lng: number;
+            name: string;
+            kind: "fuel" | "campsite" | "custom";
+            osmId?: string;
+          } = { id, lat, lng, name, kind };
+          if (typeof obj.osmId === "string") out.osmId = obj.osmId;
+          return [out];
+        })
+      : [];
+    const rawOrder = (data?.entry_order ?? []) as unknown;
+    const entryOrder: Array<{ kind: "trail" | "waypoint"; id: string }> =
+      Array.isArray(rawOrder)
+        ? rawOrder.flatMap((r) => {
+            if (!r || typeof r !== "object") return [];
+            const obj = r as Record<string, unknown>;
+            const kind = obj.kind;
+            const id = typeof obj.id === "string" ? obj.id : null;
+            if ((kind !== "trail" && kind !== "waypoint") || !id) return [];
+            return [{ kind, id }];
+          })
+        : [];
 
     if (trailIds.length === 0) {
       res.json({
         trailIds: [],
         trails: [],
+        waypoints,
+        entryOrder,
         updatedAt: data?.updated_at ?? null,
       });
       return;
@@ -470,6 +569,8 @@ router.get("/me/planner-route", async (req: Request, res: Response) => {
       res.json({
         trailIds,
         trails: [],
+        waypoints,
+        entryOrder,
         updatedAt: data?.updated_at ?? null,
       });
       return;
@@ -531,6 +632,8 @@ router.get("/me/planner-route", async (req: Request, res: Response) => {
     res.json({
       trailIds,
       trails: ordered,
+      waypoints,
+      entryOrder,
       updatedAt: data?.updated_at ?? null,
     });
   } catch (err) {
@@ -560,19 +663,65 @@ router.put("/me/planner-route", async (req: Request, res: Response) => {
     seen.add(id);
     trailIds.push(id);
   }
+  // Same de-dupe for waypoints (by id) — Overpass nodes are stable so
+  // the client also de-dupes, but we defend in depth.
+  const wpSeen = new Set<string>();
+  const waypoints = (parsed.data.waypoints ?? []).filter((w) => {
+    if (wpSeen.has(w.id)) return false;
+    wpSeen.add(w.id);
+    return true;
+  });
+  // Validate entryOrder: every ref must point to a known trail/waypoint.
+  // Drop dangling refs rather than rejecting the whole write — the client
+  // could legitimately race a remove-trail with a reorder.
+  const trailIdSet = new Set(trailIds);
+  const wpIdSet = new Set(waypoints.map((w) => w.id));
+  const orderSeen = new Set<string>();
+  const entryOrder = (parsed.data.entryOrder ?? []).filter((r) => {
+    const key = `${r.kind}:${r.id}`;
+    if (orderSeen.has(key)) return false;
+    orderSeen.add(key);
+    if (r.kind === "trail") return trailIdSet.has(r.id);
+    return wpIdSet.has(r.id);
+  });
 
   try {
     const supa = getSupabaseAdmin();
     const updatedAt = new Date().toISOString();
-    const row = {
+    const wideRow = {
+      user_id: auth.userId,
+      trail_ids: trailIds,
+      waypoints,
+      entry_order: entryOrder,
+      updated_at: updatedAt,
+    };
+    const narrowRow = {
       user_id: auth.userId,
       trail_ids: trailIds,
       updated_at: updatedAt,
     };
+    // Use the wide row when the columns exist; fall back to narrow if a
+    // pre-0017 deploy is missing waypoints/entry_order. We keep `row` as
+    // the active payload so the existing FK-recovery retry below stays
+    // unchanged.
+    let row: Record<string, unknown> = wideRow;
 
     let { error } = await supa
       .from("planner_routes")
       .upsert(row, { onConflict: "user_id" });
+    if (error?.code === "PGRST204" || error?.code === "42703") {
+      // Pre-0017 schema — drop waypoint columns and retry.
+      row = narrowRow;
+      const retry = await supa
+        .from("planner_routes")
+        .upsert(row, { onConflict: "user_id" });
+      error = retry.error;
+      if (!error) {
+        req.log.warn(
+          "planner_routes missing waypoints/entry_order columns — apply migration 0017_planner_route_waypoints.sql",
+        );
+      }
+    }
 
     // First-sign-in race recovery: ClerkUserSync runs `/me/sync` and the
     // planner store's PUT from independent effects, so the planner upsert

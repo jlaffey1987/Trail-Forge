@@ -1,6 +1,7 @@
 import { Component, useState, type ReactNode } from "react";
 import { type Trail } from "@/lib/supabase";
 import { getDifficultyColor } from "@/lib/trailLayer";
+import type { RouteWaypoint } from "@/lib/routing";
 
 interface Props {
   trails: Trail[];
@@ -13,7 +14,16 @@ interface Props {
   // jump between them). Optional — when not provided, rows are still
   // reorderable/removable but not tappable.
   onSelectTrail?: (trail: Trail) => void;
+  /** Custom POI/waypoint stops the rider has added to the planner route. */
+  waypoints?: RouteWaypoint[];
+  onRemoveWaypoint?: (waypointId: string) => void;
 }
+
+const WAYPOINT_KIND_COLOR: Record<RouteWaypoint["kind"], string> = {
+  fuel: "#3b82f6",
+  campsite: "#22c55e",
+  custom: "#f0a832",
+};
 
 /** Safe numeric coercion — Supabase returns `numeric` columns as strings. */
 function toNum(v: unknown): number {
@@ -59,9 +69,14 @@ function MapRoutePanelInner({
   onClear,
   onBuildRoute,
   onSelectTrail,
+  waypoints,
+  onRemoveWaypoint,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
-  if (trails.length === 0) return null;
+  const wps = waypoints ?? [];
+  // Hide the panel only when both lists are empty so a rider can still
+  // see (and remove) custom stops they added before picking any trails.
+  if (trails.length === 0 && wps.length === 0) return null;
 
   const totalKm = trails.reduce((s, t) => s + toNum(t.distance_km), 0);
 
@@ -119,13 +134,14 @@ function MapRoutePanelInner({
             >
               {trails.length} Trail{trails.length !== 1 ? "s" : ""} ·{" "}
               {totalKm.toFixed(1)} km
+              {wps.length > 0 ? ` · ${wps.length} stop${wps.length !== 1 ? "s" : ""}` : ""}
             </div>
             <div className="text-[10px] text-stone-400 mt-0.5 truncate">
-              {trails
-                .map((t) => t.name)
-                .slice(0, 2)
-                .join(" → ")}
-              {trails.length > 2 ? ` → +${trails.length - 2} more` : ""}
+              {trails.length > 0
+                ? trails.map((t) => t.name).slice(0, 2).join(" → ") +
+                  (trails.length > 2 ? ` → +${trails.length - 2} more` : "")
+                : wps.map((w) => w.name).slice(0, 2).join(" → ") +
+                  (wps.length > 2 ? ` → +${wps.length - 2} more` : "")}
             </div>
           </div>
           <svg
@@ -148,6 +164,75 @@ function MapRoutePanelInner({
               className="max-h-56 overflow-y-auto px-2 py-2 space-y-1"
               data-testid="map-route-panel-list"
             >
+              {wps.length > 0 && (
+                <div className="space-y-1 pb-1.5 border-b border-[hsl(30,12%,18%)] mb-1.5">
+                  <p className="text-[9px] uppercase tracking-wider text-stone-500 font-bold px-1">
+                    Stops ({wps.length})
+                  </p>
+                  {wps.map((wp) => (
+                    <div
+                      key={wp.id}
+                      data-testid={`map-route-panel-waypoint-${wp.id}`}
+                      className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
+                    >
+                      <div
+                        className="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
+                        style={{
+                          background: WAYPOINT_KIND_COLOR[wp.kind],
+                          border: "1.5px solid #f0a832",
+                        }}
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="9"
+                          height="9"
+                          fill="none"
+                          stroke="#fff"
+                          strokeWidth="2.4"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          {wp.kind === "fuel" ? (
+                            <path d="M3 12V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14H3v-7zM13 8h2a2 2 0 0 1 2 2v6a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-6l-3-3" />
+                          ) : wp.kind === "campsite" ? (
+                            <path d="M3 20 12 4l9 16H3z M12 4v16" />
+                          ) : (
+                            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                          )}
+                        </svg>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] font-bold text-stone-100 truncate">
+                          {wp.name}
+                        </div>
+                        <div className="text-[9px] text-stone-500 capitalize">
+                          {wp.kind} stop
+                        </div>
+                      </div>
+                      {onRemoveWaypoint && (
+                        <button
+                          type="button"
+                          onClick={() => onRemoveWaypoint(wp.id)}
+                          aria-label={`Remove stop ${wp.name}`}
+                          data-testid={`map-route-panel-waypoint-remove-${wp.id}`}
+                          className="w-6 h-6 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            className="w-3 h-3"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                          >
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               {trails.map((trail, idx) => {
                 const diff = trail.difficulty ?? 5;
                 const diffColor = getDifficultyColor(diff);

@@ -11,11 +11,25 @@ import {
   type TrailRoute,
 } from "@/lib/gpx";
 import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
+import type { RouteWaypoint } from "@/lib/routing";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
   6: "#fb923c", 7: "#f97316", 8: "#ef4444", 9: "#dc2626", 10: "#7f1d1d",
 };
+
+const WAYPOINT_KIND_COLOR: Record<RouteWaypoint["kind"], string> = {
+  fuel: "#3b82f6",
+  campsite: "#22c55e",
+  custom: "#f0a832",
+};
+
+function waypointGlyph(kind: RouteWaypoint["kind"]): string {
+  if (kind === "fuel")
+    return "M3 12V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14H3v-7zM13 8h2a2 2 0 0 1 2 2v6a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-6l-3-3";
+  if (kind === "campsite") return "M3 20 12 4l9 16H3z M12 4v16";
+  return "M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z";
+}
 
 function trailToRoute(trail: Trail): TrailRoute {
   return {
@@ -33,9 +47,23 @@ interface Props {
   onReorder: (trails: Trail[]) => void;
   onRemove: (id: string) => void;
   onClose: () => void;
+  /**
+   * Custom waypoints (fuel/campsite/custom) the rider has added to the
+   * route. Rendered interleaved at the top of the list so they're easy
+   * to scan and remove. The trail order/transit math is unchanged.
+   */
+  waypoints?: RouteWaypoint[];
+  onRemoveWaypoint?: (waypointId: string) => void;
 }
 
-export default function RouteBuilder({ selectedTrails, onReorder, onRemove, onClose }: Props) {
+export default function RouteBuilder({
+  selectedTrails,
+  onReorder,
+  onRemove,
+  onClose,
+  waypoints,
+  onRemoveWaypoint,
+}: Props) {
   const [downloading, setDownloading] = useState(false);
   const [gpxReady, setGpxReady] = useState(false);
   const [transitDistances, setTransitDistances] = useState<number[]>([]);
@@ -196,6 +224,70 @@ export default function RouteBuilder({ selectedTrails, onReorder, onRemove, onCl
 
         {/* Trail Order List */}
         <div className="overflow-y-auto flex-1 px-4 py-3 space-y-2">
+          {waypoints && waypoints.length > 0 && (
+            <div className="space-y-1.5 pb-2 border-b border-[hsl(30,12%,16%)] mb-2">
+              <p className="text-[10px] uppercase tracking-wider text-stone-500 font-bold pb-0.5">
+                Stops along route ({waypoints.length})
+              </p>
+              {waypoints.map((wp) => (
+                <div
+                  key={wp.id}
+                  data-testid={`route-builder-waypoint-${wp.id}`}
+                  className="flex items-center gap-2 bg-[hsl(22,15%,13%)] border border-[hsl(30,12%,22%)] rounded-lg px-2 py-2"
+                >
+                  <div
+                    className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+                    style={{
+                      background: WAYPOINT_KIND_COLOR[wp.kind],
+                      border: "2px solid #f0a832",
+                    }}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="13"
+                      height="13"
+                      fill="none"
+                      stroke="#fff"
+                      strokeWidth="2.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d={waypointGlyph(wp.kind)} />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold text-stone-100 truncate">
+                      {wp.name}
+                    </div>
+                    <div className="text-[10px] text-stone-500 capitalize">
+                      {wp.kind} stop · {wp.lat.toFixed(4)},{" "}
+                      {wp.lng.toFixed(4)}
+                    </div>
+                  </div>
+                  {onRemoveWaypoint && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveWaypoint(wp.id)}
+                      aria-label={`Remove stop ${wp.name}`}
+                      data-testid={`route-builder-waypoint-remove-${wp.id}`}
+                      className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {selectedTrails.map((trail, idx) => {
             const diff = trail.difficulty ?? 5;
             const route = routes[idx];
