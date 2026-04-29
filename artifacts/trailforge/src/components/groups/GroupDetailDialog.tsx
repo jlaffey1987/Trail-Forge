@@ -20,6 +20,8 @@ import {
   updateGroup,
 } from "@/lib/groups";
 import { preparePhotoForUpload } from "@/lib/photoUpload";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import GroupGallerySection from "./GroupGallerySection";
 
 interface Props {
   groupId: string | null;
@@ -32,6 +34,7 @@ interface Props {
 type InviteMode = "link" | "username";
 
 export default function GroupDetailDialog({ groupId, onClose }: Props) {
+  const { userId: callerUserId } = useCurrentUser();
   const [detail, setDetail] = useState<GroupDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [inviteMode, setInviteMode] = useState<InviteMode>("link");
@@ -345,6 +348,15 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
 
               {detail.group.description && (
                 <p className="text-xs text-stone-400 whitespace-pre-line">{detail.group.description}</p>
+              )}
+
+              {/* Shared photo gallery — any member can post */}
+              {callerUserId && (
+                <GroupGallerySection
+                  groupId={groupId}
+                  callerUserId={callerUserId}
+                  canModerate={canManage}
+                />
               )}
 
               {/* Discoverability — owner / admin only */}

@@ -767,6 +767,264 @@ router.delete(
 );
 
 // ---------------------------------------------------------------------------
+// GROUP PHOTO GALLERY
+//
+// Per-group shared gallery so members can post multiple photos from group
+// rides (mirrors the per-trail photo gallery). Three-step upload flow that
+// matches trail_photos and the group cover photo:
+//   1. POST /groups/:id/photos/upload-url  → signed PUT URL + storageKey
+//   2. Client PUTs the JPEG bytes directly to that URL
+//   3. POST /groups/:id/photos { storageKey } → ACL public + insert row
+//
+// Storage key convention: `groups/{groupId}/photos/{uuid}.jpg`.
+// All API endpoints require group membership. The blob ACL is "public"
+// (matching trail_photos and the group cover) so members render the image
+// directly via the proxied storage path; the API — not the bucket — is the
+// source of authorisation. Owners and admins can hide any photo (mirrors
+// trail_photos moderation); the original uploader can hard-delete their
+// own row.
+// ---------------------------------------------------------------------------
+
+const GroupPhotoFinalizeBody = z.object({
+  storageKey: z.string().min(1).max(512),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  caption: z.string().max(500).optional(),
+});
+
+const GROUP_PHOTO_SELECT =
+  "id, group_id, uploader_user_id, storage_key, width, height, caption, created_at, hidden_at, users(id, display_name, avatar_url)";
+
+router.get(
+  "/groups/:groupId/photos",
+  requireAuth(async (req, res, userId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const ms = await fetchMembership(idParse.data, userId);
+    if ("notMember" in ms) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in ms && ms.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("group_photos")
+      .select(GROUP_PHOTO_SELECT)
+      .eq("group_id", idParse.data)
+      .is("hidden_at", null)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.json({ items: [] });
+        return;
+      }
+      req.log.error({ err: error }, "list group photos failed");
+      res.status(500).json({ error: "Failed to list group photos" });
+      return;
+    }
+    res.json({ items: data ?? [] });
+  }),
+);
+
+router.post(
+  "/groups/:groupId/photos/upload-url",
+  requireAuth(async (req, res, userId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const ms = await fetchMembership(idParse.data, userId);
+    if ("notMember" in ms) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in ms && ms.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    const subPath = `groups/${idParse.data}/photos/${randomUUID()}.jpg`;
+    try {
+      const uploadURL = await objectStorage.getObjectEntityUploadURL(subPath);
+      res.json({
+        uploadURL,
+        storageKey: subPath,
+        objectPath: `/objects/${subPath}`,
+      });
+    } catch (err) {
+      req.log.error({ err }, "group photo upload-url failed");
+      res.status(500).json({ error: "Failed to generate upload URL" });
+    }
+  }),
+);
+
+router.post(
+  "/groups/:groupId/photos",
+  requireAuth(async (req, res, userId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const ms = await fetchMembership(idParse.data, userId);
+    if ("notMember" in ms) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in ms && ms.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    const parsed = GroupPhotoFinalizeBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid photo metadata" });
+      return;
+    }
+    const expectedPrefix = `groups/${idParse.data}/photos/`;
+    if (!parsed.data.storageKey.startsWith(expectedPrefix)) {
+      res.status(400).json({ error: "storageKey does not match this group" });
+      return;
+    }
+
+    // Stamp ACL — public so any member viewing the group can render the
+    // image. The actual `/api/storage/objects/...` endpoint still gates
+    // access, and the path is an unguessable UUID under the group id.
+    try {
+      await objectStorage.trySetObjectEntityAclPolicy(
+        `/objects/${parsed.data.storageKey}`,
+        { owner: userId, visibility: "public" },
+      );
+    } catch (err) {
+      if (err instanceof ObjectNotFoundError) {
+        res.status(404).json({ error: "Photo upload not completed" });
+        return;
+      }
+      req.log.error({ err }, "set group photo ACL failed");
+      res.status(500).json({ error: "Failed to finalize photo" });
+      return;
+    }
+
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("group_photos")
+      .insert({
+        group_id: idParse.data,
+        uploader_user_id: userId,
+        storage_key: parsed.data.storageKey,
+        width: parsed.data.width ?? null,
+        height: parsed.data.height ?? null,
+        caption: parsed.data.caption ?? null,
+      })
+      .select(GROUP_PHOTO_SELECT)
+      .single();
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.status(503).json({
+          error:
+            "Group photos feature not yet provisioned — apply migration 0016_group_photos.sql",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "create group photo failed");
+      res.status(500).json({ error: "Failed to create group photo" });
+      return;
+    }
+    res.json(data);
+  }),
+);
+
+router.delete(
+  "/groups/:groupId/photos/:photoId",
+  requireAuth(async (req, res, userId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const photoId = z.string().uuid().safeParse(req.params.photoId);
+    if (!photoId.success) {
+      res.status(400).json({ error: "Invalid photo id" });
+      return;
+    }
+    const ms = await fetchMembership(idParse.data, userId);
+    if ("notMember" in ms) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in ms && ms.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: existing, error: lookupErr } = await supa
+      .from("group_photos")
+      .select("id, uploader_user_id, storage_key")
+      .eq("id", photoId.data)
+      .eq("group_id", idParse.data)
+      .maybeSingle();
+    if (lookupErr) {
+      if (isMissingTableError(lookupErr)) {
+        res.status(404).json({ error: "Photo not found" });
+        return;
+      }
+      req.log.error({ err: lookupErr }, "load group photo failed");
+      res.status(500).json({ error: "Failed to load photo" });
+      return;
+    }
+    if (!existing) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    const isUploader = existing.uploader_user_id === userId;
+    const canModerate =
+      ms.member.role === "owner" || ms.member.role === "admin";
+    if (!isUploader && !canModerate) {
+      res
+        .status(403)
+        .json({ error: "Only the uploader, owner, or admin can remove this photo" });
+      return;
+    }
+    if (isUploader) {
+      const { error } = await supa
+        .from("group_photos")
+        .delete()
+        .eq("id", photoId.data);
+      if (error) {
+        req.log.error({ err: error }, "delete group photo failed");
+        res.status(500).json({ error: "Failed to delete photo" });
+        return;
+      }
+      // Best-effort: drop the underlying blob too. A failure here is
+      // logged but not surfaced — the row is gone, so the listing won't
+      // show it again, and an orphaned blob is recoverable later.
+      try {
+        await objectStorage.deleteObjectEntity(`/objects/${existing.storage_key}`);
+      } catch (err) {
+        req.log.warn({ err, key: existing.storage_key }, "delete group photo blob failed");
+      }
+    } else {
+      const { error } = await supa
+        .from("group_photos")
+        .update({ hidden_at: new Date().toISOString() })
+        .eq("id", photoId.data);
+      if (error) {
+        req.log.error({ err: error }, "hide group photo failed");
+        res.status(500).json({ error: "Failed to hide photo" });
+        return;
+      }
+    }
+    res.json({ ok: true });
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // DELETE group (owner only)
 // ---------------------------------------------------------------------------
 

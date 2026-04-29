@@ -348,6 +348,82 @@ export function groupCoverPhotoUrl(coverKey: string | null | undefined): string 
   return `/api/storage/objects/${coverKey}`;
 }
 
+// ---------------------------------------------------------------------------
+// Group photo gallery (shared per-group photos posted by members)
+// ---------------------------------------------------------------------------
+
+export interface GroupPhotoUploader {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+}
+
+export interface GroupPhoto {
+  id: string;
+  group_id: string;
+  uploader_user_id: string;
+  storage_key: string;
+  width: number | null;
+  height: number | null;
+  caption: string | null;
+  created_at: string;
+  hidden_at: string | null;
+  users: GroupPhotoUploader | null;
+}
+
+export interface GroupPhotoUploadTicket {
+  uploadURL: string;
+  storageKey: string;
+  objectPath: string;
+}
+
+export async function fetchGroupPhotos(groupId: string): Promise<GroupPhoto[]> {
+  const res = await jsonFetch<{ items: GroupPhoto[] }>(
+    `/api/groups/${groupId}/photos`,
+  );
+  return res?.items ?? [];
+}
+
+export async function requestGroupPhotoUploadUrl(
+  groupId: string,
+): Promise<GroupPhotoUploadTicket | null> {
+  return jsonFetch<GroupPhotoUploadTicket>(
+    `/api/groups/${groupId}/photos/upload-url`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function createGroupPhoto(
+  groupId: string,
+  input: {
+    storageKey: string;
+    width?: number;
+    height?: number;
+    caption?: string;
+  },
+): Promise<GroupPhoto | null> {
+  return jsonFetch<GroupPhoto>(`/api/groups/${groupId}/photos`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteGroupPhoto(
+  groupId: string,
+  photoId: string,
+): Promise<boolean> {
+  const res = await jsonFetch<{ ok: boolean }>(
+    `/api/groups/${groupId}/photos/${photoId}`,
+    { method: "DELETE" },
+  );
+  return !!res?.ok;
+}
+
+/** URL the browser should hit to render a group gallery photo. */
+export function groupPhotoUrl(photo: Pick<GroupPhoto, "storage_key">): string {
+  return `/api/storage/objects/${photo.storage_key}`;
+}
+
 /**
  * Custom event fired whenever group membership changes (member added/removed,
  * a group is deleted, ownership is transferred, an invite is accepted/declined,
