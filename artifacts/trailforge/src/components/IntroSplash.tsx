@@ -118,10 +118,15 @@ export default function IntroSplash() {
       data-testid="intro-splash"
     >
       {mode === "video" ? (
+        // Order matters: WebM is listed first so browsers that support it
+        // (Chrome / Firefox / modern Edge) pick the smaller VP9 file. Safari
+        // / older mobile browsers drop through to the H.264 MP4 fallback.
+        // We deliberately do NOT set a `src` attribute on the <video> tag —
+        // doing so would short-circuit <source> negotiation and force MP4
+        // for everyone, defeating the WebM size win.
         <video
           ref={videoRef}
           className="tf-intro__media"
-          src={`${basePath}/intro.mp4`}
           poster={`${basePath}/intro-poster.jpg`}
           muted
           playsInline

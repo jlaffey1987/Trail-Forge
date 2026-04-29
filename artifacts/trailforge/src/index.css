@@ -171,11 +171,37 @@
   --tf-accent-deep: #d4870c;
 }
 
-.tf-card {
-  background: hsl(22, 15%, 11%);
-  border: 1px solid hsl(30, 12%, 20%);
+/* Card surface refresh — applied to every existing card across the app
+   without forking inline colors. Tailwind v4 keeps the literal arbitrary
+   class string in the rendered `class` attribute, so an attribute substring
+   match on the canonical card background reliably hits PlannerTab,
+   DiscoverTab, MapTab, MyTrailsTab, AITab and the trail-detail / contribute
+   surfaces — and only those — without us having to touch every callsite.
+   Effect: subtle inner highlight, soft outer shadow, slightly rounder
+   corners. Identity colors are preserved exactly. */
+[class*="bg-[hsl(22,15%,11%)]"][class*="rounded-xl"],
+[class*="bg-[hsl(22,15%,11%)]"][class*="rounded-2xl"] {
   border-radius: 14px;
   box-shadow: var(--tf-surface-highlight), var(--tf-surface-shadow);
+}
+
+[class*="bg-[hsl(22,15%,11%)]"][class*="rounded-2xl"] {
+  border-radius: 18px;
+}
+
+/* Pill / chip surfaces (filter chips, status badges, address-input rounding)
+   pick up the same micro-shadow but keep their existing radius. */
+[class*="bg-[hsl(22,15%,11%)]"][class*="rounded-lg"],
+[class*="bg-[hsl(22,15%,14%)]"][class*="rounded-lg"] {
+  box-shadow: var(--tf-surface-highlight);
+}
+
+/* Friendlier focus ring on the main amber call-to-action buttons. */
+button:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsla(38, 88%, 56%, 0.45);
+  border-radius: 8px;
 }
 
 /* Header refresh — slightly richer warm gradient + subtle bottom highlight. */
