@@ -23,11 +23,12 @@ interface Props {
 type Step = "pick" | "preview" | "save";
 type PickMode = "file" | "paste";
 
-// Soft cap for file size on the picker path. iOS standalone PWAs can
-// have the WebView killed by the OS while the file picker is open, and
-// the larger the file the more likely the resumed page hits a memory
-// spike during `file.text()` + DOMParser. Riders with bigger GPX files
-// can use the paste-text fallback or split their track.
+// Soft cap for file size on the picker path. Mobile PWAs (both iOS
+// standalone and Android Chrome PWAs) can have their WebView killed by
+// the OS while the file picker / SAF intent is open — the bigger the
+// file, the more likely the resumed page hits a memory spike during
+// `file.text()` + DOMParser. Riders with bigger GPX files can use the
+// paste-text fallback or split their track.
 const SOFT_FILE_LIMIT_BYTES = 10 * 1024 * 1024;
 
 export default function UploadGpxFlow({ open, onClose, onSaved }: Props) {
@@ -60,7 +61,8 @@ export default function UploadGpxFlow({ open, onClose, onSaved }: Props) {
   // by BOTH the file picker AND the paste-text fallback. Wrapped in a
   // try/catch + a yield-to-event-loop so a heavy DOMParser call can't
   // freeze the WebView long enough to be killed by the OS watchdog
-  // (this was crashing iOS PWAs with "switches page → reconnecting").
+  // (this was crashing mobile PWAs — both iOS and Android — with
+  // "switches page → reconnecting" after the picker returned).
   const ingestGpxText = async (text: string, sourceName: string) => {
     setReading(true);
     setError(null);
