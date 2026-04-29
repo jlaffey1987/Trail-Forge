@@ -245,10 +245,20 @@ async function main(): Promise<void> {
     }
     const schema = await checkSchemaReady();
     if (!schema.ok) {
-      console.error(
-        `[schema] trails table is missing required columns: ${schema.missing.join(", ")}.\n` +
-          `Apply artifacts/trailforge/supabase/migrations/0009_act_imports.sql before re-running.`,
+      const lines: string[] = ["[schema] trails table is not ready for the ACT/TET importer:"];
+      if (schema.missingColumns.length > 0) {
+        lines.push(`  · missing columns: ${schema.missingColumns.join(", ")}`);
+      }
+      if (schema.missingIndexes.length > 0) {
+        lines.push(`  · missing unique index: ${schema.missingIndexes.join(", ")}`);
+        lines.push(
+          "    (without this index the importer is NOT idempotent — parallel re-runs would create duplicate rows)",
+        );
+      }
+      lines.push(
+        "Apply artifacts/trailforge/supabase/migrations/0009_act_imports.sql before re-running.",
       );
+      console.error(lines.join("\n"));
       process.exit(3);
     }
   }

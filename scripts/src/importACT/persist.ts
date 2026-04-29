@@ -251,26 +251,150 @@ function escapeXml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+export interface SchemaCheckResult {
+  ok: boolean;
+  missingColumns: string[];
+  missingIndexes: string[];
+}
+
 /**
- * Verify the trails table has the columns the importer writes to.
- * We probe by issuing a tiny SELECT against each new column; PostgREST
- * returns 400 with a helpful error message when the column is missing.
+ * Verify the trails table has the columns AND the unique index the
+ * importer relies on for idempotent upserts. We probe by:
+ *
+ *   1. Issuing a tiny SELECT against each new column; PostgREST returns
+ *      400 with a helpful error message when the column is missing.
+ *   2. Attempting an INSERT … ON CONFLICT (source, source_url,
+ *      segment_hash) with a sentinel row, asking PostgREST to roll the
+ *      transaction back. PostgreSQL validates the ON CONFLICT
+ *      specification at planning time, so a missing unique index
+ *      surfaces as SQLSTATE 42P10 — even when `tx=rollback` discards
+ *      the row. As a belt-and-braces measure we DELETE the sentinel
+ *      afterwards in case the backend ignores the rollback hint.
+ *
+ * The index check is critical: the importer is only idempotent because
+ * the unique index `trails_source_segment_unique` (migration 0009)
+ * exists. Without it, parallel re-runs would silently create duplicate
+ * rows. Refusing to start when the index is missing is the safer
+ * posture.
  */
-export async function checkSchemaReady(): Promise<{ ok: boolean; missing: string[] }> {
-  const required = ["source", "source_url", "source_region", "segment_hash", "verification_status", "ai_grade", "ai_grade_rationale"];
-  const missing: string[] = [];
-  for (const col of required) {
+export async function checkSchemaReady(): Promise<SchemaCheckResult> {
+  const requiredColumns = [
+    "source",
+    "source_url",
+    "source_region",
+    "segment_hash",
+    "verification_status",
+    "ai_grade",
+    "ai_grade_rationale",
+  ];
+  const missingColumns: string[] = [];
+  for (const col of requiredColumns) {
     try {
       await rest<unknown>(`/trails`, { query: { select: col, limit: "1" } });
     } catch (err) {
       const msg = (err as Error).message;
       if (/column .* does not exist|undefined column|42703|PGRST204/i.test(msg)) {
-        missing.push(col);
+        missingColumns.push(col);
       } else {
         // Re-throw unrelated errors (network, auth) so the caller stops.
         throw err;
       }
     }
   }
-  return { ok: missing.length === 0, missing };
+
+  const missingIndexes: string[] = [];
+  // Only probe the index when the columns it references exist; otherwise
+  // the failure is from the missing column, not the missing index.
+  const indexColumns = ["source", "source_url", "segment_hash"];
+  if (indexColumns.every((c) => !missingColumns.includes(c))) {
+    const indexResult = await checkUpsertIndex();
+    if (!indexResult.ok) {
+      missingIndexes.push("trails_source_segment_unique (source, source_url, segment_hash)");
+    }
+  }
+
+  return {
+    ok: missingColumns.length === 0 && missingIndexes.length === 0,
+    missingColumns,
+    missingIndexes,
+  };
+}
+
+/**
+ * Probe the unique index on `(source, source_url, segment_hash)` by
+ * attempting an upsert that PostgREST is asked to roll back.
+ *
+ * Returns `{ ok: true }` when PostgREST/PostgreSQL accept the ON CONFLICT
+ * specification (proving the unique index is present) and
+ * `{ ok: false, code: "42P10" }` when the index is missing. Any other
+ * error is re-thrown so callers don't mistake a network/auth failure
+ * for a healthy schema.
+ *
+ * Exported so tests can exercise it directly with a fake fetch.
+ */
+export async function checkUpsertIndex(): Promise<{ ok: boolean; code?: string }> {
+  const sentinelHash = `__schema_check_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const sentinelSourceUrl = "schema-check://probe";
+  const probeRow = {
+    name: "__schema_check__",
+    type: "green-lane",
+    legal_status: "byway",
+    terrain: "off-road",
+    difficulty: 5,
+    distance_km: 0,
+    bbox_min_lat: 0,
+    bbox_max_lat: 0,
+    bbox_min_lng: 0,
+    bbox_max_lng: 0,
+    gpx_data: "<gpx/>",
+    gpx_object_path: null,
+    is_public: false,
+    owner_user_id: null,
+    source: "act",
+    source_url: sentinelSourceUrl,
+    source_region: "__schema_check__",
+    segment_hash: sentinelHash,
+    verification_status: "verified",
+    ai_grade: 5,
+    ai_grade_rationale: "schema check",
+    ai_grade_model: "schema check",
+    ai_graded_at: new Date().toISOString(),
+  };
+  let probeInserted = false;
+  try {
+    await rest("/trails", {
+      method: "POST",
+      query: { on_conflict: "source,source_url,segment_hash" },
+      // tx=rollback discards the probe row when the backend honours the
+      // override; the DELETE in finally is the safety net for backends
+      // that don't.
+      prefer: "resolution=merge-duplicates,return=minimal,tx=rollback",
+      body: probeRow,
+    });
+    probeInserted = true;
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (/42P10|no unique or exclusion constraint matching the ON CONFLICT/i.test(msg)) {
+      return { ok: false, code: "42P10" };
+    }
+    throw err;
+  } finally {
+    if (probeInserted) {
+      try {
+        await rest("/trails", {
+          method: "DELETE",
+          query: {
+            source: "eq.act",
+            source_url: `eq.${sentinelSourceUrl}`,
+            segment_hash: `eq.${sentinelHash}`,
+          },
+          prefer: "return=minimal",
+        });
+      } catch {
+        // Best effort — leaving a single sentinel row behind is harmless
+        // (is_public=false, owner_user_id=null, deterministic source_url).
+      }
+    }
+  }
+  return { ok: true };
 }

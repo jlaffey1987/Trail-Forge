@@ -134,17 +134,47 @@ existing `POST /api/admin/trails/:id/regrade` endpoint.
 ### Apply the migration once
 
 The importer needs the `source_region` and `segment_hash` columns plus
-the `(source, source_url, segment_hash)` unique index added in
-migration 0009. Apply via the Supabase SQL editor (the project
-convention used for every migration):
+the `trails_source_segment_unique` unique index on
+`(source, source_url, segment_hash)` added in migration 0009. Apply via
+the Supabase SQL editor (the project convention used for every
+migration):
 
 ```sh
 # In the Supabase dashboard → SQL editor, paste:
 artifacts/trailforge/supabase/migrations/0009_act_imports.sql
 ```
 
-The importer will refuse to write trails until those columns exist; it
-prints the exact missing columns when the schema check fails.
+**The unique index is the safeguard that makes the importer
+idempotent.** Without it, a re-run (or two parallel runs) would
+silently insert duplicate trail rows because `upsertTrail` falls back
+to PostgREST's `ON CONFLICT (source, source_url, segment_hash) DO
+UPDATE` path on insert races. If a future migration drop, partial
+restore, or fresh database environment loses the index, the importer
+must refuse to start rather than corrupt the trails table.
+
+The preflight in `index.ts` therefore enforces both halves of the
+contract:
+
+1. **Required columns** — probed with a tiny `SELECT col` per column.
+   PostgREST returns `42703` when a column is missing.
+2. **Unique index** — probed with an `INSERT … ON CONFLICT (source,
+   source_url, segment_hash)` against a sentinel row, with
+   `Prefer: tx=rollback` so the row never commits. PostgreSQL
+   validates the `ON CONFLICT` specification at planning time, so a
+   missing unique index surfaces as `42P10` ("there is no unique or
+   exclusion constraint matching the ON CONFLICT specification") even
+   though no row would actually be written. A best-effort `DELETE` of
+   the sentinel runs in `finally` for backends that ignore the
+   rollback hint.
+
+The importer prints the exact missing columns and/or missing index
+when the schema check fails (exit code 3) and points at this migration
+file. Coverage for the missing-index case lives in
+`scripts/src/importACT/persist.schemaCheck.test.ts`; run with:
+
+```sh
+pnpm --filter @workspace/scripts run test
+```
 
 ### Smoke test (no DB writes, no external APIs)
 
