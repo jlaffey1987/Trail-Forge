@@ -43,7 +43,7 @@ interface QueryState {
   filters: Filter[];
   order: OrderState | null;
   limit: number | null;
-  insertRow: Row | null;
+  insertRows: Row[];
   updateRow: Row | null;
   postSelectCols: string | null;
   single: boolean;
@@ -153,26 +153,33 @@ export class MockSupa {
     }
 
     if (state.op === "insert") {
-      const row: Row = { ...(state.insertRow ?? {}) };
-      if (row.id == null) row.id = randomUUID();
-      const now = new Date().toISOString();
-      if (row.created_at == null) row.created_at = now;
-      if (row.updated_at == null) row.updated_at = now;
-      // Default note kind, amendment status, hidden_at where appropriate.
-      if (state.table === "trail_notes" && row.kind == null) row.kind = "info";
-      if (state.table === "trail_notes" && !("hidden_at" in row)) row.hidden_at = null;
-      if (state.table === "trail_photos" && !("hidden_at" in row)) row.hidden_at = null;
-      if (state.table === "trail_amendments") {
-        if (row.status == null) row.status = "pending";
-        if (!("decided_by" in row)) row.decided_by = null;
-        if (!("decided_at" in row)) row.decided_at = null;
-        if (!("decision_reason" in row)) row.decision_reason = null;
+      const inserted: Row[] = [];
+      for (const incoming of state.insertRows) {
+        const row: Row = { ...incoming };
+        if (row.id == null) row.id = randomUUID();
+        const now = new Date().toISOString();
+        if (row.created_at == null) row.created_at = now;
+        if (row.updated_at == null) row.updated_at = now;
+        // Default note kind, amendment status, hidden_at where appropriate.
+        if (state.table === "trail_notes" && row.kind == null) row.kind = "info";
+        if (state.table === "trail_notes" && !("hidden_at" in row)) row.hidden_at = null;
+        if (state.table === "trail_photos" && !("hidden_at" in row)) row.hidden_at = null;
+        if (state.table === "trail_amendments") {
+          if (row.status == null) row.status = "pending";
+          if (!("decided_by" in row)) row.decided_by = null;
+          if (!("decided_at" in row)) row.decided_at = null;
+          if (!("decision_reason" in row)) row.decision_reason = null;
+        }
+        if (state.table === "trail_shares" && row.shared_at == null) {
+          row.shared_at = now;
+        }
+        table.push(row);
+        inserted.push(row);
       }
-      table.push(row);
       if (state.postSelectCols != null) {
-        const projected = this._project(row, state.postSelectCols);
-        if (state.single) return { data: projected, error: null };
-        return { data: [projected], error: null };
+        const projected = inserted.map((r) => this._project(r, state.postSelectCols!));
+        if (state.single) return { data: projected[0] ?? null, error: null };
+        return { data: projected, error: null };
       }
       return { data: null, error: null };
     }
@@ -205,11 +212,14 @@ export class MockSupa {
     return { data: null, error: null };
   }
 
-  /** Resolve `users(...)` joins by linking on `*_user_id` columns. */
+  /**
+   * Resolve `users(...)` and `groups(...)` joins by linking on the row's
+   * matching `*_id` column. Joins not selected in `cols` are left untouched.
+   */
   private _project(row: Row, cols: string): Row {
     const out: Row = { ...row };
-    const m = /users\s*\(([^)]+)\)/.exec(cols);
-    if (m) {
+    const um = /users\s*\(([^)]+)\)/.exec(cols);
+    if (um) {
       const userId =
         (row.author_user_id as string | undefined) ??
         (row.owner_user_id as string | undefined) ??
@@ -217,9 +227,19 @@ export class MockSupa {
         null;
       const users = this.tables["users"] ?? [];
       const u = users.find((x) => x.id === userId) ?? null;
-      const fields = m[1]!.split(",").map((s) => s.trim());
+      const fields = um[1]!.split(",").map((s) => s.trim());
       out.users = u
         ? Object.fromEntries(fields.map((f) => [f, (u as Row)[f] ?? null]))
+        : null;
+    }
+    const gm = /groups\s*\(([^)]+)\)/.exec(cols);
+    if (gm) {
+      const groupId = row.group_id as string | undefined;
+      const groups = this.tables["groups"] ?? [];
+      const g = groupId ? groups.find((x) => x.id === groupId) ?? null : null;
+      const fields = gm[1]!.split(",").map((s) => s.trim());
+      out.groups = g
+        ? Object.fromEntries(fields.map((f) => [f, (g as Row)[f] ?? null]))
         : null;
     }
     return out;
@@ -237,7 +257,7 @@ class QueryBuilder implements PromiseLike<QueryResult> {
       filters: [],
       order: null,
       limit: null,
-      insertRow: null,
+      insertRows: [],
       updateRow: null,
       postSelectCols: null,
       single: false,
@@ -258,7 +278,7 @@ class QueryBuilder implements PromiseLike<QueryResult> {
 
   insert(row: Row | Row[]): this {
     this.state.op = "insert";
-    this.state.insertRow = Array.isArray(row) ? row[0] ?? {} : row;
+    this.state.insertRows = Array.isArray(row) ? [...row] : [row];
     return this;
   }
 

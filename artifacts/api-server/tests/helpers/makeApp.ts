@@ -9,6 +9,7 @@
 
 import express, { type Express } from "express";
 import trailContentRouter from "../../src/routes/trailContent";
+import groupsRouter from "../../src/routes/groups";
 
 export function makeApp(authUserId: string | null = null): Express {
   const app = express();
@@ -27,5 +28,6 @@ export function makeApp(authUserId: string | null = null): Express {
     next();
   });
   app.use("/api", trailContentRouter);
+  app.use("/api", groupsRouter);
   return app;
 }
