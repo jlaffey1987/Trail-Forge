@@ -228,6 +228,57 @@ function MainShell() {
     };
   }, [setLocation]);
 
+  // Cross-tab navigation bridge: the notifications bell (and now push
+  // notifications via the service worker) dispatches `trailforge:open-group`
+  // with a group id when the user wants to land on a particular group's
+  // detail dialog. We jump to the My Trails tab and pass the id via
+  // `?group=...` so GroupsSection auto-opens the matching dialog.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ groupId?: string }>).detail ?? {};
+      const groupId = detail.groupId;
+      if (!groupId) return;
+      const params = new URLSearchParams(window.location.search);
+      params.set("group", groupId);
+      const qs = params.toString();
+      setLocation(`${TAB_PATHS.trails}${qs ? `?${qs}` : ""}`);
+    };
+    window.addEventListener("trailforge:open-group", handler as EventListener);
+    return () => {
+      window.removeEventListener(
+        "trailforge:open-group",
+        handler as EventListener,
+      );
+    };
+  }, [setLocation]);
+
+  // ---------------------------------------------------------------------------
+  // Push-notification deep-link handler. The service worker's
+  // `notificationclick` opens or focuses our SPA at "/?trail=<id>" or
+  // "/?group=<id>". On boot (and whenever the URL changes), translate those
+  // root-level query params into the tab-specific events we already handle
+  // above, then strip the param so a refresh doesn't re-trigger the dialog.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const trailId = params.get("trail");
+    const groupId = params.get("group");
+    if (!trailId && !groupId) return;
+    if (trailId) {
+      window.dispatchEvent(
+        new CustomEvent("trailforge:open-trail", { detail: { trailId } }),
+      );
+    } else if (groupId) {
+      window.dispatchEvent(
+        new CustomEvent("trailforge:open-group", { detail: { groupId } }),
+      );
+    }
+    // Note: we deliberately don't strip the param here — the receiving tab
+    // (DiscoverTab / GroupsSection) consumes it once the dialog opens, then
+    // clears it from the URL via setLocation.
+  }, []);
+
   // Cross-tab navigation bridge: Map tab dispatches `trailforge:open-planner`
   // when a user taps "Build Route" on the on-map route panel. We switch to
   // the Planner tab and write `?build=1` so PlannerTab's mount-effect can

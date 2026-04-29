@@ -4,6 +4,10 @@ import { randomBytes, randomUUID } from "crypto";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
+import {
+  notifyMemberJoined,
+  notifyTrailShared,
+} from "../lib/pushNotifications";
 
 const objectStorage = new ObjectStorageService();
 
@@ -1158,6 +1162,11 @@ router.post(
       res.status(500).json({ error: "Failed to accept invite" });
       return;
     }
+    if (typeof data === "string") {
+      // The RPC returned the group id the user just joined. Notify the
+      // existing members so they see the new rider in their bell + on phone.
+      void notifyMemberJoined(data, userId, req.log);
+    }
     res.json({ ok: true, group_id: data });
   }),
 );
@@ -1233,6 +1242,9 @@ router.post(
       req.log.error({ err: rpcErr }, "accept invite by id rpc failed");
       res.status(500).json({ error: "Failed to accept invite" });
       return;
+    }
+    if (typeof groupId === "string") {
+      void notifyMemberJoined(groupId, userId, req.log);
     }
     res.json({ ok: true, group_id: groupId });
   }),
@@ -1810,12 +1822,20 @@ router.post(
       // claim_group_invite enforces email/target binding inside the RPC, so
       // even if a stale row slipped into the candidate set it will be rejected
       // with P0004/P0005 unless it actually matches the caller.
-      const { error: rpcErr } = await supa.rpc("claim_group_invite", {
-        p_token: token,
-        p_user_id: userId,
-        p_user_email: verifiedEmail,
-      });
-      if (!rpcErr) accepted += 1;
+      const { data: groupId, error: rpcErr } = await supa.rpc(
+        "claim_group_invite",
+        {
+          p_token: token,
+          p_user_id: userId,
+          p_user_email: verifiedEmail,
+        },
+      );
+      if (!rpcErr) {
+        accepted += 1;
+        if (typeof groupId === "string") {
+          void notifyMemberJoined(groupId, userId, req.log);
+        }
+      }
     }
     res.json({ accepted });
   }),
@@ -1994,6 +2014,9 @@ router.post(
       res.status(500).json({ error: "Failed to approve request" });
       return;
     }
+    // Push the existing members of the group — the new joiner here is
+    // jr.user_id (not the approver), matching the bell's "X joined Y" feed.
+    void notifyMemberJoined(idParse.data, jr.user_id, req.log);
     res.json({ ok: true });
   }),
 );
@@ -2195,6 +2218,8 @@ router.put(
         res.status(500).json({ error: "Failed to add shares" });
         return;
       }
+      // Fire-and-forget push fan-out for the freshly-added groups.
+      void notifyTrailShared(tParse.data, toAdd, userId, req.log);
     }
     if (toRemove.length > 0) {
       const { error: delErr } = await supa

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useLocation } from "wouter";
 import {
   type Group,
   groupCoverPhotoUrl,
@@ -17,6 +18,26 @@ export default function GroupsSection({ signedIn }: Props) {
   const [showCreate, setShowCreate] = useState(false);
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   const [pending, setPending] = useState(0);
+  const [location, setLocation] = useLocation();
+
+  // Deep-link consumer: when App.tsx (notification bell or push notification)
+  // navigates here with `?group=<id>`, auto-open that group's detail dialog.
+  // We strip the param immediately so a tab change + return doesn't re-open
+  // the dialog after the user closed it.
+  useEffect(() => {
+    if (!signedIn) return;
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const gid = params.get("group");
+    if (gid) {
+      setOpenGroupId(gid);
+      params.delete("group");
+      const qs = params.toString();
+      setLocation(`${location.split("?")[0]}${qs ? `?${qs}` : ""}`, {
+        replace: true,
+      });
+    }
+  }, [signedIn, location, setLocation]);
 
   const refresh = useCallback(async () => {
     if (!signedIn) {

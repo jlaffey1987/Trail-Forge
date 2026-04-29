@@ -5,6 +5,7 @@ import { CreateTrailBody, CreateTrailResponse } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import { mintGpxUploadTicket, consumeGpxUploadTicket } from "../lib/uploadTickets";
+import { notifyTrailShared } from "../lib/pushNotifications";
 
 const objectStorage = new ObjectStorageService();
 
@@ -343,11 +344,12 @@ router.post("/trails", async (req: Request, res: Response) => {
     // we just created so the user never ends up with a private trail they
     // thought they shared with a group.
     const newTrailId = (row as { id?: string } | null)?.id ?? null;
+    const ownerUserId = auth.userId;
     if (groupIds.length > 0 && newTrailId) {
       const { error: shareErr } = await insertTrailShares(
         newTrailId,
         groupIds,
-        auth.userId,
+        ownerUserId,
       );
       if (shareErr) {
         req.log.error(
@@ -373,6 +375,10 @@ router.post("/trails", async (req: Request, res: Response) => {
         });
         return;
       }
+      // Best-effort push fan-out — kicked off after the response is queued
+      // so it never blocks the request, never throws into the response, and
+      // never poisons a successful create even if VAPID isn't configured.
+      void notifyTrailShared(newTrailId, groupIds, ownerUserId, req.log);
     }
 
     res.json(CreateTrailResponse.parse(row));
@@ -522,6 +528,9 @@ router.patch(
             res.status(500).json({ error: "Failed to update trail shares" });
             return;
           }
+          // Fire-and-forget push fan-out for the newly-added groups only.
+          // Removed groups don't need a notification (and would be confusing).
+          void notifyTrailShared(trailId, toAdd, userId, req.log);
         }
         if (toRemove.length > 0) {
           const { error: delErr } = await supa

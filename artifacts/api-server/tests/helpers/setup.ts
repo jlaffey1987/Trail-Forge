@@ -44,6 +44,25 @@ vi.mock("../../src/lib/supabaseAdmin", () => ({
   getSupabaseAdmin: () => mockSupa,
 }));
 
+// `web-push` is a heavy native-ish module (gcm, jws, http2). We don't need
+// the real thing in unit tests — we just need to make sure code that
+// `import`s from it loads, and that `sendNotification` is observable so
+// future fan-out tests can assert on it.
+vi.mock("web-push", () => {
+  const sendNotification = vi.fn(async () => ({ statusCode: 201 }));
+  const setVapidDetails = vi.fn();
+  const generateVAPIDKeys = vi.fn(() => ({
+    publicKey: "test-public",
+    privateKey: "test-private",
+  }));
+  return {
+    default: { sendNotification, setVapidDetails, generateVAPIDKeys },
+    sendNotification,
+    setVapidDetails,
+    generateVAPIDKeys,
+  };
+});
+
 vi.mock("../../src/lib/objectStorage", () => {
   class ObjectNotFoundError extends Error {
     constructor() {

@@ -34,7 +34,7 @@ type Filter =
   | { type: "is"; col: string; val: unknown }
   | { type: "in"; col: string; vals: unknown[] };
 
-type Op = "select" | "insert" | "update" | "delete" | null;
+type Op = "select" | "insert" | "update" | "delete" | "upsert" | null;
 
 interface QueryState {
   table: string;
@@ -48,6 +48,7 @@ interface QueryState {
   postSelectCols: string | null;
   single: boolean;
   maybeSingle: boolean;
+  upsertOnConflict: string | null;
 }
 
 interface PgError {
@@ -150,6 +151,39 @@ export class MockSupa {
         return { data: projected[0] ?? null, error: null };
       }
       return { data: projected, error: null };
+    }
+
+    if (state.op === "upsert") {
+      // Lightweight upsert — match on `upsertOnConflict` column (defaults to
+      // "id"), update the existing row in place if found, otherwise insert.
+      const conflictCol = state.upsertOnConflict ?? "id";
+      const upserted: Row[] = [];
+      for (const incoming of state.insertRows) {
+        const row: Row = { ...incoming };
+        const conflictVal = row[conflictCol];
+        const existing =
+          conflictVal != null
+            ? table.find((r) => r[conflictCol] === conflictVal)
+            : undefined;
+        if (existing) {
+          Object.assign(existing, row);
+          upserted.push(existing);
+        } else {
+          if (row.id == null) row.id = randomUUID();
+          const now = new Date().toISOString();
+          if (row.created_at == null) row.created_at = now;
+          table.push(row);
+          upserted.push(row);
+        }
+      }
+      if (state.postSelectCols != null) {
+        const projected = upserted.map((r) =>
+          this._project(r, state.postSelectCols!),
+        );
+        if (state.single) return { data: projected[0] ?? null, error: null };
+        return { data: projected, error: null };
+      }
+      return { data: null, error: null };
     }
 
     if (state.op === "insert") {
@@ -262,6 +296,7 @@ class QueryBuilder implements PromiseLike<QueryResult> {
       postSelectCols: null,
       single: false,
       maybeSingle: false,
+      upsertOnConflict: null,
     };
   }
 
@@ -279,6 +314,13 @@ class QueryBuilder implements PromiseLike<QueryResult> {
   insert(row: Row | Row[]): this {
     this.state.op = "insert";
     this.state.insertRows = Array.isArray(row) ? [...row] : [row];
+    return this;
+  }
+
+  upsert(row: Row | Row[], opts?: { onConflict?: string }): this {
+    this.state.op = "upsert";
+    this.state.insertRows = Array.isArray(row) ? [...row] : [row];
+    this.state.upsertOnConflict = opts?.onConflict ?? null;
     return this;
   }
 

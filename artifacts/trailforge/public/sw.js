@@ -61,6 +61,76 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+// ---------------------------------------------------------------------------
+// Web Push receiver. The server (see api-server/src/lib/pushNotifications.ts)
+// sends a JSON payload of the form
+//   { title, body, url, tag? }
+// where `url` is the in-app deep-link to focus / open when the user taps the
+// notification (e.g. "/?trail=<uuid>" or "/?group=<uuid>"). The payload is
+// optional — Web Push allows empty pushes — so we fall back to a generic
+// "TrailForge activity" message rather than crashing the SW.
+// ---------------------------------------------------------------------------
+
+self.addEventListener("push", (event) => {
+  let payload = { title: "TrailForge activity", body: "Open the app to see what's new", url: "/" };
+  if (event.data) {
+    try {
+      const parsed = event.data.json();
+      payload = {
+        title: typeof parsed.title === "string" ? parsed.title : payload.title,
+        body: typeof parsed.body === "string" ? parsed.body : payload.body,
+        url: typeof parsed.url === "string" ? parsed.url : payload.url,
+        tag: typeof parsed.tag === "string" ? parsed.tag : undefined,
+      };
+    } catch {
+      try {
+        payload = { ...payload, body: event.data.text() };
+      } catch {
+        /* keep defaults */
+      }
+    }
+  }
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      icon: `${SCOPE_PATH}icon.svg`,
+      badge: `${SCOPE_PATH}icon.svg`,
+      // Tag groups duplicate notifications (same trail share, etc.) so a
+      // burst of activity doesn't blast the user with five identical pushes.
+      tag: payload.tag,
+      data: { url: payload.url },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetPath = (event.notification.data && event.notification.data.url) || "/";
+  // Resolve relative to our scope so deep-links land on the correct base
+  // path even when the app is mounted under "/some/sub/path/".
+  const target = new URL(
+    targetPath.startsWith("/") ? targetPath.slice(1) : targetPath,
+    self.registration.scope,
+  ).href;
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => {
+        for (const client of clients) {
+          // Reuse an existing tab if it's already on our origin — far less
+          // jarring than spawning a new one and helps preserve scroll/state.
+          if (client.url.startsWith(self.location.origin) && "focus" in client) {
+            return client
+              .navigate(target)
+              .catch(() => undefined)
+              .then(() => client.focus());
+          }
+        }
+        return self.clients.openWindow(target);
+      }),
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
 

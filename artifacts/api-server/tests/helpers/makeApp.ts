@@ -10,6 +10,7 @@
 import express, { type Express } from "express";
 import trailContentRouter from "../../src/routes/trailContent";
 import groupsRouter from "../../src/routes/groups";
+import pushRouter from "../../src/routes/push";
 
 export function makeApp(authUserId: string | null = null): Express {
   const app = express();
@@ -29,5 +30,6 @@ export function makeApp(authUserId: string | null = null): Express {
   });
   app.use("/api", trailContentRouter);
   app.use("/api", groupsRouter);
+  app.use("/api", pushRouter);
   return app;
 }
