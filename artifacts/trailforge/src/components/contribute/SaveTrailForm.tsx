@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Waypoint } from "@/lib/gpx";
 import { distanceKmFromWaypoints, bboxFromWaypoints } from "@/lib/gpx";
-import { uploadGpxToStorage, type CreateTrailInput, type TrailPrivacy } from "@/lib/supabase";
+import type { CreateTrailInput, TrailPrivacy } from "@/lib/supabase";
 import { type Group, listMyGroups } from "@/lib/groups";
 
 const TRAIL_TYPES: { value: string; label: string }[] = [
@@ -147,6 +147,15 @@ export default function SaveTrailForm({
   // unhandled rejection inside the click handler can tear down the
   // WebView (the rider sees the app "restart"), so we MUST catch
   // everything and convert it into a visible error banner instead.
+  // Single-shot save:
+  //
+  // We deliberately DO NOT upload to object storage here. The previous
+  // flow (signed URL → PUT to GCS → POST /trails) added two extra network
+  // round-trips and a CORS preflight that was hanging on mobile networks
+  // and crashing the WebView with a blank screen. Sending the GPX inline
+  // with the create request is a single same-origin POST: simpler, faster,
+  // and survives spotty connections far better. The server still accepts
+  // gpx_object_path as optional if/when we re-introduce storage uploads.
   const handleSubmit = async () => {
     try {
       setError(null);
@@ -172,26 +181,8 @@ export default function SaveTrailForm({
       const bbox = bboxFromWaypoints(waypoints);
 
       setSubmitting(true);
-      setSubmitStep("Uploading GPX…");
-      console.log("[save-trail] starting upload, bytes=", gpxData.length);
-
-      // Upload the canonical GPX XML to object storage so it lives outside
-      // the database (as required by the storage architecture). The server
-      // keeps a reference via `gpx_object_path` and finalizes the ACL on
-      // save. uploadGpxToStorage now returns a tagged result so we can
-      // surface the precise reason (auth, signing, CORS, network) instead
-      // of a generic message that riders couldn't act on. It also enforces
-      // its own 20s/45s timeouts so a network hang surfaces here as an
-      // error message instead of an infinite "Saving…".
-      const upload = await uploadGpxToStorage(gpxData);
-      if (!upload.ok) {
-        console.warn("[save-trail] upload failed:", upload.error);
-        setSubmitting(false);
-        setSubmitStep("");
-        setError(upload.error);
-        return;
-      }
-      console.log("[save-trail] upload ok, objectPath=", upload.ticket.objectPath);
+      setSubmitStep("Saving trail…");
+      console.log("[save-trail] sending trail, bytes=", gpxData.length);
 
       const input: CreateTrailInput = {
         name: trimmedName,
@@ -201,7 +192,6 @@ export default function SaveTrailForm({
         terrain,
         distance_km: parseFloat(distNum.toFixed(2)),
         gpx_data: gpxData,
-        gpx_object_path: upload.ticket.objectPath,
         description: description.trim() || null,
         privacy,
         bbox_min_lat: bbox?.minLat ?? null,
@@ -210,7 +200,6 @@ export default function SaveTrailForm({
         bbox_max_lng: bbox?.maxLng ?? null,
       };
 
-      setSubmitStep("Creating trail…");
       const result = await onSave({
         input,
         selectedGroupIds: privacy === "group" ? selectedGroupIds : [],

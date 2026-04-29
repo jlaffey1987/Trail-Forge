@@ -36,8 +36,10 @@ app.use(
 app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
 
 app.use(cors({ credentials: true, origin: true }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Trails carry inline GPX XML (up to ~10 MB user upload, sometimes more after
+// JSON-encoding). Default Express limit is 100 KB which would 413 every save.
+app.use(express.json({ limit: "16mb" }));
+app.use(express.urlencoded({ extended: true, limit: "16mb" }));
 
 app.use(clerkMiddleware());
 

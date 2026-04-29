@@ -704,7 +704,10 @@ export async function addTrail(
   input: CreateTrailInput,
 ): Promise<Trail | null> {
   try {
-    const res = await fetch("/api/trails", {
+    // 60s ceiling — large GPX over a slow cellular link can legitimately
+    // take many seconds, but we never want the rider to stare at "Saving…"
+    // forever if the connection drops mid-POST.
+    const res = await fetchWithTimeout("/api/trails", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -730,19 +733,27 @@ export async function addTrail(
           ? { group_ids: input.group_ids }
           : {}),
       }),
-    });
+    }, 60_000, "saving trail");
     if (!res.ok) {
       if (res.status === 401) {
         console.warn("Sign in required to record a trail.");
         return null;
       }
-      console.error("Add trail error:", res.status, await res.text());
-      return null;
+      const body = await res.text();
+      console.error("Add trail error:", res.status, body);
+      // Re-throw so the caller (SaveTrailForm) can surface a real message
+      // instead of a silent "Could not save trail" — riders need to know
+      // if they just hit a 413 (file too large) versus a 500.
+      throw new Error(
+        res.status === 413
+          ? "GPX file is too large for upload."
+          : `Server returned ${res.status}`,
+      );
     }
     return (await res.json()) as Trail;
   } catch (err) {
     console.error("Add trail error:", err);
-    return null;
+    throw err;
   }
 }
 
@@ -839,22 +850,32 @@ export async function replaceOwnedTrailGpx(
   input: ReplaceGpxInput,
 ): Promise<Trail | null> {
   try {
-    const res = await fetch(`/api/trails/${trailId}/gpx`, {
-      method: "PUT",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
+    const res = await fetchWithTimeout(
+      `/api/trails/${trailId}/gpx`,
+      {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+      60_000,
+      "replacing GPX",
+    );
     if (!res.ok) {
-      console.error("replaceOwnedTrailGpx error:", res.status, await res.text());
-      return null;
+      const body = await res.text();
+      console.error("replaceOwnedTrailGpx error:", res.status, body);
+      throw new Error(
+        res.status === 413
+          ? "GPX file is too large for upload."
+          : `Server returned ${res.status}`,
+      );
     }
     // The GPX has just been replaced — any cached copy is now stale.
     invalidateTrailGpxCache(trailId);
     return (await res.json()) as Trail;
   } catch (err) {
     console.error("replaceOwnedTrailGpx error:", err);
-    return null;
+    throw err;
   }
 }
 

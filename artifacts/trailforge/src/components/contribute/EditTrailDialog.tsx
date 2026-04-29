@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import {
   updateOwnedTrail,
   replaceOwnedTrailGpx,
-  uploadGpxToStorage,
   type Trail,
   type TrailPrivacy,
   type UpdateTrailInput,
@@ -126,47 +125,56 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
   };
 
   const handleReplaceGpx = async (file: File) => {
-    setError(null);
-    if (!/\.gpx$/i.test(file.name)) {
-      setError("Please choose a .gpx file");
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      setError("GPX file is too large (max 10 MB)");
-      return;
-    }
-    const text = await file.text();
-    const v = validateGpxString(text);
-    if (!v.ok) {
-      setError(v.error ?? "Could not parse GPX");
-      return;
-    }
-    setReplacing(true);
-    // Upload the new GPX file to object storage first; pass the resulting
-    // objectPath to the replace endpoint so the server can finalize the ACL,
-    // persist the new artifact reference, and remove the old object.
-    const upload = await uploadGpxToStorage(text);
-    if (!upload.ok) {
+    // Wrap the ENTIRE flow (including file.text() and validation) in one
+    // try/catch so a rejected promise on Android — e.g. an OOM during
+    // file.text() on a large GPX — can never bubble out as an unhandled
+    // rejection and tear down the WebView with a blank screen.
+    try {
+      setError(null);
+      if (!/\.gpx$/i.test(file.name)) {
+        setError("Please choose a .gpx file");
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError("GPX file is too large (max 10 MB)");
+        return;
+      }
+      const text = await file.text();
+      const v = validateGpxString(text);
+      if (!v.ok) {
+        setError(v.error ?? "Could not parse GPX");
+        return;
+      }
+      setReplacing(true);
+      // Send the new GPX inline with the replace request — single same-origin
+      // PUT. We used to do a separate signed-URL upload to object storage
+      // first, but that added two network hops + a CORS preflight that hung
+      // on mobile networks. The server still treats gpx_object_path as
+      // optional, so we just omit it.
+      const updated = await replaceOwnedTrailGpx(trail.id, {
+        gpx_data: text,
+        distance_km: parseFloat(v.distanceKm.toFixed(2)),
+        bbox_min_lat: v.bbox?.minLat ?? null,
+        bbox_max_lat: v.bbox?.maxLat ?? null,
+        bbox_min_lng: v.bbox?.minLng ?? null,
+        bbox_max_lng: v.bbox?.maxLng ?? null,
+      });
       setReplacing(false);
-      setError(upload.error);
-      return;
+      if (!updated) {
+        setError("Could not replace GPX");
+        return;
+      }
+      setDistanceKm(v.distanceKm.toFixed(2));
+      onChanged(updated);
+    } catch (err) {
+      console.error("[edit-trail] replace gpx threw:", err);
+      setReplacing(false);
+      setError(
+        err instanceof Error && err.message
+          ? `Replace failed: ${err.message}`
+          : "Replace failed. Please try again.",
+      );
     }
-    const updated = await replaceOwnedTrailGpx(trail.id, {
-      gpx_data: text,
-      gpx_object_path: upload.ticket.objectPath,
-      distance_km: parseFloat(v.distanceKm.toFixed(2)),
-      bbox_min_lat: v.bbox?.minLat ?? null,
-      bbox_max_lat: v.bbox?.maxLat ?? null,
-      bbox_min_lng: v.bbox?.minLng ?? null,
-      bbox_max_lng: v.bbox?.maxLng ?? null,
-    });
-    setReplacing(false);
-    if (!updated) {
-      setError("Could not replace GPX");
-      return;
-    }
-    setDistanceKm(v.distanceKm.toFixed(2));
-    onChanged(updated);
   };
 
   return (
