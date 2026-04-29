@@ -521,26 +521,36 @@ export default function DiscoverTab() {
         </div>
       )}
 
-      {selectedTrail && (
-        <TrailDetailSheet
-          trail={selectedTrail}
-          onClose={() => setSelectedTrail(null)}
-          onCountsChanged={(trailId, counts) =>
-            setActivityCounts((prev) => {
-              const cur = prev[trailId];
-              if (
-                cur &&
-                cur.notes === counts.notes &&
-                cur.photos === counts.photos &&
-                cur.pending === counts.pending
-              ) {
-                return prev;
-              }
-              return { ...prev, [trailId]: counts };
-            })
-          }
-        />
-      )}
+      {selectedTrail && (() => {
+        // Compute prev/next from the discover feed so the rider can
+        // jump between trails without backing out to the list.
+        const idx = trails.findIndex((t) => t.id === selectedTrail.id);
+        const prevTrail = idx > 0 ? trails[idx - 1] : null;
+        const nextTrail = idx >= 0 && idx < trails.length - 1 ? trails[idx + 1] : null;
+        return (
+          <TrailDetailSheet
+            trail={selectedTrail}
+            onClose={() => setSelectedTrail(null)}
+            prevTrail={prevTrail}
+            nextTrail={nextTrail}
+            onNavigate={setSelectedTrail}
+            onCountsChanged={(trailId, counts) =>
+              setActivityCounts((prev) => {
+                const cur = prev[trailId];
+                if (
+                  cur &&
+                  cur.notes === counts.notes &&
+                  cur.photos === counts.photos &&
+                  cur.pending === counts.pending
+                ) {
+                  return prev;
+                }
+                return { ...prev, [trailId]: counts };
+              })
+            }
+          />
+        );
+      })()}
     </div>
   );
 }

@@ -34,6 +34,14 @@ interface Props {
   // Lets the parent (e.g. a trail card) reflect the latest activity counts
   // for this trail without refetching the whole feed.
   onCountsChanged?: (trailId: string, counts: TrailActivityCounts) => void;
+  // Prev/next neighbours in the surrounding context (search results, route
+  // order, cluster list, etc.) so the rider can jump trail-to-trail without
+  // closing the sheet. Either or both may be null at the start/end of the
+  // list. Arrows are hidden entirely when no neighbour is available on
+  // either side (i.e. context of one).
+  prevTrail?: Trail | null;
+  nextTrail?: Trail | null;
+  onNavigate?: (trail: Trail) => void;
 }
 
 export default function TrailDetailSheet({
@@ -41,6 +49,9 @@ export default function TrailDetailSheet({
   onClose,
   onAddedToPlanner,
   onCountsChanged,
+  prevTrail,
+  nextTrail,
+  onNavigate,
 }: Props) {
   // Hold the latest callback in a ref so refreshCounts doesn't change
   // identity each render — otherwise an inline parent callback would
@@ -58,6 +69,14 @@ export default function TrailDetailSheet({
   const [counts, setCounts] = useState<TrailActivityCounts>({ notes: 0, photos: 0, pending: 0 });
   const [perms, setPerms] = useState<TrailPermissions>({ isOwner: false, isModerator: false, canModerate: false });
   const [isSystemAdmin, setIsSystemAdmin] = useState(false);
+
+  // Keep the in-route flag and per-trail save status in sync when the rider
+  // jumps to a neighbouring trail via the prev/next arrows. (The lazy
+  // initialisers above only run on mount.)
+  useEffect(() => {
+    setInPlannerRoute(isInRoute(trail.id));
+    setSaveStatus("idle");
+  }, [trail.id]);
 
   useEffect(() => {
     return subscribeRouteTrails(() => setInPlannerRoute(isInRoute(trail.id)));
@@ -167,9 +186,68 @@ export default function TrailDetailSheet({
               {diff}
             </span>
             <div className="flex-1 min-w-0">
-              <h2 className="text-base font-bold text-stone-100 leading-tight" data-testid="trail-detail-name">
-                {trail.name}
-              </h2>
+              <div className="flex items-center gap-1.5">
+                {(prevTrail !== undefined || nextTrail !== undefined) && (
+                  <button
+                    type="button"
+                    onClick={() => prevTrail && onNavigate?.(prevTrail)}
+                    disabled={!prevTrail}
+                    aria-label={
+                      prevTrail
+                        ? `Previous trail: ${prevTrail.name}`
+                        : "No previous trail"
+                    }
+                    title={prevTrail ? `Previous: ${prevTrail.name}` : undefined}
+                    data-testid="trail-detail-prev"
+                    className="w-6 h-6 rounded-full flex items-center justify-center text-stone-400 hover:text-amber-400 hover:bg-stone-800/60 disabled:opacity-25 disabled:cursor-not-allowed transition-colors shrink-0"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="15 18 9 12 15 6" />
+                    </svg>
+                  </button>
+                )}
+                <h2
+                  className="flex-1 min-w-0 text-base font-bold text-stone-100 leading-tight truncate"
+                  data-testid="trail-detail-name"
+                >
+                  {trail.name}
+                </h2>
+                {(prevTrail !== undefined || nextTrail !== undefined) && (
+                  <button
+                    type="button"
+                    onClick={() => nextTrail && onNavigate?.(nextTrail)}
+                    disabled={!nextTrail}
+                    aria-label={
+                      nextTrail
+                        ? `Next trail: ${nextTrail.name}`
+                        : "No next trail"
+                    }
+                    title={nextTrail ? `Next: ${nextTrail.name}` : undefined}
+                    data-testid="trail-detail-next"
+                    className="w-6 h-6 rounded-full flex items-center justify-center text-stone-400 hover:text-amber-400 hover:bg-stone-800/60 disabled:opacity-25 disabled:cursor-not-allowed transition-colors shrink-0"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
+                )}
+              </div>
               <p className="text-[11px] text-stone-400 mt-0.5">
                 <span style={{ color: diffColor }}>{diffLabel}</span>
                 {trail.legal_status ? <> · {trail.legal_status}</> : null}
@@ -251,6 +329,10 @@ export default function TrailDetailSheet({
         <div className="flex-1 overflow-y-auto">
           {activeTab === "overview" ? (
             <OverviewPanel
+              // Re-mount the panel on trail switch so internal state
+              // (regrade result/status) doesn't bleed across trails when
+              // the rider navigates with the prev/next arrows.
+              key={trail.id}
               trail={trail}
               diff={diff}
               diffColor={diffColor}

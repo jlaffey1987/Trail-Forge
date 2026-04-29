@@ -99,6 +99,11 @@ export default function MapTab() {
   const [showFilters, setShowFilters] = useState(false);
   const [showLegend, setShowLegend] = useState(true);
   const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
+  // The list the selected trail was opened from. We capture this at click
+  // time so the prev/next arrows in TrailDetailSheet stay scoped to the
+  // surface the rider came from (cluster list, route panel, or the visible
+  // map). Falls back to the visible-trails set as a sensible default.
+  const [selectedTrailContext, setSelectedTrailContext] = useState<Trail[]>([]);
   const [activeCluster, setActiveCluster] = useState<TrailCluster | null>(null);
   const [currentZoom, setCurrentZoom] = useState(7);
   const [, setCurrentBbox] = useState<MapBbox | null>(null);
@@ -419,7 +424,13 @@ export default function MapTab() {
       simplifyForZoom: currentZoom,
       pane: "trailsPane",
       interactive: isExplore,
-      onTrailClick: isExplore ? (trail) => setSelectedTrail(trail) : undefined,
+      onTrailClick: isExplore
+        ? (trail) => {
+            // Direct map-popup tap — context is the visible trail set.
+            setSelectedTrailContext(trailsForRender);
+            setSelectedTrail(trail);
+          }
+        : undefined,
       // Highlight trails that are visible only because the viewer belongs
       // to one of the listed groups. Non-shared (public) trails render as
       // before — see lib/trailLayer.ts.
@@ -841,6 +852,12 @@ ${trkpts}
           onRemove={(id) => removeRouteTrail(id)}
           onClear={() => setRouteTrails([])}
           onBuildRoute={handleBuildRoute}
+          onSelectTrail={(trail) => {
+            // Route panel context — prev/next walks the route order so the
+            // rider can read each trail in the order they planned them.
+            setSelectedTrailContext(routeTrails);
+            setSelectedTrail(trail);
+          }}
         />
       )}
 
@@ -971,12 +988,25 @@ ${trkpts}
       />
 
       {/* Trail detail sheet */}
-      {selectedTrail && (
-        <TrailDetailSheet
-          trail={selectedTrail}
-          onClose={() => setSelectedTrail(null)}
-        />
-      )}
+      {selectedTrail && (() => {
+        // Resolve prev/next from whichever surface this trail was opened
+        // from (cluster list, route panel, or visible map). The context
+        // is captured at click time so it stays stable as the rider
+        // arrows through neighbours.
+        const ctx = selectedTrailContext;
+        const idx = ctx.findIndex((t) => t.id === selectedTrail.id);
+        const prevTrail = idx > 0 ? ctx[idx - 1] : null;
+        const nextTrail = idx >= 0 && idx < ctx.length - 1 ? ctx[idx + 1] : null;
+        return (
+          <TrailDetailSheet
+            trail={selectedTrail}
+            onClose={() => setSelectedTrail(null)}
+            prevTrail={prevTrail}
+            nextTrail={nextTrail}
+            onNavigate={setSelectedTrail}
+          />
+        );
+      })()}
 
       {/* Cluster trail list sheet — only for multi-trail clusters. Lets the
           user jump straight to a member trail's detail sheet, or fall back
@@ -985,6 +1015,8 @@ ${trkpts}
         <ClusterTrailListSheet
           trails={clusterTrailsForSheet}
           onSelectTrail={(trail) => {
+            // Cluster context — prev/next walks the cluster member list.
+            setSelectedTrailContext(clusterTrailsForSheet);
             setActiveCluster(null);
             setSelectedTrail(trail);
           }}

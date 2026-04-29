@@ -537,26 +537,41 @@ export default function MyTrailsTab() {
         </div>
       )}
 
-      {selectedTrail && (
-        <TrailDetailSheet
-          trail={selectedTrail}
-          onClose={() => setSelectedTrail(null)}
-          onCountsChanged={(trailId, counts) =>
-            setActivityCounts((prev) => {
-              const cur = prev[trailId];
-              if (
-                cur &&
-                cur.notes === counts.notes &&
-                cur.photos === counts.photos &&
-                cur.pending === counts.pending
-              ) {
-                return prev;
-              }
-              return { ...prev, [trailId]: counts };
-            })
-          }
-        />
-      )}
+      {selectedTrail && (() => {
+        // The same trail may live in either the "owned" or "saved" list.
+        // Walk the list it belongs to so prev/next jumps stay within the
+        // section the rider was browsing. Falls back to no neighbours if
+        // the trail isn't found in either (e.g. just deleted).
+        const ownedIdx = ownedTrails.findIndex((t) => t.id === selectedTrail.id);
+        const savedIdx = savedTrails.findIndex((t) => t.id === selectedTrail.id);
+        const list = ownedIdx >= 0 ? ownedTrails : savedIdx >= 0 ? savedTrails : [];
+        const idx = ownedIdx >= 0 ? ownedIdx : savedIdx;
+        const prevTrail = idx > 0 ? list[idx - 1] : null;
+        const nextTrail = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
+        return (
+          <TrailDetailSheet
+            trail={selectedTrail}
+            onClose={() => setSelectedTrail(null)}
+            prevTrail={prevTrail}
+            nextTrail={nextTrail}
+            onNavigate={setSelectedTrail}
+            onCountsChanged={(trailId, counts) =>
+              setActivityCounts((prev) => {
+                const cur = prev[trailId];
+                if (
+                  cur &&
+                  cur.notes === counts.notes &&
+                  cur.photos === counts.photos &&
+                  cur.pending === counts.pending
+                ) {
+                  return prev;
+                }
+                return { ...prev, [trailId]: counts };
+              })
+            }
+          />
+        );
+      })()}
     </div>
   );
 }

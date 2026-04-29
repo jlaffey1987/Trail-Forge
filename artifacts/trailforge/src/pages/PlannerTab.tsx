@@ -5,6 +5,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import RouteBuilder from "@/components/RouteBuilder";
 import NavigationView from "@/components/NavigationView";
 import PlannerMap from "@/components/PlannerMap";
+import TrailDetailSheet from "@/components/TrailDetailSheet";
 import {
   geocode,
   assembleMultiModalRoute,
@@ -47,6 +48,11 @@ export default function PlannerTab() {
   // Map tab also appear here.
   const [routeTrails, setRouteTrails] = useRouteTrails();
   const [showRouteBuilder, setShowRouteBuilder] = useState(false);
+
+  // Currently-open trail detail sheet (opened by tapping a search-result
+  // card's name). Tracked separately from the result list so prev/next
+  // arrows in the sheet can walk the search results in order.
+  const [detailTrail, setDetailTrail] = useState<Trail | null>(null);
 
   // Full trip navigation state
   const [planningTrip, setPlanningTrip] = useState(false);
@@ -604,7 +610,14 @@ export default function PlannerTab() {
                   >
                     <div className="p-3">
                       <div className="flex items-start justify-between mb-2">
-                        <div className="flex-1">
+                        <button
+                          type="button"
+                          onClick={() => setDetailTrail(trail)}
+                          className="flex-1 text-left hover:text-amber-300 transition-colors"
+                          aria-label={`View details for ${trail.name}`}
+                          data-testid={`planner-card-open-${trail.id}`}
+                          title="View trail details"
+                        >
                           <div className="flex items-center gap-1.5 mb-0.5">
                             {inRoute && (
                               <span className="w-5 h-5 rounded-full bg-amber-500 text-stone-900 flex items-center justify-center text-[10px] font-black shrink-0">
@@ -614,7 +627,7 @@ export default function PlannerTab() {
                             <h3 className="text-sm font-bold text-stone-100 leading-tight">{trail.name}</h3>
                           </div>
                           <p className="text-xs text-stone-500">{trail.terrain || "Off-road"}</p>
-                        </div>
+                        </button>
                         <button
                           onClick={() => !isSaved && handleSave(trail)}
                           disabled={isSaved || status === "saving"}
@@ -824,6 +837,25 @@ export default function PlannerTab() {
           onClose={() => setShowNav(false)}
         />
       )}
+
+      {/* Trail detail sheet — opened by tapping a result card's name. The
+          prev/next arrows on the sheet's header walk the search results in
+          order so the rider can compare trails without bouncing back to
+          the list. */}
+      {detailTrail && (() => {
+        const idx = results.findIndex((t) => t.id === detailTrail.id);
+        const prevTrail = idx > 0 ? results[idx - 1] : null;
+        const nextTrail = idx >= 0 && idx < results.length - 1 ? results[idx + 1] : null;
+        return (
+          <TrailDetailSheet
+            trail={detailTrail}
+            onClose={() => setDetailTrail(null)}
+            prevTrail={prevTrail}
+            nextTrail={nextTrail}
+            onNavigate={setDetailTrail}
+          />
+        );
+      })()}
 
       {/* Sign-in required prompt for Save action */}
       {signInPromptForTrail && (

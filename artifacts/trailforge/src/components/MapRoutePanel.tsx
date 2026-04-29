@@ -8,6 +8,11 @@ interface Props {
   onRemove: (id: string) => void;
   onClear: () => void;
   onBuildRoute: () => void;
+  // Tapping a row opens the parent's TrailDetailSheet so the rider can read
+  // the route's trails in order (and use the sheet's prev/next arrows to
+  // jump between them). Optional — when not provided, rows are still
+  // reorderable/removable but not tappable.
+  onSelectTrail?: (trail: Trail) => void;
 }
 
 /** Safe numeric coercion — Supabase returns `numeric` columns as strings. */
@@ -53,6 +58,7 @@ function MapRoutePanelInner({
   onRemove,
   onClear,
   onBuildRoute,
+  onSelectTrail,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   if (trails.length === 0) return null;
@@ -157,17 +163,37 @@ function MapRoutePanelInner({
                     >
                       {idx + 1}
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[11px] font-bold text-stone-100 truncate">
-                        {trail.name}
+                    {onSelectTrail ? (
+                      <button
+                        type="button"
+                        onClick={() => onSelectTrail(trail)}
+                        className="flex-1 min-w-0 text-left hover:text-amber-300 transition-colors"
+                        aria-label={`View details for ${trail.name}`}
+                        data-testid={`map-route-panel-open-${idx}`}
+                      >
+                        <div className="text-[11px] font-bold text-stone-100 truncate">
+                          {trail.name}
+                        </div>
+                        <div className="text-[9px] text-stone-500">
+                          {trail.distance_km != null
+                            ? `${toNum(trail.distance_km).toFixed(1)} km`
+                            : "—"}
+                          {trail.legal_status ? ` · ${trail.legal_status}` : ""}
+                        </div>
+                      </button>
+                    ) : (
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] font-bold text-stone-100 truncate">
+                          {trail.name}
+                        </div>
+                        <div className="text-[9px] text-stone-500">
+                          {trail.distance_km != null
+                            ? `${toNum(trail.distance_km).toFixed(1)} km`
+                            : "—"}
+                          {trail.legal_status ? ` · ${trail.legal_status}` : ""}
+                        </div>
                       </div>
-                      <div className="text-[9px] text-stone-500">
-                        {trail.distance_km != null
-                          ? `${toNum(trail.distance_km).toFixed(1)} km`
-                          : "—"}
-                        {trail.legal_status ? ` · ${trail.legal_status}` : ""}
-                      </div>
-                    </div>
+                    )}
                     <div className="flex flex-col gap-0">
                       <button
                         type="button"
