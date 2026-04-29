@@ -21,47 +21,127 @@ interface Props {
 }
 
 type Step = "pick" | "preview" | "save";
+type PickMode = "file" | "paste";
+
+// Soft cap for file size on the picker path. iOS standalone PWAs can
+// have the WebView killed by the OS while the file picker is open, and
+// the larger the file the more likely the resumed page hits a memory
+// spike during `file.text()` + DOMParser. Riders with bigger GPX files
+// can use the paste-text fallback or split their track.
+const SOFT_FILE_LIMIT_BYTES = 10 * 1024 * 1024;
 
 export default function UploadGpxFlow({ open, onClose, onSaved }: Props) {
   const [step, setStep] = useState<Step>("pick");
+  const [pickMode, setPickMode] = useState<PickMode>("file");
   const [filename, setFilename] = useState<string>("");
   const [gpxText, setGpxText] = useState<string>("");
+  const [pasteText, setPasteText] = useState<string>("");
   const [validation, setValidation] = useState<GpxValidation | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [reading, setReading] = useState(false);
 
   // Reset state every time the modal is re-opened.
   useEffect(() => {
     if (open) {
       setStep("pick");
+      setPickMode("file");
       setFilename("");
       setGpxText("");
+      setPasteText("");
       setValidation(null);
       setError(null);
       setDragOver(false);
+      setReading(false);
     }
   }, [open]);
 
+  // Shared "given the GPX text, validate and move to preview" path used
+  // by BOTH the file picker AND the paste-text fallback. Wrapped in a
+  // try/catch + a yield-to-event-loop so a heavy DOMParser call can't
+  // freeze the WebView long enough to be killed by the OS watchdog
+  // (this was crashing iOS PWAs with "switches page → reconnecting").
+  const ingestGpxText = async (text: string, sourceName: string) => {
+    setReading(true);
+    setError(null);
+    try {
+      // Yield once so React can paint the "Reading…" state before we
+      // start the (potentially heavy) XML parse — some iOS PWAs were
+      // killed mid-parse with no chance to show progress.
+      await new Promise((r) => setTimeout(r, 0));
+      const result = validateGpxString(text);
+      if (!result.ok) {
+        setError(result.error ?? "Could not parse GPX file");
+        setReading(false);
+        return;
+      }
+      setFilename(sourceName);
+      setGpxText(text);
+      setValidation(result);
+      setStep("preview");
+      setReading(false);
+    } catch (err) {
+      console.error("ingestGpxText threw:", err);
+      setReading(false);
+      setError(
+        err instanceof Error && err.message
+          ? `Could not read GPX file: ${err.message}`
+          : "Could not read GPX file. Please try again or paste the GPX text instead.",
+      );
+    }
+  };
+
   const handleFile = async (file: File) => {
     setError(null);
-    if (!/\.gpx$/i.test(file.name)) {
-      setError("Please choose a .gpx file");
+    try {
+      if (!/\.gpx$/i.test(file.name)) {
+        setError("Please choose a .gpx file");
+        return;
+      }
+      if (file.size > SOFT_FILE_LIMIT_BYTES) {
+        setError(
+          "GPX file is too large (max 10 MB). Try splitting it, or paste the GPX text into the Paste tab.",
+        );
+        return;
+      }
+      setReading(true);
+      // Reading the whole file as a string CAN OOM the WebView on iOS
+      // standalone PWAs while the picker is still tearing down. Wrap
+      // it so a failure shows a usable message instead of a crash.
+      let text: string;
+      try {
+        text = await file.text();
+      } catch (readErr) {
+        console.error("file.text() failed:", readErr);
+        setReading(false);
+        setError(
+          "Couldn't read that file. It may be too large for your browser — try the Paste tab instead.",
+        );
+        return;
+      }
+      await ingestGpxText(text, file.name);
+    } catch (err) {
+      console.error("handleFile threw:", err);
+      setReading(false);
+      setError(
+        err instanceof Error && err.message
+          ? `Could not read file: ${err.message}`
+          : "Could not read file. Please try again or paste the GPX text instead.",
+      );
+    }
+  };
+
+  const handlePasteSubmit = async () => {
+    const trimmed = pasteText.trim();
+    if (trimmed.length < 20) {
+      setError("Paste the full contents of your .gpx file here.");
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      setError("GPX file is too large (max 10 MB)");
+    if (trimmed.length > SOFT_FILE_LIMIT_BYTES) {
+      setError("That GPX is too large (max 10 MB). Try splitting it.");
       return;
     }
-    const text = await file.text();
-    const result = validateGpxString(text);
-    if (!result.ok) {
-      setError(result.error ?? "Could not parse GPX file");
-      return;
-    }
-    setFilename(file.name);
-    setGpxText(text);
-    setValidation(result);
-    setStep("preview");
+    await ingestGpxText(trimmed, "pasted.gpx");
   };
 
   if (!open) return null;
@@ -94,16 +174,110 @@ export default function UploadGpxFlow({ open, onClose, onSaved }: Props) {
               Cancel
             </button>
           </div>
-          <div className="px-4 py-6">
-            <DropZone
-              dragOver={dragOver}
-              onDragOver={(over) => setDragOver(over)}
-              onPick={handleFile}
-              error={error}
-            />
-            <p className="text-[11px] text-stone-500 mt-3 text-center">
-              We accept .gpx files containing tracks (`&lt;trk&gt;`) or routes (`&lt;rte&gt;`).
-            </p>
+          <div className="px-4 py-4 space-y-3">
+            {/* File / Paste tabs. Paste is a reliable fallback when the
+              * mobile file picker crashes the WebView (iOS standalone
+              * PWAs are particularly prone to this). */}
+            <div
+              className="grid grid-cols-2 gap-2 bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,20%)] rounded-lg p-1"
+              data-testid="upload-gpx-mode-tabs"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setPickMode("file");
+                  setError(null);
+                }}
+                disabled={reading}
+                className={`px-3 py-2 rounded-md text-[11px] font-bold uppercase tracking-wider transition-colors ${
+                  pickMode === "file"
+                    ? "bg-amber-500/20 text-amber-300"
+                    : "text-stone-400"
+                }`}
+                data-testid="upload-gpx-mode-file"
+              >
+                Choose File
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPickMode("paste");
+                  setError(null);
+                }}
+                disabled={reading}
+                className={`px-3 py-2 rounded-md text-[11px] font-bold uppercase tracking-wider transition-colors ${
+                  pickMode === "paste"
+                    ? "bg-amber-500/20 text-amber-300"
+                    : "text-stone-400"
+                }`}
+                data-testid="upload-gpx-mode-paste"
+              >
+                Paste GPX text
+              </button>
+            </div>
+
+            {pickMode === "file" ? (
+              <>
+                <DropZone
+                  dragOver={dragOver}
+                  onDragOver={(over) => setDragOver(over)}
+                  onPick={handleFile}
+                  error={reading ? null : error}
+                  disabled={reading}
+                />
+                {reading && (
+                  <p
+                    className="text-[11px] text-amber-300 text-center"
+                    data-testid="upload-gpx-reading"
+                  >
+                    Reading GPX file…
+                  </p>
+                )}
+                <p className="text-[11px] text-stone-500 text-center">
+                  We accept .gpx files containing tracks (`&lt;trk&gt;`) or routes (`&lt;rte&gt;`).
+                  If the picker keeps crashing on your phone, switch to
+                  the Paste tab.
+                </p>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <textarea
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                  placeholder="Paste the full contents of your .gpx file here (starting with <?xml ...)"
+                  rows={8}
+                  className="w-full px-3 py-2 rounded-lg bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,22%)] text-xs text-stone-100 font-mono focus:border-amber-500 focus:outline-none resize-none"
+                  data-testid="upload-gpx-paste-input"
+                  disabled={reading}
+                />
+                {error && (
+                  <div className="bg-red-900/40 border border-red-500/40 rounded-lg px-3 py-2">
+                    <p
+                      className="text-xs text-red-300"
+                      data-testid="upload-gpx-paste-error"
+                    >
+                      {error}
+                    </p>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void handlePasteSubmit()}
+                  disabled={reading || pasteText.trim().length < 20}
+                  className="w-full py-3 rounded-xl text-sm font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                  style={{
+                    background: "linear-gradient(135deg, #d4870c, #f0a832)",
+                  }}
+                  data-testid="upload-gpx-paste-submit"
+                >
+                  {reading ? "Reading…" : "Use Pasted GPX"}
+                </button>
+                <p className="text-[11px] text-stone-500 text-center">
+                  Tip: open your .gpx file in a notes / files app, select
+                  all, copy, then paste here.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -213,9 +387,11 @@ interface DropZoneProps {
   onDragOver: (v: boolean) => void;
   onPick: (file: File) => void;
   error: string | null;
+  /** When true (e.g. file is currently being read), block re-picking. */
+  disabled?: boolean;
 }
 
-function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
+function DropZone({ dragOver, onDragOver, onPick, error, disabled }: DropZoneProps) {
   // Use `<label htmlFor>` rather than a JS-triggered `.click()` on a hidden
   // input. The native label-to-input association opens the OS file picker
   // without any JavaScript activation step, which is the only pattern that
@@ -237,10 +413,12 @@ function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
           const file = e.dataTransfer.files?.[0];
           if (file) void onPick(file);
         }}
-        className={`relative block rounded-xl border-2 border-dashed p-6 text-center cursor-pointer transition-all ${
-          dragOver
-            ? "border-amber-500 bg-amber-500/10"
-            : "border-stone-700 hover:border-amber-500/60 bg-[hsl(22,15%,12%)]"
+        className={`relative block rounded-xl border-2 border-dashed p-6 text-center transition-all ${
+          disabled
+            ? "border-stone-800 bg-[hsl(22,15%,12%)] opacity-60 cursor-wait pointer-events-none"
+            : dragOver
+              ? "border-amber-500 bg-amber-500/10 cursor-pointer"
+              : "border-stone-700 hover:border-amber-500/60 bg-[hsl(22,15%,12%)] cursor-pointer"
         }`}
         data-testid="upload-gpx-dropzone"
       >
