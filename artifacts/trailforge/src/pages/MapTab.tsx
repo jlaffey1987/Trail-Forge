@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useLocation } from "wouter";
 import GpsRecorder from "@/components/GpsRecorder";
 import LayersPanel, { type MapLayer, type BaseMap } from "@/components/LayersPanel";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
@@ -67,6 +68,7 @@ const TILE_ATTRS: Record<BaseMap, string> = {
 };
 
 export default function MapTab() {
+  const [, setLocation] = useLocation();
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const markersRef = useRef<import("leaflet").Marker[]>([]);
@@ -599,15 +601,15 @@ export default function MapTab() {
   const activeLayerCount = layers.filter((l) => l.visible).length;
   const filterCount = filters.difficulties.length + filters.trailTypes.length;
 
-  // Hand off the current route to the Planner tab. App.tsx listens for this
-  // event and switches tabs + writes a query param so PlannerTab knows to
+  // Hand off the current route to the Planner tab. We navigate directly to
+  // the Planner ("/") with `?build=1` so PlannerTab's mount-effect knows to
   // prompt for start + end addresses.
   const handleBuildRoute = useCallback(() => {
     if (routeTrails.length === 0) return;
-    window.dispatchEvent(
-      new CustomEvent("trailforge:open-planner", { detail: { build: true } }),
-    );
-  }, [routeTrails.length]);
+    const params = new URLSearchParams(window.location.search);
+    params.set("build", "1");
+    setLocation(`/?${params.toString()}`);
+  }, [routeTrails.length, setLocation]);
 
   const handleAddChoice = (choice: AddTrailChoice) => {
     setShowAddMenu(false);

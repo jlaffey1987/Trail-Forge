@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useUser } from "@clerk/react";
+import { useLocation } from "wouter";
 import {
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
   type GroupNotification,
@@ -174,6 +175,7 @@ interface PanelProps {
 }
 
 function NotificationsPanel({ onClose, onUnreadChanged }: PanelProps) {
+  const [, setLocation] = useLocation();
   const [items, setItems] = useState<GroupNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -229,28 +231,25 @@ function NotificationsPanel({ onClose, onUnreadChanged }: PanelProps) {
     onUnreadChanged(0);
   };
 
+  const openTrailOnDiscover = (trailId: string) => {
+    // Navigate directly to the Discover tab and pass the trail id via
+    // ?trail=… so DiscoverTab can open its TrailDetailSheet on the matching
+    // row (whether it's mounting fresh or already on screen).
+    const params = new URLSearchParams(window.location.search);
+    params.set("trail", trailId);
+    setLocation(`/discover?${params.toString()}`);
+    onClose();
+  };
+
   const handleEntryClick = (n: GroupNotification) => {
     if (n.type === "trail_shared") {
-      // Hand off to the discover tab via the same event-based pattern that
-      // open-add-trail uses. App.tsx listens and switches tabs; DiscoverTab
-      // listens for the trail id and opens its TrailDetailSheet.
-      window.dispatchEvent(
-        new CustomEvent("trailforge:open-trail", {
-          detail: { trailId: n.trail.id },
-        }),
-      );
-      onClose();
+      openTrailOnDiscover(n.trail.id);
       return;
     }
     if (n.type === "trail_unshared" && n.trail.id) {
       // Trail still exists — let the rider revisit it. When trail.id is
       // null (deleted) we fall through and just open the group dialog.
-      window.dispatchEvent(
-        new CustomEvent("trailforge:open-trail", {
-          detail: { trailId: n.trail.id },
-        }),
-      );
-      onClose();
+      openTrailOnDiscover(n.trail.id);
       return;
     }
     // member_joined / member_left / trail_unshared(deleted) /

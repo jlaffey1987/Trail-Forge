@@ -185,54 +185,10 @@ function MainShell() {
   const [location, setLocation] = useLocation();
   const activeTab = pathToTab(location);
 
-  // Cross-tab navigation bridge: other tabs (e.g. My Trails → "Record" / "Draw")
-  // can dispatch `trailforge:open-add-trail` with a chosen mode. We navigate to
-  // the Map tab path with `?mode=...` so MapTab's mount-effect auto-opens the
-  // matching contribute flow.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ mode?: string }>).detail ?? {};
-      const mode = detail.mode;
-      if (mode !== "upload" && mode !== "record" && mode !== "draw") return;
-      const params = new URLSearchParams(window.location.search);
-      params.set("mode", mode);
-      const qs = params.toString();
-      setLocation(`${TAB_PATHS.map}${qs ? `?${qs}` : ""}`);
-    };
-    window.addEventListener("trailforge:open-add-trail", handler as EventListener);
-    return () => {
-      window.removeEventListener("trailforge:open-add-trail", handler as EventListener);
-    };
-  }, [setLocation]);
-
-  // Cross-tab navigation bridge: the notifications bell dispatches
-  // `trailforge:open-trail` with a trail id when the user taps a "shared a
-  // trail" entry. We jump to the Discover tab and pass the id via ?trail=...
-  // so DiscoverTab can open its TrailDetailSheet on the matching row.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ trailId?: string }>).detail ?? {};
-      const trailId = detail.trailId;
-      if (!trailId) return;
-      const params = new URLSearchParams(window.location.search);
-      params.set("trail", trailId);
-      const qs = params.toString();
-      setLocation(`${TAB_PATHS.discover}${qs ? `?${qs}` : ""}`);
-    };
-    window.addEventListener("trailforge:open-trail", handler as EventListener);
-    return () => {
-      window.removeEventListener(
-        "trailforge:open-trail",
-        handler as EventListener,
-      );
-    };
-  }, [setLocation]);
-
-  // Cross-tab navigation bridge: the notifications bell (and now push
-  // notifications via the service worker) dispatches `trailforge:open-group`
-  // with a group id when the user wants to land on a particular group's
-  // detail dialog. We jump to the My Trails tab and pass the id via
-  // `?group=...` so GroupsSection auto-opens the matching dialog.
+  // Cross-tab navigation bridge: the `trailforge:open-group` window event is
+  // still in use because the service worker's `notificationclick` handler
+  // can't import wouter directly. We jump to the My Trails tab and pass the
+  // id via `?group=...` so GroupsSection auto-opens the matching dialog.
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ groupId?: string }>).detail ?? {};
@@ -255,9 +211,10 @@ function MainShell() {
   // ---------------------------------------------------------------------------
   // Push-notification deep-link handler. The service worker's
   // `notificationclick` opens or focuses our SPA at "/?trail=<id>" or
-  // "/?group=<id>". On boot (and whenever the URL changes), translate those
-  // root-level query params into the tab-specific events we already handle
-  // above, then strip the param so a refresh doesn't re-trigger the dialog.
+  // "/?group=<id>". On boot, route those root-level query params to the right
+  // tab. For trails we navigate directly via setLocation; for groups we
+  // dispatch the `trailforge:open-group` event (still bridged above) since
+  // GroupsSection consumes it from inside the My Trails tab.
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -266,9 +223,9 @@ function MainShell() {
     const groupId = params.get("group");
     if (!trailId && !groupId) return;
     if (trailId) {
-      window.dispatchEvent(
-        new CustomEvent("trailforge:open-trail", { detail: { trailId } }),
-      );
+      const next = new URLSearchParams(window.location.search);
+      next.set("trail", trailId);
+      setLocation(`${TAB_PATHS.discover}?${next.toString()}`);
     } else if (groupId) {
       window.dispatchEvent(
         new CustomEvent("trailforge:open-group", { detail: { groupId } }),
@@ -276,28 +233,9 @@ function MainShell() {
     }
     // Note: we deliberately don't strip the param here — the receiving tab
     // (DiscoverTab / GroupsSection) consumes it once the dialog opens, then
-    // clears it from the URL via setLocation.
+    // clears it from the URL.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Cross-tab navigation bridge: Map tab dispatches `trailforge:open-planner`
-  // when a user taps "Build Route" on the on-map route panel. We switch to
-  // the Planner tab and write `?build=1` so PlannerTab's mount-effect can
-  // prompt for start + end addresses.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ build?: boolean }>).detail ?? {};
-      const params = new URLSearchParams(window.location.search);
-      if (detail.build) {
-        params.set("build", "1");
-      }
-      const qs = params.toString();
-      setLocation(`${TAB_PATHS.planner}${qs ? `?${qs}` : ""}`);
-    };
-    window.addEventListener("trailforge:open-planner", handler as EventListener);
-    return () => {
-      window.removeEventListener("trailforge:open-planner", handler as EventListener);
-    };
-  }, [setLocation]);
 
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>

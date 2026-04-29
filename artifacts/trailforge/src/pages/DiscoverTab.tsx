@@ -1,4 +1,5 @@
 import { useCallback, useState, useEffect } from "react";
+import { useLocation, useSearch } from "wouter";
 import { fetchCommunityTrails, type Trail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
@@ -53,6 +54,8 @@ function getPostedTime(created_at: string) {
 
 export default function DiscoverTab() {
   const { isSignedIn } = useCurrentUser();
+  const [, setLocation] = useLocation();
+  const queryString = useSearch();
   const [activeFilter, setActiveFilter] = useState("All");
   const [liked, setLiked] = useState<Set<string>>(new Set());
   const [trails, setTrails] = useState<SharedTrail[]>([]);
@@ -140,14 +143,15 @@ export default function DiscoverTab() {
       window.removeEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
   }, [refresh]);
 
-  // Open a TrailDetailSheet when arriving here with a `?trail=<id>` query.
-  // The notifications bell sets this when the user taps a "shared a trail"
-  // entry (see App.tsx → trailforge:open-trail handler). We also clear the
-  // param afterwards so navigating away and back doesn't re-open the sheet.
-  // This handles the cross-tab case where DiscoverTab is mounting fresh.
+  // Open a TrailDetailSheet when the URL carries `?trail=<id>`. The
+  // notifications bell (and push-notification deep links) set this and
+  // navigate to /discover via wouter; depending on the wouter search string
+  // means this effect re-fires for both fresh mounts and in-tab updates.
+  // Once the sheet is opened we strip the param so navigating away and back
+  // doesn't re-open the sheet.
   useEffect(() => {
     if (loading) return;
-    const params = new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(queryString);
     const wantId = params.get("trail");
     if (!wantId) return;
     const match = trails.find((t) => t.id === wantId);
@@ -155,48 +159,9 @@ export default function DiscoverTab() {
       setSelectedTrail(match);
       params.delete("trail");
       const qs = params.toString();
-      const newUrl =
-        window.location.pathname +
-        (qs ? `?${qs}` : "") +
-        window.location.hash;
-      window.history.replaceState(null, "", newUrl);
+      setLocation(`/discover${qs ? `?${qs}` : ""}`, { replace: true });
     }
-  }, [trails, loading]);
-
-  // Same intent as above, but for the case where DiscoverTab is *already*
-  // mounted: App.tsx's URL update via `replaceState` does not trigger a
-  // re-render, so the `?trail=` effect would otherwise miss the click.
-  // Listening directly to the event guarantees the sheet opens regardless of
-  // which tab the user is currently on.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail =
-        (event as CustomEvent<{ trailId?: string }>).detail ?? {};
-      const wantId = detail.trailId;
-      if (!wantId) return;
-      const match = trails.find((t) => t.id === wantId);
-      if (match) {
-        setSelectedTrail(match);
-        const params = new URLSearchParams(window.location.search);
-        if (params.get("trail") === wantId) {
-          params.delete("trail");
-          const qs = params.toString();
-          const newUrl =
-            window.location.pathname +
-            (qs ? `?${qs}` : "") +
-            window.location.hash;
-          window.history.replaceState(null, "", newUrl);
-        }
-      }
-    };
-    window.addEventListener("trailforge:open-trail", handler as EventListener);
-    return () => {
-      window.removeEventListener(
-        "trailforge:open-trail",
-        handler as EventListener,
-      );
-    };
-  }, [trails]);
+  }, [trails, loading, queryString, setLocation]);
 
   const toggleLike = (id: string) => {
     setLiked((prev) => {

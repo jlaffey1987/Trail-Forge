@@ -140,14 +140,12 @@ export default function MyTrailsTab() {
     if (choice === "upload") {
       setShowUploadGpx(true);
     } else {
-      // Record / Draw both happen on the Map. Dispatch a global event that
-      // MainShell listens for: it navigates to /map and sets ?mode= in the URL
-      // so MapTab's mount-effect auto-opens the matching flow. (We could call
-      // setLocation directly now that the shell is route-driven, but the
-      // bridge keeps the URL composition logic in one place.)
-      window.dispatchEvent(
-        new CustomEvent("trailforge:open-add-trail", { detail: { mode: choice } }),
-      );
+      // Record / Draw both happen on the Map. Navigate directly to /map and
+      // pass the chosen mode via ?mode= so MapTab's mount-effect auto-opens
+      // the matching flow.
+      const params = new URLSearchParams(window.location.search);
+      params.set("mode", choice);
+      setLocation(`/map?${params.toString()}`);
     }
   };
 

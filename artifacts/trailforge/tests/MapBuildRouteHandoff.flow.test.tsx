@@ -1,7 +1,8 @@
 import { describe, it, beforeEach, afterEach, vi, expect } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import React, { useEffect, useState } from "react";
+import React from "react";
+import { useLocation } from "wouter";
 
 // ---------------------------------------------------------------------------
 // Module mocks. These are hoisted by vitest so they apply to every dynamic
@@ -15,9 +16,38 @@ vi.mock("@clerk/react", () => ({
   useUser: () => ({ isLoaded: true, isSignedIn: false, user: null }),
 }));
 
-vi.mock("wouter", () => ({
-  useLocation: () => ["/", () => {}],
-}));
+// Minimal stateful wouter mock so MapTab's `setLocation` actually moves the
+// shared "current path" forward. Components reading `useLocation` re-render
+// when the path changes, which is what lets the harness swap MapTab for
+// PlannerTab in response to the Build Route click.
+const wouterState = vi.hoisted(() => {
+  return {
+    path: "/map",
+    listeners: new Set<() => void>(),
+  };
+});
+
+vi.mock("wouter", async () => {
+  const reactMod = await import("react");
+  const useLocation = (): [string, (to: string) => void] => {
+    const [, force] = reactMod.useState(0);
+    reactMod.useEffect(() => {
+      const cb = () => force((n) => n + 1);
+      wouterState.listeners.add(cb);
+      return () => {
+        wouterState.listeners.delete(cb);
+      };
+    }, []);
+    const setLocation = (to: string) => {
+      const [path] = to.split("?");
+      wouterState.path = path || "/";
+      window.history.replaceState(null, "", to);
+      wouterState.listeners.forEach((cb) => cb());
+    };
+    return [wouterState.path, setLocation];
+  };
+  return { useLocation };
+});
 
 vi.mock("@/lib/useLeaflet", () => ({
   useLeaflet: () => false,
@@ -85,10 +115,13 @@ function makeTrail(id: string, name: string) {
 }
 
 /**
- * Mirrors the App.tsx `trailforge:open-planner` bridge: when MapTab fires the
- * event we set `?build=1` on the URL and switch which page renders. Keeps the
- * test focused on the handoff contract without dragging in ClerkProvider,
- * wouter routing, or the rest of MainShell.
+ * Mirrors how MainShell picks the active tab from the URL: when MapTab calls
+ * `setLocation("/?build=1")` directly (the new behaviour after the cross-tab
+ * event bridge was removed), our mocked wouter updates `wouterState.path` and
+ * notifies subscribers, so `useLocation` here re-renders with the new path
+ * and the harness swaps MapTab for PlannerTab. Keeps the test focused on the
+ * handoff contract without dragging in ClerkProvider or the rest of
+ * MainShell.
  */
 function Harness({
   MapTab,
@@ -97,38 +130,17 @@ function Harness({
   MapTab: React.ComponentType;
   PlannerTab: React.ComponentType;
 }) {
-  const [tab, setTab] = useState<"map" | "planner">("map");
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ build?: boolean }>).detail ?? {};
-      const params = new URLSearchParams(window.location.search);
-      if (detail.build) params.set("build", "1");
-      const qs = params.toString();
-      window.history.replaceState(
-        null,
-        "",
-        `${window.location.pathname}${qs ? `?${qs}` : ""}`,
-      );
-      setTab("planner");
-    };
-    window.addEventListener(
-      "trailforge:open-planner",
-      handler as EventListener,
-    );
-    return () =>
-      window.removeEventListener(
-        "trailforge:open-planner",
-        handler as EventListener,
-      );
-  }, []);
-  return tab === "map" ? <MapTab /> : <PlannerTab />;
+  const [path] = useLocation();
+  return path === "/map" ? <MapTab /> : <PlannerTab />;
 }
 
 beforeEach(() => {
   // The planner-route store reads localStorage at module-load time. Reset the
   // module cache so every test gets a fresh hydration from the seed below.
   vi.resetModules();
-  window.history.replaceState(null, "", "/");
+  wouterState.path = "/map";
+  wouterState.listeners.clear();
+  window.history.replaceState(null, "", "/map");
   localStorage.clear();
   localStorage.setItem(
     "trailforge_planner_route",
