@@ -26,6 +26,18 @@ if (typeof globalThis.IntersectionObserver === "undefined") {
   globalThis.IntersectionObserver = IO;
 }
 
+// Element.scrollTo — jsdom doesn't implement it, but components that scroll
+// the active container into view (e.g. PlannerTab's Build-Route handoff)
+// call it inside requestAnimationFrame, which would surface as an unhandled
+// exception during tests.
+if (typeof Element !== "undefined" && typeof Element.prototype.scrollTo !== "function") {
+  Object.defineProperty(Element.prototype, "scrollTo", {
+    value: () => {},
+    writable: true,
+    configurable: true,
+  });
+}
+
 // matchMedia stub.
 if (typeof window !== "undefined" && !window.matchMedia) {
   Object.defineProperty(window, "matchMedia", {
