@@ -383,6 +383,20 @@ export default function DiscoverTab() {
         <TrailDetailSheet
           trail={selectedTrail}
           onClose={() => setSelectedTrail(null)}
+          onCountsChanged={(trailId, counts) =>
+            setActivityCounts((prev) => {
+              const cur = prev[trailId];
+              if (
+                cur &&
+                cur.notes === counts.notes &&
+                cur.photos === counts.photos &&
+                cur.pending === counts.pending
+              ) {
+                return prev;
+              }
+              return { ...prev, [trailId]: counts };
+            })
+          }
         />
       )}
     </div>

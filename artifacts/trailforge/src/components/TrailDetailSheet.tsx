@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation } from "wouter";
 import { type Trail, saveTrail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -31,9 +31,25 @@ interface Props {
   trail: Trail;
   onClose: () => void;
   onAddedToPlanner?: (trail: Trail) => void;
+  // Lets the parent (e.g. a trail card) reflect the latest activity counts
+  // for this trail without refetching the whole feed.
+  onCountsChanged?: (trailId: string, counts: TrailActivityCounts) => void;
 }
 
-export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: Props) {
+export default function TrailDetailSheet({
+  trail,
+  onClose,
+  onAddedToPlanner,
+  onCountsChanged,
+}: Props) {
+  // Hold the latest callback in a ref so refreshCounts doesn't change
+  // identity each render — otherwise an inline parent callback would
+  // cycle: fetch → setCounts → parent rerender → new callback → effect
+  // re-runs → fetch again.
+  const onCountsChangedRef = useRef(onCountsChanged);
+  useEffect(() => {
+    onCountsChangedRef.current = onCountsChanged;
+  }, [onCountsChanged]);
   const { isSignedIn, userId } = useCurrentUser();
   const [, setLocation] = useLocation();
   const [inPlannerRoute, setInPlannerRoute] = useState(() => isInRoute(trail.id));
@@ -74,7 +90,10 @@ export default function TrailDetailSheet({ trail, onClose, onAddedToPlanner }: P
   const refreshCounts = useCallback(() => {
     fetchTrailActivityCounts([trail.id]).then((map) => {
       const c = map[trail.id];
-      if (c) setCounts(c);
+      if (c) {
+        setCounts(c);
+        onCountsChangedRef.current?.(trail.id, c);
+      }
     });
   }, [trail.id]);
 
