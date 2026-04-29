@@ -1,42 +1,87 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { type Trail } from "@/lib/supabase";
+import { type RouteEntry, type RouteWaypoint } from "@/lib/routing";
 
 const STORAGE_KEY = "trailforge_planner_route";
 
 // ---------------------------------------------------------------------------
 // Storage shape
 //
-// We persist `{ ownerId, trails }` so that we know which identity built the
-// in-memory route. `ownerId === null` means "anonymous local" — fine to show
-// to anyone on the device. A non-null ownerId belongs to a specific Clerk
-// user and must never be displayed to (or auto-uploaded by) a different
-// account on a shared device. For backward compatibility a bare array is
-// treated as anonymous.
+// We persist `{ ownerId, trails, waypoints, entryOrder }` so that we know
+// which identity built the in-memory route.
+//
+// `ownerId === null`: anonymous local — fine to show to anyone on the device.
+// A non-null ownerId belongs to a specific Clerk user and must never be
+// displayed to (or auto-uploaded by) a different account on a shared device.
+//
+// `entryOrder` is the ordered list of `{kind:'trail'|'waypoint', id}` so we
+// can interleave waypoints between trails (a campsite stop between trail 1
+// and trail 2). If absent (older blobs, or array-only legacy), we fall back
+// to "trails first, waypoints appended" — preserves Phase A semantics.
 // ---------------------------------------------------------------------------
+
+export type StoredEntryRef =
+  | { kind: "trail"; id: string }
+  | { kind: "waypoint"; id: string };
 
 interface StoredRoute {
   ownerId: string | null;
   trails: Trail[];
+  waypoints: RouteWaypoint[];
+  entryOrder: StoredEntryRef[];
+}
+
+function emptyStored(): StoredRoute {
+  return { ownerId: null, trails: [], waypoints: [], entryOrder: [] };
 }
 
 function loadStored(): StoredRoute {
-  if (typeof window === "undefined") return { ownerId: null, trails: [] };
+  if (typeof window === "undefined") return emptyStored();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ownerId: null, trails: [] };
-    const parsed = JSON.parse(raw);
+    if (!raw) return emptyStored();
+    const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
-      return { ownerId: null, trails: parsed as Trail[] };
+      // Pre-Phase-A legacy: bare Trail[]. Treat as anonymous.
+      const trails = parsed as Trail[];
+      return {
+        ownerId: null,
+        trails,
+        waypoints: [],
+        entryOrder: trails.map((t) => ({ kind: "trail", id: t.id })),
+      };
     }
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.trails)) {
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
       const ownerId =
-        typeof parsed.ownerId === "string" && parsed.ownerId.length > 0
-          ? parsed.ownerId
+        typeof obj.ownerId === "string" && obj.ownerId.length > 0
+          ? obj.ownerId
           : null;
-      return { ownerId, trails: parsed.trails as Trail[] };
+      const trails = Array.isArray(obj.trails) ? (obj.trails as Trail[]) : [];
+      const waypoints = Array.isArray(obj.waypoints)
+        ? (obj.waypoints as RouteWaypoint[])
+        : [];
+      const order = Array.isArray(obj.entryOrder)
+        ? (obj.entryOrder as StoredEntryRef[]).filter(
+            (e) =>
+              e &&
+              typeof e === "object" &&
+              (e.kind === "trail" || e.kind === "waypoint") &&
+              typeof e.id === "string",
+          )
+        : null;
+      // Default order: trails in their array order, then waypoints. Matches
+      // Phase A's semantics where waypoints didn't exist yet.
+      const fallback: StoredEntryRef[] = [
+        ...trails.map((t) => ({ kind: "trail" as const, id: t.id })),
+        ...waypoints.map((w) => ({ kind: "waypoint" as const, id: w.id })),
+      ];
+      return { ownerId, trails, waypoints, entryOrder: order ?? fallback };
     }
-  } catch {/**/}
-  return { ownerId: null, trails: [] };
+  } catch {
+    /**/
+  }
+  return emptyStored();
 }
 
 const initial = loadStored();
@@ -46,32 +91,79 @@ const initial = loadStored();
 // flashing a previous user's planner on a shared device and prevents any
 // possibility of silently donating their route to whoever signs in next.
 let routeTrails: Trail[] = [];
+let routeWaypoints: RouteWaypoint[] = [];
+let entryOrder: StoredEntryRef[] = [];
 let localOwnerId: string | null = initial.ownerId;
-let pendingRestore: Trail[] | null = initial.trails.length > 0 ? initial.trails : null;
+let pendingRestore: StoredRoute | null =
+  initial.trails.length > 0 || initial.waypoints.length > 0 ? initial : null;
 
-const listeners = new Set<(trails: Trail[]) => void>();
+const trailListeners = new Set<(trails: Trail[]) => void>();
+const entryListeners = new Set<(entries: RouteEntry[]) => void>();
 
 let currentUserId: string | null = null;
 let hasAuthSettled = false;
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
 const SYNC_DEBOUNCE_MS = 600;
 
+function buildEntries(): RouteEntry[] {
+  const trailById = new Map(routeTrails.map((t) => [t.id, t] as const));
+  const wpById = new Map(routeWaypoints.map((w) => [w.id, w] as const));
+  const out: RouteEntry[] = [];
+  const seen = new Set<string>();
+  for (const ref of entryOrder) {
+    const key = `${ref.kind}:${ref.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (ref.kind === "trail") {
+      const t = trailById.get(ref.id);
+      if (t) out.push({ kind: "trail", trail: t });
+    } else {
+      const w = wpById.get(ref.id);
+      if (w) out.push({ kind: "waypoint", waypoint: w });
+    }
+  }
+  return out;
+}
+
 function persist() {
   if (typeof window === "undefined") return;
   try {
-    const payload: StoredRoute = { ownerId: localOwnerId, trails: routeTrails };
+    const payload: StoredRoute = {
+      ownerId: localOwnerId,
+      trails: routeTrails,
+      waypoints: routeWaypoints,
+      entryOrder,
+    };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  } catch {/**/}
+  } catch {
+    /**/
+  }
 }
 
 function clearStorage() {
   if (typeof window === "undefined") return;
-  try { localStorage.removeItem(STORAGE_KEY); } catch {/**/}
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /**/
+  }
 }
 
 function emit() {
-  for (const l of listeners) {
-    try { l(routeTrails); } catch {/**/}
+  for (const l of trailListeners) {
+    try {
+      l(routeTrails);
+    } catch {
+      /**/
+    }
+  }
+  const entries = buildEntries();
+  for (const l of entryListeners) {
+    try {
+      l(entries);
+    } catch {
+      /**/
+    }
   }
 }
 
@@ -93,17 +185,15 @@ function scheduleCloudSync() {
 async function pushRouteToCloud(): Promise<void> {
   if (!currentUserId) return;
   const trailIds = routeTrails.map((t) => t.id);
+  const waypoints = routeWaypoints;
   try {
     const res = await fetch("/api/me/planner-route", {
       method: "PUT",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trailIds }),
+      body: JSON.stringify({ trailIds, waypoints, entryOrder }),
     });
     if (!res.ok) {
-      // Don't surface to the user — localStorage still has the route.
-      // 401 just means the session isn't fully ready yet; we'll re-sync
-      // on the next change.
       // eslint-disable-next-line no-console
       console.warn("[plannerRouteStore] cloud sync failed:", res.status);
     }
@@ -116,11 +206,13 @@ async function pushRouteToCloud(): Promise<void> {
 interface CloudPlannerRoute {
   trailIds: string[];
   trails: Trail[];
+  waypoints?: RouteWaypoint[];
+  entryOrder?: StoredEntryRef[];
   updatedAt: string | null;
 }
 
 async function fetchRouteFromCloudOnce(): Promise<
-  { ok: true; route: CloudPlannerRoute }
+  | { ok: true; route: CloudPlannerRoute }
   | { ok: false; transient: boolean }
 > {
   try {
@@ -128,8 +220,6 @@ async function fetchRouteFromCloudOnce(): Promise<
       credentials: "include",
     });
     if (!res.ok) {
-      // 401 = session not ready; not really transient — re-runs on next
-      // setPlannerRouteUserId. 5xx and network errors are worth a retry.
       const transient = res.status >= 500;
       if (res.status !== 401) {
         // eslint-disable-next-line no-console
@@ -146,12 +236,6 @@ async function fetchRouteFromCloudOnce(): Promise<
   }
 }
 
-/**
- * Hydrate the cloud route, retrying once after a short delay on a
- * transient failure. Without this a single 5xx or offline blip during
- * sign-in would leave the user without their route until the next
- * auth-state change.
- */
 async function fetchRouteFromCloud(): Promise<CloudPlannerRoute | null> {
   const first = await fetchRouteFromCloudOnce();
   if (first.ok) return first.route;
@@ -161,43 +245,27 @@ async function fetchRouteFromCloud(): Promise<CloudPlannerRoute | null> {
   return second.ok ? second.route : null;
 }
 
-/**
- * Tell the store which Clerk user is currently signed in. Pass `null` when
- * the user signs out (or for anonymous sessions). On first call, surface
- * the previously-persisted route only if it actually belonged to this
- * identity (anonymous local for `null`, matching `ownerId` for a signed-in
- * user). On any account switch — A → null, A → B, null → B-with-foreign-data
- * — drop the previous identity's local data immediately so it cannot leak
- * to or be auto-uploaded by the new account.
- *
- * After identity is established and `userId !== null`, hydrate from the
- * cloud (server wins if non-empty), otherwise push the now-claimed local
- * route up so the next device can pick it up.
- */
 export function setPlannerRouteUserId(userId: string | null): void {
-  // Skip duplicate calls once auth has settled and the id hasn't changed.
   if (hasAuthSettled && userId === currentUserId) return;
 
-  // The persisted route is "ours" iff it was anonymous (any identity is
-  // welcome to claim it) or it was last saved by exactly this user.
   const matchesLocal = localOwnerId === null || localOwnerId === userId;
 
   if (!matchesLocal) {
-    // Previous owner was a different signed-in user — drop everything,
-    // including the in-memory state that was held back at boot.
     if (syncTimer) {
       clearTimeout(syncTimer);
       syncTimer = null;
     }
     routeTrails = [];
+    routeWaypoints = [];
+    entryOrder = [];
     localOwnerId = null;
     pendingRestore = null;
     clearStorage();
     emit();
   } else if (pendingRestore !== null) {
-    // Same identity (or anonymous-to-anonymous) and we held the data back
-    // at boot for verification — surface it now.
-    routeTrails = pendingRestore;
+    routeTrails = pendingRestore.trails;
+    routeWaypoints = pendingRestore.waypoints;
+    entryOrder = pendingRestore.entryOrder;
     pendingRestore = null;
     emit();
   }
@@ -205,37 +273,19 @@ export function setPlannerRouteUserId(userId: string | null): void {
   currentUserId = userId;
   hasAuthSettled = true;
 
-  if (!userId) {
-    // Anonymous mode — nothing else to do. Local-only writes will continue
-    // to persist (with `ownerId: null`) and survive reloads on this device.
-    return;
-  }
+  if (!userId) return;
 
-  // Capture whether this user has previously synced with the cloud on this
-  // device. This is the key to disambiguating two cloud-empty cases:
-  //   - "first sign-in adoption" (no prior claim): push local route up so
-  //     anonymous-built trails are adopted into the new cloud row.
-  //   - "explicit clear from another device" (already claimed): treat the
-  //     empty cloud as authoritative and clear local. Without this, a stale
-  //     local copy on Device B would silently re-upload after Device A
-  //     cleared the route.
   const wasAlreadyClaimedByThisUser = localOwnerId === userId;
+  const localSnapshot = {
+    trails: routeTrails.slice(),
+    waypoints: routeWaypoints.slice(),
+    entryOrder: entryOrder.slice(),
+  };
 
-  // Hydrate from cloud asynchronously. Snapshot the (now-trustworthy) local
-  // route up-front so a write that arrives during the in-flight fetch can
-  // still be pushed.
-  const localSnapshot = routeTrails.slice();
   void (async () => {
     const remote = await fetchRouteFromCloud();
-    // The user might have signed out (or switched accounts) while the fetch
-    // was in flight — bail in that case.
     if (currentUserId !== userId) return;
-
-    if (remote === null) {
-      // Couldn't reach the cloud (network/5xx after retry, or 401). Keep
-      // whatever's in memory; the next mutation will trigger another PUT.
-      return;
-    }
+    if (remote === null) return;
 
     function adoptRemote(r: CloudPlannerRoute) {
       const byId = new Map<string, Trail>();
@@ -256,35 +306,41 @@ export function setPlannerRouteUserId(userId: string | null): void {
           created_at: new Date().toISOString(),
         } satisfies Trail;
       });
+      routeWaypoints = Array.isArray(r.waypoints) ? r.waypoints : [];
+      entryOrder = Array.isArray(r.entryOrder) && r.entryOrder.length > 0
+        ? r.entryOrder
+        : [
+            ...routeTrails.map((t) => ({ kind: "trail" as const, id: t.id })),
+            ...routeWaypoints.map((w) => ({
+              kind: "waypoint" as const,
+              id: w.id,
+            })),
+          ];
       localOwnerId = userId;
       persist();
       emit();
     }
 
     if (wasAlreadyClaimedByThisUser) {
-      // The user has prior cloud history on this device, so the cloud row
-      // is the source of truth — including the empty case (a clear from
-      // another device must propagate, not be undone by stale local).
       adoptRemote(remote);
       return;
     }
 
-    // First sign-in for this account on this device. Server-wins if the
-    // cloud already has data (cross-device restore); otherwise push the
-    // local snapshot up to seed the new account.
-    if (remote.trailIds.length > 0) {
+    if (remote.trailIds.length > 0 || (remote.waypoints?.length ?? 0) > 0) {
       adoptRemote(remote);
       return;
     }
 
     localOwnerId = userId;
-    if (routeTrails.length > 0 || localSnapshot.length > 0) {
+    if (
+      routeTrails.length > 0 ||
+      routeWaypoints.length > 0 ||
+      localSnapshot.trails.length > 0 ||
+      localSnapshot.waypoints.length > 0
+    ) {
       persist();
       scheduleCloudSync();
     } else {
-      // Even an empty route benefits from being persisted with the right
-      // owner so future reloads-without-network don't trip the ownership
-      // check above.
       persist();
     }
   })();
@@ -305,17 +361,83 @@ export function getRouteTrails(): Trail[] {
   return routeTrails;
 }
 
+export function getRouteEntries(): RouteEntry[] {
+  return buildEntries();
+}
+
 function noteWrite() {
-  // Any user-driven write supersedes the held-back boot data: keeping
-  // pendingRestore around would let stale data clobber a fresh write once
-  // Clerk settles. Also claim ownership for the currently-known identity
-  // so the persisted blob never lies about who built it.
   pendingRestore = null;
   localOwnerId = currentUserId;
 }
 
+/**
+ * Replace the trail list. Keeps existing waypoints attached to whichever
+ * preceding trail they followed when possible; waypoints whose anchor
+ * trail is removed (or that come after the new trail list ends) are
+ * appended at the end. Passing `[]` clears EVERYTHING (including
+ * waypoints) — that's the "Clear route" semantic both panels expect.
+ */
 export function setRouteTrails(next: Trail[]) {
+  if (next.length === 0) {
+    routeTrails = [];
+    routeWaypoints = [];
+    entryOrder = [];
+    noteWrite();
+    persist();
+    emit();
+    scheduleCloudSync();
+    return;
+  }
+
+  // Preserve waypoint placement relative to surviving trails. Strategy:
+  //   1. Walk the OLD entryOrder. For each trail entry, if it survives in
+  //      `next`, emit it; collect any subsequent waypoints "owned" by this
+  //      trail (i.e. they follow it in the old order).
+  //   2. Reorder the surviving trail entries to match `next`. Each surviving
+  //      trail keeps its trailing waypoint cluster.
+  //   3. New trails (not in old entries) get appended at the end with no
+  //      waypoint cluster.
+  //   4. Waypoints that were ahead of the first surviving trail (or whose
+  //      anchor was removed) are appended at the very end so they don't get
+  //      lost — the user can re-position them via the planner panel.
+  const survivingIds = new Set(next.map((t) => t.id));
+  const trailClusters = new Map<string, StoredEntryRef[]>();
+  const orphanWaypoints: StoredEntryRef[] = [];
+  let currentTrailId: string | null = null;
+  for (const ref of entryOrder) {
+    if (ref.kind === "trail") {
+      if (survivingIds.has(ref.id)) {
+        currentTrailId = ref.id;
+        if (!trailClusters.has(ref.id)) trailClusters.set(ref.id, []);
+      } else {
+        currentTrailId = null;
+      }
+    } else {
+      if (currentTrailId !== null) {
+        const cluster = trailClusters.get(currentTrailId);
+        if (cluster) cluster.push(ref);
+      } else {
+        orphanWaypoints.push(ref);
+      }
+    }
+  }
+
+  const newOrder: StoredEntryRef[] = [];
+  for (const t of next) {
+    newOrder.push({ kind: "trail", id: t.id });
+    const cluster = trailClusters.get(t.id);
+    if (cluster) newOrder.push(...cluster);
+  }
+  newOrder.push(...orphanWaypoints);
+
   routeTrails = next;
+  // Drop waypoints whose ids no longer appear in newOrder — defensive, but
+  // also keeps state consistent if a caller hand-edits routeWaypoints.
+  const orderedWpIds = new Set(
+    newOrder.filter((r) => r.kind === "waypoint").map((r) => r.id),
+  );
+  routeWaypoints = routeWaypoints.filter((w) => orderedWpIds.has(w.id));
+  entryOrder = newOrder;
   noteWrite();
   persist();
   emit();
@@ -325,6 +447,7 @@ export function setRouteTrails(next: Trail[]) {
 export function addRouteTrail(trail: Trail) {
   if (routeTrails.some((t) => t.id === trail.id)) return;
   routeTrails = [...routeTrails, trail];
+  entryOrder = [...entryOrder, { kind: "trail", id: trail.id }];
   noteWrite();
   persist();
   emit();
@@ -333,6 +456,9 @@ export function addRouteTrail(trail: Trail) {
 
 export function removeRouteTrail(trailId: string) {
   routeTrails = routeTrails.filter((t) => t.id !== trailId);
+  entryOrder = entryOrder.filter(
+    (r) => !(r.kind === "trail" && r.id === trailId),
+  );
   noteWrite();
   persist();
   emit();
@@ -343,22 +469,144 @@ export function isInRoute(trailId: string): boolean {
   return routeTrails.some((t) => t.id === trailId);
 }
 
-export function subscribeRouteTrails(listener: (trails: Trail[]) => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
+/**
+ * Insert a waypoint into the ordered route. If the route is empty (no
+ * trails yet) the waypoint goes at position 0. If a `nearestTrailId` is
+ * provided we slot the waypoint immediately after that trail entry —
+ * matches the "stop between trail 1 and trail 2" mental model the POI
+ * buttons promise. Without `nearestTrailId` we append at the end.
+ */
+export function addRouteWaypoint(
+  waypoint: RouteWaypoint,
+  opts?: { afterTrailId?: string | null },
+) {
+  // De-dupe by id (Overpass nodes are stable) so re-tapping the same POI
+  // marker doesn't quietly create two waypoints in the route.
+  if (routeWaypoints.some((w) => w.id === waypoint.id)) return;
+
+  routeWaypoints = [...routeWaypoints, waypoint];
+
+  const ref: StoredEntryRef = { kind: "waypoint", id: waypoint.id };
+  let inserted = false;
+  if (opts?.afterTrailId) {
+    const idx = entryOrder.findIndex(
+      (r) => r.kind === "trail" && r.id === opts.afterTrailId,
+    );
+    if (idx >= 0) {
+      // Skip past any waypoints that already follow this trail so the
+      // newest stop sits at the END of that trail's cluster.
+      let insertAt = idx + 1;
+      while (
+        insertAt < entryOrder.length &&
+        entryOrder[insertAt].kind === "waypoint"
+      ) {
+        insertAt++;
+      }
+      entryOrder = [
+        ...entryOrder.slice(0, insertAt),
+        ref,
+        ...entryOrder.slice(insertAt),
+      ];
+      inserted = true;
+    }
+  }
+  if (!inserted) entryOrder = [...entryOrder, ref];
+
+  noteWrite();
+  persist();
+  emit();
+  scheduleCloudSync();
 }
 
-/** React hook for subscribing to the planner route store. */
+export function removeRouteWaypoint(waypointId: string) {
+  routeWaypoints = routeWaypoints.filter((w) => w.id !== waypointId);
+  entryOrder = entryOrder.filter(
+    (r) => !(r.kind === "waypoint" && r.id === waypointId),
+  );
+  noteWrite();
+  persist();
+  emit();
+  scheduleCloudSync();
+}
+
+export function isWaypointInRoute(waypointId: string): boolean {
+  return routeWaypoints.some((w) => w.id === waypointId);
+}
+
+/**
+ * Replace the entire ordered list. Used by the planner's drag-to-reorder
+ * UI which can shuffle trails AND waypoints together. The caller must
+ * provide entries that reference existing trails/waypoints — we don't
+ * accept new waypoint payloads here, only re-orderings.
+ */
+export function setRouteEntries(entries: RouteEntry[]) {
+  const newTrails: Trail[] = [];
+  const newWps: RouteWaypoint[] = [];
+  const newOrder: StoredEntryRef[] = [];
+  const seen = new Set<string>();
+  for (const e of entries) {
+    if (e.kind === "trail") {
+      const key = `trail:${e.trail.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      newTrails.push(e.trail);
+      newOrder.push({ kind: "trail", id: e.trail.id });
+    } else {
+      const key = `waypoint:${e.waypoint.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      newWps.push(e.waypoint);
+      newOrder.push({ kind: "waypoint", id: e.waypoint.id });
+    }
+  }
+  routeTrails = newTrails;
+  routeWaypoints = newWps;
+  entryOrder = newOrder;
+  noteWrite();
+  persist();
+  emit();
+  scheduleCloudSync();
+}
+
+export function subscribeRouteTrails(
+  listener: (trails: Trail[]) => void,
+): () => void {
+  trailListeners.add(listener);
+  return () => {
+    trailListeners.delete(listener);
+  };
+}
+
+export function subscribeRouteEntries(
+  listener: (entries: RouteEntry[]) => void,
+): () => void {
+  entryListeners.add(listener);
+  return () => {
+    entryListeners.delete(listener);
+  };
+}
+
+/** React hook for subscribing to the trail-only view of the route store. */
 export function useRouteTrails(): [Trail[], Dispatch<SetStateAction<Trail[]>>] {
   const [trails, setTrails] = useState<Trail[]>(routeTrails);
   useEffect(() => {
     return subscribeRouteTrails(setTrails);
   }, []);
   const setter: Dispatch<SetStateAction<Trail[]>> = (next) => {
-    const resolved = typeof next === "function"
-      ? (next as (prev: Trail[]) => Trail[])(routeTrails)
-      : next;
+    const resolved =
+      typeof next === "function"
+        ? (next as (prev: Trail[]) => Trail[])(routeTrails)
+        : next;
     setRouteTrails(resolved);
   };
   return [trails, setter];
+}
+
+/** React hook for the full ordered list including waypoints. */
+export function useRouteEntries(): RouteEntry[] {
+  const [entries, setEntries] = useState<RouteEntry[]>(buildEntries());
+  useEffect(() => {
+    return subscribeRouteEntries(setEntries);
+  }, []);
+  return entries;
 }

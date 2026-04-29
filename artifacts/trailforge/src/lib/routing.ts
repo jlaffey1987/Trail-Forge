@@ -7,6 +7,40 @@ export interface GeoPoint {
   label?: string;
 }
 
+/**
+ * A user-selected stop along the planned route. Distinct from trails — these
+ * are arbitrary lat/lng pins (fuel stations, campsites, custom drops) the
+ * rider wants to pass through. Persisted server-side so they sync across
+ * devices alongside the trail order.
+ */
+export interface RouteWaypoint {
+  id: string;
+  lat: number;
+  lng: number;
+  name: string;
+  /**
+   * Where the waypoint came from. Drives the marker icon in PlannerMap and
+   * NavigationView. `custom` is reserved for any future "drop pin here" UX.
+   */
+  kind: "fuel" | "campsite" | "custom";
+  /** Optional OpenStreetMap node/way id, e.g. `node/1234`. Lets us de-dupe. */
+  osmId?: string;
+}
+
+/**
+ * Esri reference overlay tiles — labels (place names, road names, country
+ * boundaries) painted on top of any base layer. Combined with the
+ * `World_Imagery` satellite base it gives a "Google Maps Hybrid"-style view
+ * so riders can see town names while planning a satellite route.
+ *
+ * `pane` is set to `"shadowPane"` so it draws above polylines but below
+ * markers — labels stay legible without obscuring the start/end pins.
+ */
+export const HYBRID_LABEL_TILE_URL =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}";
+export const HYBRID_LABEL_TILE_ATTRIBUTION =
+  "Labels © Esri";
+
 export interface TurnStep {
   instruction: string;
   maneuver: string;
@@ -26,7 +60,8 @@ export interface RoadRoute {
 
 export type RouteSection =
   | { kind: "road"; index: number; from: GeoPoint; to: GeoPoint; route: RoadRoute; label: string }
-  | { kind: "trail"; index: number; trail: Trail; polyline: GeoPoint[]; distanceKm: number; entry: GeoPoint; exit: GeoPoint };
+  | { kind: "trail"; index: number; trail: Trail; polyline: GeoPoint[]; distanceKm: number; entry: GeoPoint; exit: GeoPoint }
+  | { kind: "waypoint"; index: number; waypoint: RouteWaypoint; point: GeoPoint };
 
 export interface AssembledRoute {
   start: GeoPoint;
@@ -68,6 +103,66 @@ function formatInstruction(type: string, modifier?: string, name?: string): stri
     case "use lane": return `Use lane${street}`;
     case "notification": return `Continue${street}`;
     default: return `${capitalize(type)}${street}`;
+  }
+}
+
+export interface AddressSuggestion {
+  /** Stable id from Nominatim (`place_id`) — used as React key. */
+  id: string;
+  /** Full display name from Nominatim, e.g. "9 High Street, Stranraer, …". */
+  label: string;
+  /** Short label (first 2-3 commas) for the summary line. */
+  shortLabel: string;
+  lat: number;
+  lng: number;
+}
+
+/**
+ * Free-text address suggestions for the planner's start/end inputs. We hit
+ * Nominatim's `/search` with a GB country bias first (matches our
+ * UK-focussed user base) and fall back to a global query when nothing
+ * British matches. Capped at 5 results to keep the dropdown tidy.
+ *
+ * Callers MUST pair this with a request-sequence guard — Nominatim is
+ * fast on average but can spike, so an older request can land after a
+ * newer one and overwrite the user's currently-typed query.
+ */
+export async function searchSuggestions(query: string): Promise<AddressSuggestion[]> {
+  const q = query.trim();
+  if (q.length < 2) return [];
+
+  const tryFetch = async (url: string): Promise<AddressSuggestion[]> => {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return [];
+    const data = (await res.json()) as Array<Record<string, unknown>>;
+    if (!Array.isArray(data)) return [];
+    const out: AddressSuggestion[] = [];
+    for (const row of data) {
+      const lat = parseFloat(String(row.lat));
+      const lng = parseFloat(String(row.lon));
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const label = typeof row.display_name === "string" ? row.display_name : "";
+      if (!label) continue;
+      const id =
+        row.place_id != null
+          ? String(row.place_id)
+          : `${lat.toFixed(5)},${lng.toFixed(5)}`;
+      const shortLabel = label.split(",").slice(0, 3).join(",").trim();
+      out.push({ id, label, shortLabel, lat, lng });
+    }
+    return out;
+  };
+
+  try {
+    const gb = await tryFetch(
+      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb&addressdetails=0`,
+    );
+    if (gb.length > 0) return gb;
+    return await tryFetch(
+      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&addressdetails=0`,
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -146,12 +241,36 @@ export async function getRoadRoute(coords: GeoPoint[]): Promise<RoadRoute | null
 
 const TRAIL_SPEED_KMH = 25;
 
+/**
+ * One ordered stop in the planner. Either a trail (off-road segment with a
+ * known polyline) or a custom waypoint (a fuel/campsite/custom pin the
+ * rider wants to pass through).
+ *
+ * `entries` lets `assembleMultiModalRoute` weave waypoints into the same
+ * road graph that connects the trails — a waypoint between two trails
+ * becomes an extra road leg in the assembled section list.
+ */
+export type RouteEntry =
+  | { kind: "trail"; trail: Trail }
+  | { kind: "waypoint"; waypoint: RouteWaypoint };
+
 export async function assembleMultiModalRoute(
   start: GeoPoint,
   end: GeoPoint,
-  trails: Trail[],
-  onProgress?: (step: number, total: number, label: string) => void
+  trailsOrEntries: Trail[] | RouteEntry[],
+  onProgress?: (step: number, total: number, label: string) => void,
 ): Promise<AssembledRoute> {
+  // Backwards compatible: callers can pass a plain `Trail[]` (existing
+  // PlannerTab behaviour). We normalize to entries internally.
+  const entries: RouteEntry[] = Array.isArray(trailsOrEntries)
+    ? (trailsOrEntries as ReadonlyArray<unknown>).map((item) => {
+        if (item && typeof item === "object" && "kind" in (item as Record<string, unknown>)) {
+          return item as RouteEntry;
+        }
+        return { kind: "trail", trail: item as Trail };
+      })
+    : [];
+
   const sections: RouteSection[] = [];
   let totalRoadKm = 0;
   let totalTrailKm = 0;
@@ -161,52 +280,98 @@ export async function assembleMultiModalRoute(
   let failedRoadSegments = 0;
 
   let currentPoint: GeoPoint = start;
+  let currentLabel: string = start.label || "Start";
   let sectionIdx = 0;
+  let trailCount = 0;
 
-  const totalSteps = trails.length * 2 + 1;
+  // Each entry contributes one road leg + one stop section (trail or
+  // waypoint). The extra +1 is the final road leg back to `end`.
+  const totalSteps = entries.length * 2 + 1;
   let stepNo = 0;
 
   // Trails coming from the slim Map-tab fetch don't carry `gpx_data`. We
   // need the full GPX here to build the trail polyline, so lazy-fetch it
   // for any trail that's missing it before we start assembling.
+  const trailsNeedingHydration = entries
+    .filter((e): e is Extract<RouteEntry, { kind: "trail" }> => e.kind === "trail")
+    .map((e) => e.trail);
   const missingGpxIds = Array.from(
-    new Set(trails.filter((t) => t.gpx_data == null).map((t) => t.id)),
+    new Set(trailsNeedingHydration.filter((t) => t.gpx_data == null).map((t) => t.id)),
   );
-  let workingTrails = trails;
+  let hydratedById = new Map<string, Trail>();
   if (missingGpxIds.length > 0) {
     onProgress?.(0, totalSteps, "Loading trail data");
     const gpxMap = await fetchTrailGpxByIds(missingGpxIds);
-    workingTrails = trails.map((t) => {
-      if (t.gpx_data != null) return t;
+    for (const t of trailsNeedingHydration) {
       const g = gpxMap.get(t.id);
-      return g != null ? { ...t, gpx_data: g } : t;
-    });
+      hydratedById.set(t.id, g != null ? { ...t, gpx_data: g } : t);
+    }
   }
 
-  for (let i = 0; i < workingTrails.length; i++) {
-    const trail = workingTrails[i];
-    const waypoints = parseGPX(trail.gpx_data);
-    if (waypoints.length < 2) {
-      skippedTrails.push(trail.name);
+  for (const entry of entries) {
+    if (entry.kind === "waypoint") {
+      const wpPoint: GeoPoint = {
+        lat: entry.waypoint.lat,
+        lng: entry.waypoint.lng,
+        label: entry.waypoint.name,
+      };
+
+      stepNo++;
+      onProgress?.(stepNo, totalSteps, `Routing roads to ${entry.waypoint.name}`);
+      const roadRoute = await getRoadRoute([currentPoint, wpPoint]);
+      if (roadRoute) {
+        sections.push({
+          kind: "road",
+          index: sectionIdx++,
+          from: currentPoint,
+          to: wpPoint,
+          route: roadRoute,
+          label: `${currentLabel} → ${entry.waypoint.name}`,
+        });
+        totalRoadKm += roadRoute.distanceKm;
+        totalRoadDurationMin += roadRoute.durationMin;
+      } else {
+        failedRoadSegments++;
+      }
+
+      stepNo++;
+      onProgress?.(stepNo, totalSteps, `Adding stop ${entry.waypoint.name}`);
+      sections.push({
+        kind: "waypoint",
+        index: sectionIdx++,
+        waypoint: entry.waypoint,
+        point: wpPoint,
+      });
+      currentPoint = wpPoint;
+      currentLabel = entry.waypoint.name;
+      await new Promise((r) => setTimeout(r, 250));
       continue;
     }
 
-    const trailEntry: GeoPoint = { lat: waypoints[0].lat, lng: waypoints[0].lon };
-    const trailExit: GeoPoint = { lat: waypoints[waypoints.length - 1].lat, lng: waypoints[waypoints.length - 1].lon };
+    // Trail entry
+    const trail = hydratedById.get(entry.trail.id) ?? entry.trail;
+    const wps = parseGPX(trail.gpx_data);
+    if (wps.length < 2) {
+      skippedTrails.push(trail.name);
+      // Skip both progress steps for this trail to keep the bar accurate.
+      stepNo += 2;
+      continue;
+    }
+    trailCount++;
+    const trailEntry: GeoPoint = { lat: wps[0].lat, lng: wps[0].lon };
+    const trailExit: GeoPoint = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
 
-    // Road from current point to trail entry
     stepNo++;
     onProgress?.(stepNo, totalSteps, `Routing roads to ${trail.name}`);
     const roadRoute = await getRoadRoute([currentPoint, trailEntry]);
     if (roadRoute) {
-      const fromLabel = i === 0 ? (start.label || "Start") : `Trail ${i} exit`;
       sections.push({
         kind: "road",
         index: sectionIdx++,
         from: currentPoint,
         to: trailEntry,
         route: roadRoute,
-        label: `${fromLabel} → ${trail.name} entry`,
+        label: `${currentLabel} → ${trail.name} entry`,
       });
       totalRoadKm += roadRoute.distanceKm;
       totalRoadDurationMin += roadRoute.durationMin;
@@ -214,10 +379,9 @@ export async function assembleMultiModalRoute(
       failedRoadSegments++;
     }
 
-    // Trail itself
     stepNo++;
     onProgress?.(stepNo, totalSteps, `Adding ${trail.name}`);
-    const trailPolyline: GeoPoint[] = waypoints.map((w) => ({ lat: w.lat, lng: w.lon }));
+    const trailPolyline: GeoPoint[] = wps.map((w) => ({ lat: w.lat, lng: w.lon }));
     const trailKm = trail.distance_km ?? 0;
     sections.push({
       kind: "trail",
@@ -232,8 +396,7 @@ export async function assembleMultiModalRoute(
     totalTrailDurationMin += (trailKm / TRAIL_SPEED_KMH) * 60;
 
     currentPoint = trailExit;
-
-    // Throttle slightly to be polite to public OSRM
+    currentLabel = `${trail.name} exit`;
     await new Promise((r) => setTimeout(r, 250));
   }
 
@@ -242,20 +405,23 @@ export async function assembleMultiModalRoute(
   onProgress?.(stepNo, totalSteps, `Routing final road to ${end.label || "destination"}`);
   const finalRoute = await getRoadRoute([currentPoint, end]);
   if (finalRoute) {
-    const fromLabel = workingTrails.length === 0 ? (start.label || "Start") : `Trail ${workingTrails.length} exit`;
     sections.push({
       kind: "road",
       index: sectionIdx++,
       from: currentPoint,
       to: end,
       route: finalRoute,
-      label: `${fromLabel} → ${end.label || "Destination"}`,
+      label: `${currentLabel} → ${end.label || "Destination"}`,
     });
     totalRoadKm += finalRoute.distanceKm;
     totalRoadDurationMin += finalRoute.durationMin;
   } else {
     failedRoadSegments++;
   }
+
+  // Keep the unused trailCount lint-clean; it documents the parsed trail
+  // count even though the value isn't surfaced in AssembledRoute today.
+  void trailCount;
 
   return {
     start,
