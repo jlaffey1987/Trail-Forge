@@ -85,6 +85,7 @@ interface FakeBackend {
 
 let backend: FakeBackend;
 let fetchSpy: ReturnType<typeof vi.spyOn>;
+let canModerate = false;
 
 function viewer(): { id: string; display_name: string; avatar_url: null } {
   return { id: VIEWER_ID, display_name: "View Er", avatar_url: null };
@@ -129,7 +130,28 @@ async function handleRequest(url: string, init?: RequestInit): Promise<Response>
     const sub = m[2] ?? "";
 
     if (sub === "/permissions" && method === "GET") {
-      return jsonResponse({ isOwner: false, isModerator: false, canModerate: false });
+      return jsonResponse({
+        isOwner: false,
+        isModerator: canModerate,
+        canModerate,
+      });
+    }
+
+    const decisionMatch = /^\/amendments\/([^/]+)\/(approve|reject)$/.exec(sub);
+    if (decisionMatch && method === "POST") {
+      const amendmentId = decisionMatch[1]!;
+      const decision = decisionMatch[2] as "approve" | "reject";
+      const am = backend.amendments.find(
+        (a) => a.id === amendmentId && a.trail_id === trailId,
+      );
+      if (!am) return jsonResponse({ error: "not found" }, { status: 404 });
+      if (am.status !== "pending")
+        return jsonResponse({ error: "already decided" }, { status: 409 });
+      am.status = decision === "approve" ? "approved" : "rejected";
+      am.decided_by = VIEWER_ID;
+      am.decided_at = new Date().toISOString();
+      am.decision_reason = body?.decisionReason ?? null;
+      return jsonResponse({ ok: true });
     }
 
     if (sub === "/notes" && method === "GET") {
@@ -188,6 +210,7 @@ async function handleRequest(url: string, init?: RequestInit): Promise<Response>
 
 beforeEach(() => {
   backend = { notes: [], photos: [], amendments: [] };
+  canModerate = false;
   fetchSpy = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -314,5 +337,64 @@ describe("TrailDetailSheet — signed-in user trail-content journey", () => {
     expect(backend.amendments[0]!.status).toBe("pending");
     expect(backend.amendments[0]!.proposed_changes).toMatchObject({ difficulty: 7 });
     expect(backend.amendments[0]!.author_user_id).toBe(VIEWER_ID);
+  });
+
+  it("drops the header's pending-edits count after a moderator approves a seeded pending amendment", async () => {
+    canModerate = true;
+    const seededId = randomUUID();
+    backend.amendments.push({
+      id: seededId,
+      trail_id: TRAIL_ID,
+      author_user_id: "user_other_author",
+      proposed_changes: { name: "Renamed by author" },
+      replacement_gpx_storage_key: null,
+      reason: "Trail is signed differently on the ground",
+      status: "pending",
+      decided_by: null,
+      decided_at: null,
+      decision_reason: null,
+      created_at: new Date().toISOString(),
+      users: { id: "user_other_author", display_name: "Author", avatar_url: null },
+    });
+
+    const TrailDetailSheet = await importSheet();
+    const user = userEvent.setup();
+
+    render(<TrailDetailSheet trail={fakeTrail() as never} onClose={() => {}} />);
+
+    // Header reflects the seeded pending amendment.
+    await waitFor(() =>
+      expect(screen.getByTestId("trail-detail-counts")).toHaveTextContent(
+        "0 notes · 0 photos · 1 pending edits",
+      ),
+    );
+
+    await user.click(screen.getByTestId("trail-tab-amendments"));
+    const amendmentsPanel = await screen.findByTestId("trail-amendments-panel");
+
+    const approveBtn = await within(amendmentsPanel).findByTestId(
+      `amendment-approve-${seededId}`,
+    );
+    await user.click(approveBtn);
+
+    // The row's status flips from pending → approved.
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId(`amendment-${seededId}`))
+          .getByTestId(`amendment-status-${seededId}`)
+          .textContent?.toLowerCase(),
+      ).toContain("approved"),
+    );
+
+    // Header pending count drops to 0 — this is the user-visible signal
+    // the task acceptance criteria call out.
+    await waitFor(() =>
+      expect(screen.getByTestId("trail-detail-counts")).toHaveTextContent(
+        "0 notes · 0 photos · 0 pending edits",
+      ),
+    );
+
+    expect(backend.amendments[0]!.status).toBe("approved");
+    expect(backend.amendments[0]!.decided_by).toBe(VIEWER_ID);
   });
 });
