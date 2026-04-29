@@ -12,7 +12,31 @@ See task #36 (`.local/tasks/task-36.md`) for the original requirement.
 
 ## What it covers
 
-`trail-detail.e2e.spec.ts` runs one journey:
+### `group-cover.e2e.spec.ts`
+
+Covers the full group cover-photo flow (task #55):
+
+1. Signs in as the e2e user.
+2. Creates a fresh group via the UI (`+ New` → name → submit). The
+   detail dialog auto-opens.
+3. Uploads a cover (`ride-640.jpg`) via `setInputFiles` on the cover
+   `<input type=file>`, asserts the cover image renders and that
+   `naturalWidth > 0` (the storage proxy + ACL stamp actually worked).
+4. Closes the dialog and asserts the cover thumbnail also appears on
+   the corresponding `group-card-<id>` on the Groups list.
+5. Reopens, replaces with `ride2-640.jpg`, asserts the image src
+   changes and the new image decodes.
+6. Reopens, clicks **Remove**, asserts the empty placeholder returns
+   on both the dialog and the card.
+
+A second test seeds a "stranger" group via service-role Supabase
+(synthetic owner + caller-as-member row) and asserts the three cover
+endpoints all return 403 for the non-admin caller via
+`page.request.{post,delete}`. Cleanup wipes both the owner-flow group
+and the stranger group via name + owner id, so reruns stay
+deterministic.
+
+### `trail-detail.e2e.spec.ts`
 
 1. Programmatically signs the test user in. The Clerk dev instance
    enforces password + email_code MFA, so the spec drives both factors

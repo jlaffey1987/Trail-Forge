@@ -9,12 +9,30 @@
  * `request(app(userId))` to authenticate.
  */
 
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 import type { Request } from "express";
 import { MockSupa } from "./mockSupa";
 
 let mockSupa = new MockSupa();
 const aclState = { shouldFail: false };
+
+// `vi.mock(...)` factories are hoisted above imports, so any spies they
+// reference must be declared via `vi.hoisted()` to avoid TDZ errors when
+// the mocked module is resolved.
+const objectStorageState = vi.hoisted(() => {
+  const deleteObjectEntity = vi.fn(async (_path: string) => true);
+  const trySetObjectEntityAclPolicy = vi.fn(
+    async (_path: string, _opts: unknown) => {
+      // The shouldFail flag is mirrored from the outer module on each
+      // reset so this hoisted closure stays self-contained.
+    },
+  );
+  return {
+    deleteObjectEntity,
+    trySetObjectEntityAclPolicy,
+    aclShouldFail: { value: false },
+  };
+});
 
 export function getMockSupa(): MockSupa {
   return mockSupa;
@@ -23,11 +41,25 @@ export function getMockSupa(): MockSupa {
 export function resetMockSupa(): MockSupa {
   mockSupa = new MockSupa();
   aclState.shouldFail = false;
+  objectStorageState.aclShouldFail.value = false;
+  objectStorageState.deleteObjectEntity.mockClear();
+  objectStorageState.trySetObjectEntityAclPolicy.mockClear();
   return mockSupa;
 }
 
 export function setAclShouldFail(v: boolean): void {
   aclState.shouldFail = v;
+  objectStorageState.aclShouldFail.value = v;
+}
+
+export function getObjectStorageMocks(): {
+  deleteObjectEntity: Mock;
+  trySetObjectEntityAclPolicy: Mock;
+} {
+  return {
+    deleteObjectEntity: objectStorageState.deleteObjectEntity,
+    trySetObjectEntityAclPolicy: objectStorageState.trySetObjectEntityAclPolicy,
+  };
 }
 
 vi.mock("@clerk/express", () => {
@@ -74,8 +106,17 @@ vi.mock("../../src/lib/objectStorage", () => {
     async getObjectEntityUploadURL(subPath: string): Promise<string> {
       return `https://upload.test/${subPath}`;
     }
-    async trySetObjectEntityAclPolicy(): Promise<void> {
-      if (aclState.shouldFail) throw new ObjectNotFoundError();
+    async trySetObjectEntityAclPolicy(
+      path: string,
+      opts: unknown,
+    ): Promise<void> {
+      await objectStorageState.trySetObjectEntityAclPolicy(path, opts);
+      if (objectStorageState.aclShouldFail.value) {
+        throw new ObjectNotFoundError();
+      }
+    }
+    async deleteObjectEntity(path: string): Promise<boolean> {
+      return objectStorageState.deleteObjectEntity(path);
     }
   }
   return { ObjectNotFoundError, ObjectStorageService };
