@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type GroupDetail,
   type GroupInvite,
+  approveJoinRequest,
   buildInviteUrl,
   createInvite,
+  declineJoinRequest,
   deleteGroup,
   fetchGroupDetail,
   finalizeGroupCover,
@@ -15,6 +17,7 @@ import {
   requestGroupCoverUploadUrl,
   revokeInvite,
   transferGroupOwnership,
+  updateGroup,
 } from "@/lib/groups";
 import { preparePhotoForUpload } from "@/lib/photoUpload";
 
@@ -23,13 +26,15 @@ interface Props {
   onClose: () => void;
 }
 
-type InviteMode = "link" | "email" | "username";
+// Email invites have been removed in favor of "discoverable groups" —
+// owners flip the discoverable toggle and people request to join from the
+// Discover tab. Link and username invites are still supported as fallbacks.
+type InviteMode = "link" | "username";
 
 export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const [detail, setDetail] = useState<GroupDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [inviteMode, setInviteMode] = useState<InviteMode>("link");
-  const [inviteEmail, setInviteEmail] = useState("");
   const [inviteUsername, setInviteUsername] = useState("");
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -40,6 +45,8 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const [transferring, setTransferring] = useState(false);
   const [coverUploading, setCoverUploading] = useState(false);
   const [coverError, setCoverError] = useState<string | null>(null);
+  const [discoverableToggling, setDiscoverableToggling] = useState(false);
+  const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -72,22 +79,57 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const handleCreateInvite = async () => {
     setActionError(null);
     setCreatingInvite(true);
-    let opts: { email?: string; username?: string } = {};
-    if (inviteMode === "email" && inviteEmail.trim()) {
-      opts = { email: inviteEmail.trim() };
-    } else if (inviteMode === "username" && inviteUsername.trim()) {
-      opts = { username: inviteUsername.trim() };
-    }
+    const opts: { username?: string } =
+      inviteMode === "username" && inviteUsername.trim()
+        ? { username: inviteUsername.trim() }
+        : {};
     const result = await createInvite(groupId, opts);
     setCreatingInvite(false);
     if (!result.invite) {
       setActionError(result.error || "Could not create invite");
       return;
     }
-    setInviteEmail("");
     setInviteUsername("");
     await refresh();
     void copyInviteLink(result.invite);
+  };
+
+  const handleToggleDiscoverable = async () => {
+    if (!detail) return;
+    setActionError(null);
+    setDiscoverableToggling(true);
+    const next = !detail.group.discoverable;
+    const updated = await updateGroup(groupId, { discoverable: next });
+    setDiscoverableToggling(false);
+    if (!updated) {
+      setActionError("Could not update discoverable setting");
+      return;
+    }
+    await refresh();
+  };
+
+  const handleApproveRequest = async (requestId: string) => {
+    setActionError(null);
+    setDecidingRequestId(requestId);
+    const ok = await approveJoinRequest(groupId, requestId);
+    setDecidingRequestId(null);
+    if (!ok) {
+      setActionError("Could not approve request");
+      return;
+    }
+    await refresh();
+  };
+
+  const handleDeclineRequest = async (requestId: string) => {
+    setActionError(null);
+    setDecidingRequestId(requestId);
+    const ok = await declineJoinRequest(groupId, requestId);
+    setDecidingRequestId(null);
+    if (!ok) {
+      setActionError("Could not decline request");
+      return;
+    }
+    await refresh();
   };
 
   const handleTransferOwnership = async (toUserId: string) => {
@@ -305,12 +347,131 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                 <p className="text-xs text-stone-400 whitespace-pre-line">{detail.group.description}</p>
               )}
 
+              {/* Discoverability — owner / admin only */}
+              {canManage && (
+                <div
+                  className="space-y-2 bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,20%)] rounded-lg p-3"
+                  data-testid="group-discoverable-section"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">
+                        Discoverable
+                      </h3>
+                      <p className="text-[11px] text-stone-500 mt-1">
+                        Listed in Discover so anyone can ask to join. You'll
+                        review each request below.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={!!detail.group.discoverable}
+                      disabled={discoverableToggling}
+                      onClick={() => void handleToggleDiscoverable()}
+                      className={
+                        "shrink-0 relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50 " +
+                        (detail.group.discoverable
+                          ? "bg-amber-500"
+                          : "bg-stone-700")
+                      }
+                      data-testid="group-discoverable-toggle"
+                    >
+                      <span
+                        className={
+                          "inline-block h-5 w-5 transform rounded-full bg-white transition-transform " +
+                          (detail.group.discoverable
+                            ? "translate-x-5"
+                            : "translate-x-1")
+                        }
+                      />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Pending join requests — owner / admin only */}
+              {canManage && detail.joinRequests.length > 0 && (
+                <div className="space-y-2" data-testid="join-requests-section">
+                  <h3 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">
+                    Requests to join ({detail.joinRequests.length})
+                  </h3>
+                  <div className="space-y-1.5">
+                    {detail.joinRequests.map((r) => {
+                      const label =
+                        r.display_name ?? r.email ?? r.user_id;
+                      const initial = (label ?? "?")
+                        .slice(0, 1)
+                        .toUpperCase();
+                      const busy = decidingRequestId === r.id;
+                      return (
+                        <div
+                          key={r.id}
+                          className="flex items-center justify-between gap-2 bg-[hsl(22,15%,12%)] border border-amber-500/20 rounded-lg px-3 py-2"
+                          data-testid={`join-request-row-${r.id}`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            {r.avatar_url ? (
+                              <img
+                                src={r.avatar_url}
+                                alt=""
+                                className="w-7 h-7 rounded-full"
+                              />
+                            ) : (
+                              <div className="w-7 h-7 rounded-full bg-stone-700 flex items-center justify-center text-[10px] text-stone-300">
+                                {initial}
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="text-xs text-stone-200 truncate">
+                                {label}
+                              </div>
+                              {r.message && (
+                                <div className="text-[10px] text-stone-500 truncate">
+                                  "{r.message}"
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              disabled={busy}
+                              onClick={() =>
+                                void handleApproveRequest(r.id)
+                              }
+                              className="text-[10px] font-bold uppercase tracking-wider text-stone-900 px-2.5 py-1.5 rounded-md disabled:opacity-50"
+                              style={{
+                                background:
+                                  "linear-gradient(135deg, #d4870c, #f0a832)",
+                              }}
+                              data-testid={`join-request-approve-${r.id}`}
+                            >
+                              {busy ? "…" : "Approve"}
+                            </button>
+                            <button
+                              disabled={busy}
+                              onClick={() =>
+                                void handleDeclineRequest(r.id)
+                              }
+                              className="text-[10px] font-bold uppercase tracking-wider text-red-400 hover:text-red-300 px-2 py-1 disabled:opacity-50"
+                              data-testid={`join-request-decline-${r.id}`}
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Invites — owner / admin only */}
               {canManage && (
                 <div className="space-y-2">
                   <h3 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">Invite</h3>
                   <div className="flex gap-1 text-[10px] uppercase tracking-wider" data-testid="invite-mode-tabs">
-                    {(["link", "email", "username"] as const).map((m) => (
+                    {(["link", "username"] as const).map((m) => (
                       <button
                         key={m}
                         onClick={() => setInviteMode(m)}
@@ -327,16 +488,6 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                     ))}
                   </div>
                   <div className="flex gap-2">
-                    {inviteMode === "email" && (
-                      <input
-                        type="email"
-                        value={inviteEmail}
-                        onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder="email@example.com"
-                        className="flex-1 px-3 py-2 rounded-lg bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,22%)] text-xs text-stone-100"
-                        data-testid="invite-email-input"
-                      />
-                    )}
                     {inviteMode === "username" && (
                       <input
                         type="text"
@@ -358,7 +509,6 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                     <button
                       disabled={
                         creatingInvite ||
-                        (inviteMode === "email" && !inviteEmail.trim()) ||
                         (inviteMode === "username" && !inviteUsername.trim())
                       }
                       onClick={() => void handleCreateInvite()}
@@ -374,11 +524,9 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                     </button>
                   </div>
                   <p className="text-[10px] text-stone-500">
-                    {inviteMode === "email"
-                      ? "Auto-accepts when that user signs in with the matching email."
-                      : inviteMode === "username"
-                        ? "Sent to that user's invite inbox. They accept or decline."
-                        : "Share the link — caller must be signed in to accept."}
+                    {inviteMode === "username"
+                      ? "Sent to that user's invite inbox. They accept or decline."
+                      : "Share the link — caller must be signed in to accept."}
                   </p>
 
                   {detail.invites.length > 0 && (

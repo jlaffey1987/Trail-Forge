@@ -26,6 +26,7 @@ const UpdateGroupBody = z.object({
   name: z.string().trim().min(2).max(80).optional(),
   description: z.string().trim().max(2000).nullable().optional(),
   cover_photo_key: z.string().max(512).nullable().optional(),
+  discoverable: z.boolean().optional(),
 });
 
 const CreateInviteBody = z
@@ -37,6 +38,10 @@ const CreateInviteBody = z
     (v) => !(v.email && v.username),
     { message: "Provide email or username, not both" },
   );
+
+const CreateJoinRequestBody = z.object({
+  message: z.string().trim().max(500).optional(),
+});
 
 const ShareTrailBody = z.object({
   group_ids: z.array(z.string().uuid()).min(0).max(50),
@@ -215,7 +220,153 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
-// GET group detail (members + invites + shared trail count)
+// LIST discoverable groups — surfaces every group with `discoverable = true`
+// to any signed-in caller so they can ask to join from the Discover screen.
+//
+// Returns:
+//   * id, name, description, cover_photo_key, created_at
+//   * member_count
+//   * owner = { user_id, display_name, avatar_url }
+//   * my_status: "pending" | "declined" | "none"   (caller's most-recent
+//     join request status; groups the caller already belongs to are filtered
+//     out of the response so the discover list focuses on joinable groups)
+//
+// "Nearby" sorting is aspirational (groups don't carry geo today) — for v1
+// we sort by recency (`created_at desc`).
+//
+// IMPORTANT: this route MUST be registered before `/groups/:groupId` so
+// Express matches the literal "discoverable" path segment first; otherwise
+// the catch-all UUID handler would shadow it and return 400.
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/groups/discoverable",
+  requireAuth(async (req, res, userId) => {
+    const supa = getSupabaseAdmin();
+    const { data: groupsRows, error: gErr } = await supa
+      .from("groups")
+      .select("id, name, description, cover_photo_key, owner_user_id, created_at")
+      .eq("discoverable", true)
+      .order("created_at", { ascending: false })
+      .limit(100);
+    if (gErr) {
+      if (isMissingTableError(gErr) || gErr.code === "42703") {
+        // Migration not applied yet — surface an empty list rather than 500.
+        res.json({ items: [] });
+        return;
+      }
+      req.log.error({ err: gErr }, "list discoverable groups failed");
+      res.status(500).json({ error: "Failed to load discoverable groups" });
+      return;
+    }
+    interface GroupRow {
+      id: string;
+      name: string;
+      description: string | null;
+      cover_photo_key: string | null;
+      owner_user_id: string;
+      created_at: string;
+    }
+    const groups = (groupsRows ?? []) as GroupRow[];
+    if (groups.length === 0) {
+      res.json({ items: [] });
+      return;
+    }
+    const groupIds = groups.map((g) => g.id);
+    const ownerIds = [...new Set(groups.map((g) => g.owner_user_id))];
+
+    const [membersRes, myMemRes, myReqRes, ownersRes] = await Promise.all([
+      supa
+        .from("group_members")
+        .select("group_id, user_id")
+        .in("group_id", groupIds),
+      supa
+        .from("group_members")
+        .select("group_id")
+        .in("group_id", groupIds)
+        .eq("user_id", userId),
+      supa
+        .from("group_join_requests")
+        .select("group_id, status, created_at")
+        .in("group_id", groupIds)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false }),
+      supa
+        .from("users")
+        .select("id, display_name, avatar_url")
+        .in("id", ownerIds),
+    ]);
+
+    interface MemberCountRow {
+      group_id: string;
+      user_id: string;
+    }
+    const memberCount = new Map<string, number>();
+    for (const m of (membersRes.data ?? []) as MemberCountRow[]) {
+      memberCount.set(m.group_id, (memberCount.get(m.group_id) ?? 0) + 1);
+    }
+
+    const myGroups = new Set<string>(
+      ((myMemRes.data ?? []) as Array<{ group_id: string }>).map(
+        (m) => m.group_id,
+      ),
+    );
+
+    interface JoinReqRow {
+      group_id: string;
+      status: string;
+      created_at: string;
+    }
+    // Most-recent request per group (rows are pre-sorted desc).
+    const myReqStatus = new Map<string, string>();
+    if (myReqRes.error && !isMissingTableError(myReqRes.error)) {
+      req.log.warn({ err: myReqRes.error }, "load my join requests failed");
+    } else {
+      for (const r of (myReqRes.data ?? []) as JoinReqRow[]) {
+        if (!myReqStatus.has(r.group_id)) myReqStatus.set(r.group_id, r.status);
+      }
+    }
+
+    interface OwnerRow {
+      id: string;
+      display_name: string | null;
+      avatar_url: string | null;
+    }
+    const owners = new Map<string, OwnerRow>();
+    for (const u of (ownersRes.data ?? []) as OwnerRow[]) owners.set(u.id, u);
+
+    const items = groups
+      .filter((g) => !myGroups.has(g.id))
+      .map((g) => {
+        const o = owners.get(g.owner_user_id);
+        const status = myReqStatus.get(g.id);
+        const my_status: "pending" | "declined" | "none" =
+          status === "pending"
+            ? "pending"
+            : status === "declined"
+              ? "declined"
+              : "none";
+        return {
+          id: g.id,
+          name: g.name,
+          description: g.description,
+          cover_photo_key: g.cover_photo_key,
+          created_at: g.created_at,
+          member_count: memberCount.get(g.id) ?? 0,
+          owner: {
+            user_id: g.owner_user_id,
+            display_name: o?.display_name ?? null,
+            avatar_url: o?.avatar_url ?? null,
+          },
+          my_status,
+        };
+      });
+    res.json({ items });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// GET group detail (members + invites + join requests + shared trail count)
 // ---------------------------------------------------------------------------
 
 router.get(
@@ -278,6 +429,7 @@ router.get(
     });
 
     let invites: Array<Record<string, unknown>> = [];
+    let joinRequests: Array<Record<string, unknown>> = [];
     if (callerRole === "owner" || callerRole === "admin") {
       const { data: inv } = await supa
         .from("group_invites")
@@ -285,6 +437,54 @@ router.get(
         .eq("group_id", groupId)
         .order("created_at", { ascending: false });
       invites = (inv ?? []) as Array<Record<string, unknown>>;
+
+      // Pending join requests with requester profile info, so the dialog
+      // can show "<name> wants to join" alongside Approve / Decline.
+      const { data: jr, error: jrErr } = await supa
+        .from("group_join_requests")
+        .select(
+          "id, user_id, status, message, created_at, users(id, display_name, email, avatar_url)",
+        )
+        .eq("group_id", groupId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false });
+      if (jrErr && !isMissingTableError(jrErr)) {
+        req.log.warn({ err: jrErr }, "load join requests failed");
+      }
+      interface JoinRequestRow {
+        id: string;
+        user_id: string;
+        status: string;
+        message: string | null;
+        created_at: string;
+        users:
+          | {
+              id: string;
+              display_name: string | null;
+              email: string | null;
+              avatar_url: string | null;
+            }
+          | {
+              id: string;
+              display_name: string | null;
+              email: string | null;
+              avatar_url: string | null;
+            }[]
+          | null;
+      }
+      joinRequests = ((jr ?? []) as JoinRequestRow[]).map((r) => {
+        const u = Array.isArray(r.users) ? r.users[0] : r.users;
+        return {
+          id: r.id,
+          user_id: r.user_id,
+          status: r.status,
+          message: r.message,
+          created_at: r.created_at,
+          display_name: u?.display_name ?? null,
+          email: u?.email ?? null,
+          avatar_url: u?.avatar_url ?? null,
+        };
+      });
     }
 
     const { count: sharedCount } = await supa
@@ -297,6 +497,7 @@ router.get(
       callerRole,
       members: memberItems,
       invites,
+      joinRequests,
       sharedTrailCount: sharedCount ?? 0,
     });
   }),
@@ -1617,6 +1818,248 @@ router.post(
       if (!rpcErr) accepted += 1;
     }
     res.json({ accepted });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// CREATE join request — caller asks to join a discoverable group.
+//
+// Rules:
+//   * Group must exist and be `discoverable = true`.
+//   * Caller must not already be a member.
+//   * Caller must not already have a pending request (idempotent — returns
+//     the existing pending row instead of erroring).
+//   * Owners / admins receive these via the GroupDetail dialog and can
+//     Approve (adds caller to group_members + status='approved') or Decline
+//     (status='declined') them.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/groups/:groupId/join-requests",
+  requireAuth(async (req, res, userId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const parsed = CreateJoinRequestBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid join request payload" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: group, error: gErr } = await supa
+      .from("groups")
+      .select("id, discoverable")
+      .eq("id", idParse.data)
+      .maybeSingle();
+    if (gErr || !group) {
+      res.status(404).json({ error: "Group not found" });
+      return;
+    }
+    if (!(group as { discoverable?: boolean }).discoverable) {
+      res
+        .status(403)
+        .json({ error: "This group is not accepting join requests" });
+      return;
+    }
+    // Already a member?
+    const ms = await fetchMembership(idParse.data, userId);
+    if ("error" in ms && ms.error) {
+      res.status(500).json({ error: "Failed to check membership" });
+      return;
+    }
+    if ("member" in ms) {
+      res.status(409).json({ error: "Already a member" });
+      return;
+    }
+    // Already pending? Return the existing row so callers can be idempotent.
+    const { data: existing, error: existErr } = await supa
+      .from("group_join_requests")
+      .select("id, status, created_at, message")
+      .eq("group_id", idParse.data)
+      .eq("user_id", userId)
+      .eq("status", "pending")
+      .maybeSingle();
+    if (existErr && !isMissingTableError(existErr)) {
+      req.log.error({ err: existErr }, "lookup existing join request failed");
+      res.status(500).json({ error: "Failed to create join request" });
+      return;
+    }
+    if (existing) {
+      res.json(existing);
+      return;
+    }
+    // Best-effort: ensure a `users` row for the requester so the FK holds.
+    await supa
+      .from("users")
+      .upsert({ id: userId }, { onConflict: "id", ignoreDuplicates: true });
+    const { data, error } = await supa
+      .from("group_join_requests")
+      .insert({
+        group_id: idParse.data,
+        user_id: userId,
+        message: parsed.data.message ?? null,
+        status: "pending",
+      })
+      .select("id, status, created_at, message")
+      .single();
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.status(503).json({
+          error:
+            "Discoverable groups not yet provisioned — apply migration 0013_group_discoverable_join_requests.sql",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "create join request failed");
+      res.status(500).json({ error: "Failed to create join request" });
+      return;
+    }
+    res.json(data);
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// APPROVE join request — owner / admin only. Adds the requester to
+// group_members and marks the request as approved.
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/groups/:groupId/join-requests/:requestId/approve",
+  requireAuth(async (req, res, callerId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const requestId = req.params.requestId;
+    const callerMs = await fetchMembership(idParse.data, callerId);
+    if ("notMember" in callerMs) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in callerMs && callerMs.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    if (
+      callerMs.member.role !== "owner" &&
+      callerMs.member.role !== "admin"
+    ) {
+      res
+        .status(403)
+        .json({ error: "Only owners or admins can approve join requests" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: jr, error: jrErr } = await supa
+      .from("group_join_requests")
+      .select("id, group_id, user_id, status")
+      .eq("id", requestId)
+      .eq("group_id", idParse.data)
+      .maybeSingle();
+    if (jrErr || !jr) {
+      res.status(404).json({ error: "Join request not found" });
+      return;
+    }
+    if (jr.status !== "pending") {
+      res.status(409).json({ error: "Join request is not pending" });
+      return;
+    }
+    // Add as member (idempotent if a stale membership already exists — the
+    // PK is (group_id, user_id) so a duplicate insert would error). We
+    // upsert here so accidental races resolve cleanly.
+    const { error: memErr } = await supa
+      .from("group_members")
+      .upsert(
+        { group_id: idParse.data, user_id: jr.user_id, role: "member" },
+        { onConflict: "group_id,user_id", ignoreDuplicates: true },
+      );
+    if (memErr) {
+      req.log.error({ err: memErr }, "approve add member failed");
+      res.status(500).json({ error: "Failed to approve request" });
+      return;
+    }
+    const { error: upErr } = await supa
+      .from("group_join_requests")
+      .update({
+        status: "approved",
+        decided_at: new Date().toISOString(),
+        decided_by_user_id: callerId,
+      })
+      .eq("id", requestId);
+    if (upErr) {
+      req.log.error({ err: upErr }, "approve update status failed");
+      res.status(500).json({ error: "Failed to approve request" });
+      return;
+    }
+    res.json({ ok: true });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// DECLINE join request — owner / admin only. Marks the request as declined.
+// The requester can re-request later (the unique index only constrains
+// pending rows).
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/groups/:groupId/join-requests/:requestId/decline",
+  requireAuth(async (req, res, callerId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const requestId = req.params.requestId;
+    const callerMs = await fetchMembership(idParse.data, callerId);
+    if ("notMember" in callerMs) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in callerMs && callerMs.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    if (
+      callerMs.member.role !== "owner" &&
+      callerMs.member.role !== "admin"
+    ) {
+      res
+        .status(403)
+        .json({ error: "Only owners or admins can decline join requests" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: jr, error: jrErr } = await supa
+      .from("group_join_requests")
+      .select("id, status")
+      .eq("id", requestId)
+      .eq("group_id", idParse.data)
+      .maybeSingle();
+    if (jrErr || !jr) {
+      res.status(404).json({ error: "Join request not found" });
+      return;
+    }
+    if (jr.status !== "pending") {
+      res.status(409).json({ error: "Join request is not pending" });
+      return;
+    }
+    const { error: upErr } = await supa
+      .from("group_join_requests")
+      .update({
+        status: "declined",
+        decided_at: new Date().toISOString(),
+        decided_by_user_id: callerId,
+      })
+      .eq("id", requestId);
+    if (upErr) {
+      req.log.error({ err: upErr }, "decline update status failed");
+      res.status(500).json({ error: "Failed to decline request" });
+      return;
+    }
+    res.json({ ok: true });
   }),
 );
 

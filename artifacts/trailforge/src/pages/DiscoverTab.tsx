@@ -8,6 +8,10 @@ import {
 import {
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
   fetchGroupTrails,
+  groupCoverPhotoUrl,
+  listDiscoverableGroups,
+  requestToJoinGroup,
+  type DiscoverableGroup,
   type SharedTrail,
 } from "@/lib/groups";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
@@ -56,9 +60,46 @@ export default function DiscoverTab() {
   const [search, setSearch] = useState("");
   const [activityCounts, setActivityCounts] = useState<Record<string, TrailActivityCounts>>({});
   const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
+  const [discoverableGroups, setDiscoverableGroups] = useState<
+    DiscoverableGroup[]
+  >([]);
+  // Tracks which group's "Request to join" button is mid-flight so we can
+  // disable just that row (and not the whole list) while waiting for the
+  // server response.
+  const [joiningGroupId, setJoiningGroupId] = useState<string | null>(null);
+  const [joinError, setJoinError] = useState<string | null>(null);
+
+  const refreshDiscoverableGroups = useCallback(async () => {
+    if (!isSignedIn) {
+      setDiscoverableGroups([]);
+      return;
+    }
+    const items = await listDiscoverableGroups();
+    setDiscoverableGroups(items);
+  }, [isSignedIn]);
+
+  const handleRequestJoin = async (group: DiscoverableGroup) => {
+    setJoinError(null);
+    setJoiningGroupId(group.id);
+    const res = await requestToJoinGroup(group.id);
+    setJoiningGroupId(null);
+    if ("error" in res) {
+      setJoinError(res.error || "Could not send request");
+      return;
+    }
+    // Optimistically mark this group as pending so the CTA flips immediately,
+    // then refetch so the (potentially server-corrected) state wins.
+    setDiscoverableGroups((cur) =>
+      cur.map((g) =>
+        g.id === group.id ? { ...g, my_status: "pending" as const } : g,
+      ),
+    );
+    void refreshDiscoverableGroups();
+  };
 
   const refresh = useCallback(() => {
     setLoading(true);
+    void refreshDiscoverableGroups();
     void Promise.all([fetchCommunityTrails(), fetchGroupTrails()]).then(
       ([community, groupTrails]) => {
         // Merge: group-shared trails go first so the user sees private picks
@@ -84,7 +125,7 @@ export default function DiscoverTab() {
         }
       },
     );
-  }, []);
+  }, [refreshDiscoverableGroups]);
 
   useEffect(() => {
     refresh();
@@ -217,6 +258,107 @@ export default function DiscoverTab() {
           </button>
         ))}
       </div>
+
+      {/* Discoverable groups — show signed-in users any group they could ask
+          to join. Sits above the trail feed so it's the first thing they see
+          on Discover. Hidden when there's nothing to join. */}
+      {isSignedIn && discoverableGroups.length > 0 && (
+        <div className="px-4 mb-4" data-testid="discoverable-groups-section">
+          <div className="flex items-baseline justify-between mb-2">
+            <h2
+              className="text-xs font-bold uppercase tracking-widest text-amber-400"
+              style={{ letterSpacing: "0.12em" }}
+            >
+              Groups to Join
+            </h2>
+            <span className="text-[10px] text-stone-500">
+              {discoverableGroups.length} open
+            </span>
+          </div>
+          {joinError && (
+            <p
+              className="text-[11px] text-red-300 mb-2"
+              data-testid="discoverable-groups-error"
+            >
+              {joinError}
+            </p>
+          )}
+          <div className="space-y-2">
+            {discoverableGroups.map((g) => {
+              const cover = groupCoverPhotoUrl(g.cover_photo_key);
+              const ownerLabel = g.owner.display_name ?? "Unknown owner";
+              const isPending = g.my_status === "pending";
+              const isBusy = joiningGroupId === g.id;
+              return (
+                <div
+                  key={g.id}
+                  className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden"
+                  data-testid={`discoverable-group-${g.id}`}
+                >
+                  <div className="flex items-stretch gap-3 p-3">
+                    {cover ? (
+                      <img
+                        src={cover}
+                        alt=""
+                        className="w-16 h-16 rounded-lg object-cover shrink-0"
+                      />
+                    ) : (
+                      <div className="w-16 h-16 rounded-lg bg-gradient-to-br from-amber-900/40 to-stone-900 flex items-center justify-center shrink-0">
+                        <span className="text-amber-400 text-lg font-bold">
+                          {g.name.slice(0, 1).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0 flex flex-col">
+                      <h3 className="text-sm font-bold text-stone-100 truncate">
+                        {g.name}
+                      </h3>
+                      <p className="text-[11px] text-stone-500 truncate">
+                        by {ownerLabel} ·{" "}
+                        {g.member_count} member
+                        {g.member_count === 1 ? "" : "s"}
+                      </p>
+                      {g.description && (
+                        <p className="text-[11px] text-stone-400 mt-1 line-clamp-2">
+                          {g.description}
+                        </p>
+                      )}
+                      <div className="mt-auto pt-2">
+                        <button
+                          type="button"
+                          disabled={isBusy || isPending}
+                          onClick={() => void handleRequestJoin(g)}
+                          className={
+                            "w-full py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors disabled:cursor-not-allowed " +
+                            (isPending
+                              ? "bg-stone-800 text-stone-400 border border-stone-700"
+                              : "text-stone-900 disabled:opacity-50")
+                          }
+                          style={
+                            isPending
+                              ? undefined
+                              : {
+                                  background:
+                                    "linear-gradient(135deg, #d4870c, #f0a832)",
+                                }
+                          }
+                          data-testid={`discoverable-group-join-${g.id}`}
+                        >
+                          {isPending
+                            ? "Request pending"
+                            : isBusy
+                              ? "Sending…"
+                              : "Request to join"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Loading */}
       {loading && (

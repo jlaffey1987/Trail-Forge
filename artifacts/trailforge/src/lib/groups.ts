@@ -7,8 +7,44 @@ export interface Group {
   cover_photo_key: string | null;
   owner_user_id: string;
   created_at: string;
+  discoverable?: boolean;
   role?: "owner" | "admin" | "member";
   joined_at?: string;
+}
+
+/**
+ * A pending join request for a group, surfaced to owners/admins so they can
+ * Approve / Decline from the GroupDetailDialog.
+ */
+export interface GroupJoinRequest {
+  id: string;
+  user_id: string;
+  status: "pending" | "approved" | "declined";
+  message: string | null;
+  created_at: string;
+  display_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+}
+
+/**
+ * Row returned from `GET /api/groups/discoverable` — a group anybody can ask
+ * to join, plus a hint about whether the caller already has a pending or
+ * declined request so the UI can adjust its CTA accordingly.
+ */
+export interface DiscoverableGroup {
+  id: string;
+  name: string;
+  description: string | null;
+  cover_photo_key: string | null;
+  created_at: string;
+  member_count: number;
+  owner: {
+    user_id: string;
+    display_name: string | null;
+    avatar_url: string | null;
+  };
+  my_status: "pending" | "declined" | "none";
 }
 
 export interface GroupMember {
@@ -46,6 +82,8 @@ export interface GroupDetail {
   callerRole: "owner" | "admin" | "member";
   members: GroupMember[];
   invites: GroupInvite[];
+  /** Pending join requests — only populated for owners and admins. */
+  joinRequests: GroupJoinRequest[];
   sharedTrailCount: number;
 }
 
@@ -149,12 +187,85 @@ export async function fetchGroupDetail(groupId: string): Promise<GroupDetail | n
 
 export async function updateGroup(
   groupId: string,
-  patch: { name?: string; description?: string | null },
+  patch: {
+    name?: string;
+    description?: string | null;
+    discoverable?: boolean;
+  },
 ): Promise<Group | null> {
   return jsonFetch<Group>(`/api/groups/${groupId}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Discoverable groups & join requests
+// ---------------------------------------------------------------------------
+
+/** List groups the caller can ask to join (excludes their own memberships). */
+export async function listDiscoverableGroups(): Promise<DiscoverableGroup[]> {
+  const res = await jsonFetch<{ items: DiscoverableGroup[] }>(
+    "/api/groups/discoverable",
+  );
+  return res?.items ?? [];
+}
+
+/**
+ * Create (or fetch the existing) pending join request for the caller. Returns
+ * `{ ok: true }` when accepted by the server, otherwise an `error` string.
+ */
+export async function requestToJoinGroup(
+  groupId: string,
+  message?: string | null,
+): Promise<{ ok: true } | { error: string; status?: number }> {
+  try {
+    const res = await fetch(`/api/groups/${groupId}/join-requests`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(message ? { message } : {}),
+    });
+    if (!res.ok) {
+      let msg = "";
+      try {
+        const j = (await res.json()) as { error?: string };
+        msg = j.error ?? "";
+      } catch {
+        // ignore
+      }
+      return { error: msg || `HTTP ${res.status}`, status: res.status };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error("requestToJoinGroup error", err);
+    return { error: "network" };
+  }
+}
+
+/** Owner/admin: approve a pending join request, adding the user to the group. */
+export async function approveJoinRequest(
+  groupId: string,
+  requestId: string,
+): Promise<boolean> {
+  const res = await jsonFetch<{ ok: boolean }>(
+    `/api/groups/${groupId}/join-requests/${requestId}/approve`,
+    { method: "POST" },
+  );
+  if (res?.ok) emitMembershipChanged();
+  return !!res?.ok;
+}
+
+/** Owner/admin: decline a pending join request. */
+export async function declineJoinRequest(
+  groupId: string,
+  requestId: string,
+): Promise<boolean> {
+  const res = await jsonFetch<{ ok: boolean }>(
+    `/api/groups/${groupId}/join-requests/${requestId}/decline`,
+    { method: "POST" },
+  );
+  return !!res?.ok;
 }
 
 // ---------------------------------------------------------------------------
