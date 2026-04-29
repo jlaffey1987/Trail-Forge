@@ -95,6 +95,21 @@ vi.mock("web-push", () => {
   };
 });
 
+// `@workspace/integrations-anthropic-ai` throws at module load when the
+// AI_INTEGRATIONS_ANTHROPIC_* env vars are not set. We don't exercise any
+// AI call in unit tests — but we do mount routes that import the package,
+// so we stub it out here.
+vi.mock("@workspace/integrations-anthropic-ai", () => ({
+  anthropic: {
+    messages: {
+      create: vi.fn(async () => ({ content: [{ type: "text", text: "" }] })),
+    },
+  },
+  batchProcess: vi.fn(),
+  batchProcessWithSSE: vi.fn(),
+  isRateLimitError: () => false,
+}));
+
 vi.mock("../../src/lib/objectStorage", () => {
   class ObjectNotFoundError extends Error {
     constructor() {

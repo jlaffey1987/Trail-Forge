@@ -116,6 +116,175 @@ router.get("/admin/whoami", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Self-service admin management — list / grant / revoke rows in
+// `system_admins`. These endpoints only operate on the DB-backed list; the
+// `SYSTEM_ADMIN_USER_IDS` env var continues to act as a parallel bootstrap
+// path and is surfaced read-only on GET so the UI can warn about it.
+//
+// The "last admin can't revoke themselves" rule guards against a single
+// admin accidentally locking the team out of the dashboard. We only count
+// rows in `system_admins` for that check — env-var admins are an
+// implementation detail of the bootstrap path.
+// ---------------------------------------------------------------------------
+function parseEnvAdmins(): string[] {
+  return (process.env.SYSTEM_ADMIN_USER_IDS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+router.get(
+  "/admin/admins",
+  requireAdmin(async (_req, res) => {
+    const supa = getSupabaseAdmin();
+    // NOTE: We deliberately do NOT use a PostgREST embedded `users(...)`
+    // join here. `system_admins.user_id` has no foreign key to
+    // `users.id` (see migration 0007 — the column is just `text PRIMARY
+    // KEY`), so an embedded select would fail with a "relationship not
+    // found" error in production. Fetch the rows, then enrich with a
+    // bounded second query.
+    const { data: adminRows, error } = await supa
+      .from("system_admins")
+      .select("user_id, granted_at, granted_by, note")
+      .order("granted_at", { ascending: true });
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.json({
+          items: [],
+          envAdmins: parseEnvAdmins(),
+          note: "system_admins table missing — apply migration 0007",
+        });
+        return;
+      }
+      res.status(500).json({ error: "Failed to load admins" });
+      return;
+    }
+    const rows = (adminRows ?? []) as Array<{
+      user_id: string;
+      granted_at: string;
+      granted_by: string | null;
+      note: string | null;
+    }>;
+    const userIds = rows.map((r) => r.user_id).filter(Boolean);
+    type UserMeta = {
+      id: string;
+      email: string | null;
+      display_name: string | null;
+      avatar_url: string | null;
+    };
+    const userById = new Map<string, UserMeta>();
+    if (userIds.length > 0) {
+      const { data: usersData } = await supa
+        .from("users")
+        .select("id, email, display_name, avatar_url")
+        .in("id", userIds);
+      for (const u of (usersData ?? []) as UserMeta[]) {
+        userById.set(u.id, u);
+      }
+    }
+    const items = rows.map((r) => ({
+      ...r,
+      users: userById.get(r.user_id) ?? null,
+    }));
+    res.json({ items, envAdmins: parseEnvAdmins() });
+  }),
+);
+
+const NewAdminBody = z.object({
+  userId: z.string().trim().min(1).max(200),
+  note: z.string().max(500).optional().nullable(),
+});
+
+router.post(
+  "/admin/admins",
+  requireAdmin(async (req, res, callerUserId) => {
+    const parsed = NewAdminBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid admin body" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: existing, error: lookupErr } = await supa
+      .from("system_admins")
+      .select("user_id")
+      .eq("user_id", parsed.data.userId)
+      .maybeSingle();
+    if (lookupErr && isMissingTableError(lookupErr)) {
+      res.status(503).json({ error: "system_admins table missing — apply migration 0007" });
+      return;
+    }
+    if (existing) {
+      res.status(409).json({ error: "User is already an admin" });
+      return;
+    }
+    const { data, error } = await supa
+      .from("system_admins")
+      .insert({
+        user_id: parsed.data.userId,
+        granted_by: callerUserId,
+        note: parsed.data.note ?? null,
+      })
+      .select()
+      .single();
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.status(503).json({ error: "system_admins table missing — apply migration 0007" });
+        return;
+      }
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json(data);
+  }),
+);
+
+router.delete(
+  "/admin/admins/:userId",
+  requireAdmin(async (req, res, callerUserId) => {
+    const targetUserId = String(req.params.userId ?? "").trim();
+    if (!targetUserId) {
+      res.status(400).json({ error: "Missing user id" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: rows, error: listErr } = await supa
+      .from("system_admins")
+      .select("user_id");
+    if (listErr) {
+      if (isMissingTableError(listErr)) {
+        res.status(503).json({ error: "system_admins table missing — apply migration 0007" });
+        return;
+      }
+      res.status(500).json({ error: "Failed to load admins" });
+      return;
+    }
+    const allAdmins = (rows ?? []) as Array<{ user_id: string }>;
+    const targetIsAdmin = allAdmins.some((r) => r.user_id === targetUserId);
+    if (!targetIsAdmin) {
+      // Idempotent — already gone.
+      res.json({ ok: true, removed: false });
+      return;
+    }
+    if (targetUserId === callerUserId && allAdmins.length <= 1) {
+      res.status(409).json({
+        error:
+          "You are the only admin — add another admin before revoking your own access.",
+      });
+      return;
+    }
+    const { error } = await supa
+      .from("system_admins")
+      .delete()
+      .eq("user_id", targetUserId);
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json({ ok: true, removed: true });
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // POST /api/ai/chat — grounded chat for the AI tab
 // ---------------------------------------------------------------------------
 const ChatBody = z.object({

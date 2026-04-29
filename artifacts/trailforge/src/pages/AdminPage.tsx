@@ -31,18 +31,35 @@ interface ForumSource {
   last_scanned_at: string | null;
 }
 
+interface AdminEntry {
+  user_id: string;
+  granted_at: string;
+  granted_by: string | null;
+  note: string | null;
+  users: {
+    id: string;
+    email: string | null;
+    display_name: string | null;
+    avatar_url: string | null;
+  } | null;
+}
+
 type StatusFilter = "pending" | "approved" | "rejected" | "merged";
 
 export default function AdminPage() {
   const { isSignedIn } = useCurrentUser();
   const [, setLocation] = useLocation();
   const [adminCheck, setAdminCheck] = useState<"loading" | "yes" | "no">("loading");
+  const [callerUserId, setCallerUserId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("pending");
   const [items, setItems] = useState<Discovery[]>([]);
   const [forumSources, setForumSources] = useState<ForumSource[]>([]);
+  const [admins, setAdmins] = useState<AdminEntry[]>([]);
+  const [envAdmins, setEnvAdmins] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [newSource, setNewSource] = useState({ label: "", url: "", kind: "html" });
+  const [newAdmin, setNewAdmin] = useState({ userId: "", note: "" });
   const [scanUrl, setScanUrl] = useState("");
   const [harvestSource, setHarvestSource] = useState<"tet" | "act">("tet");
   const [harvestJson, setHarvestJson] = useState("");
@@ -52,9 +69,10 @@ export default function AdminPage() {
     let cancelled = false;
     fetch("/api/admin/whoami", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((j: { isAdmin: boolean } | null) => {
+      .then((j: { isAdmin: boolean; userId?: string } | null) => {
         if (cancelled) return;
         setAdminCheck(j?.isAdmin ? "yes" : "no");
+        setCallerUserId(j?.userId ?? null);
       })
       .catch(() => !cancelled && setAdminCheck("no"));
     return () => {
@@ -81,12 +99,26 @@ export default function AdminPage() {
     if (j.note) setInfo(j.note);
   }, []);
 
+  const loadAdmins = useCallback(async () => {
+    const r = await fetch("/api/admin/admins", { credentials: "include" });
+    if (!r.ok) return;
+    const j = (await r.json()) as {
+      items?: AdminEntry[];
+      envAdmins?: string[];
+      note?: string;
+    };
+    setAdmins(j.items ?? []);
+    setEnvAdmins(j.envAdmins ?? []);
+    if (j.note) setInfo(j.note);
+  }, []);
+
   useEffect(() => {
     if (adminCheck === "yes") {
       loadDiscoveries();
       loadForumSources();
+      loadAdmins();
     }
-  }, [adminCheck, loadDiscoveries, loadForumSources]);
+  }, [adminCheck, loadDiscoveries, loadForumSources, loadAdmins]);
 
   if (adminCheck === "loading") {
     return (
@@ -268,6 +300,54 @@ export default function AdminPage() {
     loadDiscoveries();
   };
 
+  const handleAddAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const userId = newAdmin.userId.trim();
+    if (!userId) return;
+    setBusy("new-admin");
+    setInfo(null);
+    const r = await fetch("/api/admin/admins", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        note: newAdmin.note.trim() || null,
+      }),
+    });
+    setBusy(null);
+    if (!r.ok) {
+      const j = (await r.json().catch(() => null)) as { error?: string } | null;
+      setInfo(`Add admin failed: ${j?.error ?? r.status}`);
+      return;
+    }
+    setNewAdmin({ userId: "", note: "" });
+    setInfo(`Granted admin to ${userId}.`);
+    loadAdmins();
+  };
+
+  const handleRevokeAdmin = async (userId: string) => {
+    const isSelf = callerUserId != null && userId === callerUserId;
+    const confirmText = isSelf
+      ? "Revoke YOUR OWN admin access? You'll lose access to this dashboard immediately."
+      : `Revoke admin access from ${userId}?`;
+    if (!window.confirm(confirmText)) return;
+    setBusy(`admin-${userId}`);
+    setInfo(null);
+    const r = await fetch(`/api/admin/admins/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    setBusy(null);
+    if (!r.ok) {
+      const j = (await r.json().catch(() => null)) as { error?: string } | null;
+      setInfo(`Revoke failed: ${j?.error ?? r.status}`);
+      return;
+    }
+    setInfo(`Revoked admin from ${userId}.`);
+    loadAdmins();
+  };
+
   const handleBackfill = async () => {
     setBusy("backfill");
     setInfo(null);
@@ -386,6 +466,130 @@ export default function AdminPage() {
             {busy === "backfill" ? "Grading…" : "Run grade backfill"}
           </button>
         </div>
+      </section>
+
+      <section
+        className="mb-6 bg-stone-900 border border-stone-800 rounded-xl p-4"
+        data-testid="admin-admins-section"
+      >
+        <h2 className="text-sm font-bold text-amber-400 uppercase mb-3">
+          Manage admins
+        </h2>
+        <p className="text-xs text-stone-500 mb-3">
+          Grant or revoke dashboard access for other Clerk users. Paste their
+          Clerk user id (e.g. <code className="text-amber-300">user_2abc…</code>).
+          The last remaining admin can&apos;t revoke themselves.
+        </p>
+        <form
+          onSubmit={handleAddAdmin}
+          className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3"
+        >
+          <input
+            value={newAdmin.userId}
+            onChange={(e) =>
+              setNewAdmin((s) => ({ ...s, userId: e.target.value }))
+            }
+            placeholder="Clerk user id (user_…)"
+            className="px-3 py-2 bg-stone-950 border border-stone-700 rounded-lg text-xs"
+            data-testid="admin-new-admin-userid"
+          />
+          <input
+            value={newAdmin.note}
+            onChange={(e) =>
+              setNewAdmin((s) => ({ ...s, note: e.target.value }))
+            }
+            placeholder="Optional note (e.g. team lead)"
+            className="px-3 py-2 bg-stone-950 border border-stone-700 rounded-lg text-xs md:col-span-2"
+            data-testid="admin-new-admin-note"
+          />
+          <button
+            type="submit"
+            disabled={busy === "new-admin" || !newAdmin.userId.trim()}
+            className="py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-bold uppercase disabled:opacity-50"
+            data-testid="admin-new-admin-submit"
+          >
+            {busy === "new-admin" ? "Granting…" : "Grant admin"}
+          </button>
+        </form>
+        {admins.length === 0 ? (
+          <p className="text-xs text-stone-500" data-testid="admin-admins-empty">
+            No admins in <code className="text-amber-300">system_admins</code> yet.
+          </p>
+        ) : (
+          <ul
+            className="divide-y divide-stone-800"
+            data-testid="admin-admins-list"
+          >
+            {admins.map((a) => {
+              const isSelf =
+                callerUserId != null && a.user_id === callerUserId;
+              const isOnlyAdmin = admins.length === 1;
+              const cannotRevoke = isSelf && isOnlyAdmin;
+              return (
+                <li
+                  key={a.user_id}
+                  className="py-2 flex items-center gap-3 text-xs"
+                  data-testid={`admin-admins-item-${a.user_id}`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-stone-200">
+                        {a.users?.display_name ??
+                          a.users?.email ??
+                          a.user_id}
+                      </span>
+                      {isSelf ? (
+                        <span className="px-1.5 py-0.5 text-[10px] uppercase tracking-wider rounded-full bg-amber-500/15 text-amber-300">
+                          you
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="text-[11px] text-stone-500">
+                      <code className="text-stone-400">{a.user_id}</code>
+                      {a.users?.email &&
+                      a.users.email !== a.users.display_name ? (
+                        <span> · {a.users.email}</span>
+                      ) : null}
+                      <span> · granted {new Date(a.granted_at).toLocaleDateString()}</span>
+                      {a.granted_by ? <span> by {a.granted_by}</span> : null}
+                    </div>
+                    {a.note ? (
+                      <p className="text-[11px] text-stone-400 mt-0.5">{a.note}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    onClick={() => handleRevokeAdmin(a.user_id)}
+                    disabled={cannotRevoke || busy === `admin-${a.user_id}`}
+                    title={
+                      cannotRevoke
+                        ? "You're the only admin — add another admin before revoking your own access."
+                        : "Revoke admin"
+                    }
+                    className="px-2 py-1 rounded-md border border-red-500/40 text-red-300 text-[11px] font-bold uppercase disabled:opacity-30 disabled:cursor-not-allowed"
+                    data-testid={`admin-revoke-${a.user_id}`}
+                  >
+                    Revoke
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {envAdmins.length > 0 ? (
+          <p
+            className="text-[11px] text-stone-500 mt-3"
+            data-testid="admin-env-admins"
+          >
+            Bootstrapped via <code className="text-amber-300">SYSTEM_ADMIN_USER_IDS</code>:{" "}
+            {envAdmins.map((id, i) => (
+              <span key={id}>
+                {i > 0 ? ", " : ""}
+                <code className="text-stone-400">{id}</code>
+              </span>
+            ))}
+            . These can&apos;t be revoked from the UI — change the env var on the API server.
+          </p>
+        ) : null}
       </section>
 
       <section className="mb-6 bg-stone-900 border border-stone-800 rounded-xl p-4">
