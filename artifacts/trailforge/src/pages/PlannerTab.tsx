@@ -320,16 +320,95 @@ export default function PlannerTab() {
   return (
     <div className="flex flex-col h-full relative">
       <div className="flex-1 overflow-y-auto pb-2" style={{ paddingBottom: routeTrails.length > 0 ? "120px" : "0" }}>
-        <div className="px-4 pt-4 pb-2">
-          <h1 className="text-lg font-bold tracking-wide text-amber-400 uppercase" style={{ letterSpacing: "0.12em" }}>
-            Trail Planner
-          </h1>
-          <p className="text-xs text-stone-400 mt-0.5">Address-to-address trip with road + trail navigation</p>
+        {/* Hero band — biking POV photo with dark gradient overlay so the
+            title stays legible. Uses the existing ride-640 / ride-1280 pair
+            via <picture>+srcset. Eager-loaded so it doesn't pop in on first
+            paint. Scrolls away with the rest of the page (not sticky). */}
+        <div
+          className="relative w-full overflow-hidden"
+          style={{ height: "210px" }}
+          data-testid="planner-hero"
+        >
+          <picture>
+            <source media="(min-width: 520px)" srcSet="/ride-1280.jpg" />
+            <img
+              src="/ride-640.jpg"
+              srcSet="/ride-640.jpg 640w, /ride-1280.jpg 1280w"
+              sizes="(min-width: 520px) 1280px, 640px"
+              alt=""
+              loading="eager"
+              fetchPriority="high"
+              decoding="async"
+              className="absolute inset-0 w-full h-full object-cover"
+              style={{ objectPosition: "center 55%" }}
+            />
+          </picture>
+          {/* Top vignette pulls focus to the title; bottom gradient melts
+              into the page background hsl(22 15% 8%) so the seam against
+              the form area below is invisible. */}
+          <div
+            aria-hidden
+            className="absolute inset-0"
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(15,10,5,0.55) 0%, rgba(15,10,5,0.20) 35%, rgba(23,17,10,0.65) 70%, hsl(22,15%,8%) 100%)",
+            }}
+          />
+          <div className="absolute inset-0 flex flex-col justify-end px-4 pb-4">
+            <span
+              className="inline-flex items-center gap-1.5 self-start text-[10px] font-bold uppercase tracking-[0.18em] text-amber-300/95 mb-1.5"
+              style={{
+                background: "rgba(15,10,5,0.55)",
+                border: "1px solid rgba(240,168,50,0.35)",
+                padding: "3px 8px",
+                borderRadius: "999px",
+                backdropFilter: "blur(4px)",
+              }}
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: "#f0a832", boxShadow: "0 0 6px #f0a832" }}
+              />
+              Plan your ride
+            </span>
+            <h1
+              className="text-3xl font-black tracking-tight text-white uppercase leading-none"
+              style={{
+                letterSpacing: "0.04em",
+                textShadow: "0 2px 14px rgba(0,0,0,0.7), 0 1px 2px rgba(0,0,0,0.9)",
+              }}
+            >
+              Trail <span className="text-amber-400">Planner</span>
+            </h1>
+            <p
+              className="text-[11px] text-stone-200/95 mt-1.5 max-w-xs"
+              style={{ textShadow: "0 1px 6px rgba(0,0,0,0.85)" }}
+            >
+              Address-to-address trip with road + trail navigation
+            </p>
+          </div>
+          {/* Hairline warm divider where the hero meets the form. */}
+          <div
+            aria-hidden
+            className="absolute left-0 right-0 bottom-0 h-px"
+            style={{
+              background:
+                "linear-gradient(90deg, transparent 0%, rgba(240,168,50,0.5) 50%, transparent 100%)",
+            }}
+          />
         </div>
 
-        <div className="px-4 space-y-3 pb-4">
-          {/* Location Inputs */}
-          <div className={`space-y-2 transition-all ${highlightInputs ? "animate-pulse" : ""}`}>
+        <div className="px-4 pt-4 space-y-3.5 pb-4">
+          {/* Location Inputs — wrapped in a soft warm-tinted panel so the
+              first interactive surface flows naturally out of the hero. */}
+          <div
+            className={`space-y-2 transition-all rounded-2xl p-3 ${highlightInputs ? "animate-pulse" : ""}`}
+            style={{
+              background: "linear-gradient(180deg, rgba(34,24,14,0.55) 0%, rgba(22,16,10,0.35) 100%)",
+              border: "1px solid rgba(240,168,50,0.18)",
+              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+            }}
+          >
             <div className="relative">
               <div className="absolute left-3 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-green-500"></div>
               <input
