@@ -8,15 +8,24 @@ const POSTER_FALLBACK_MS = 600;
 // The intro plays on every fresh app load / reload — it is part of the
 // product's launch identity. Path exclusions below still apply so deep
 // links into sign-in / sign-up / invite / admin are never blocked, and
-// the network-aware branch below falls back to a static poster on
-// offline / Save-Data / 2g connections so we never burn a slow user's
-// data.
+// so a reload while the user is already inside one of the inner tabs
+// (Map / My Trails / Discover / AI) doesn't waste another 6 seconds
+// replaying the intro. The most common cause of an in-app reload is a
+// mobile OS evicting the workspace preview / PWA when the native file
+// picker takes over the screen — without these exclusions that would
+// look exactly like the app "restarting" mid-upload. The network-aware
+// branch below also falls back to a static poster on offline /
+// Save-Data / 2g connections so we never burn a slow user's data.
 
 const EXCLUDED_PATH_PATTERNS = [
   /^\/sign-in(\/|$)/,
   /^\/sign-up(\/|$)/,
   /^\/invite(\/|$)/,
   /^\/admin(\/|$)/,
+  /^\/map(\/|$)/,
+  /^\/trails(\/|$)/,
+  /^\/discover(\/|$)/,
+  /^\/ai(\/|$)/,
 ];
 
 type SplashMode = "video" | "poster" | "off";

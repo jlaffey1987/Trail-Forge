@@ -248,11 +248,18 @@ function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
           Drop your GPX file here
         </div>
         <div className="text-xs text-stone-500 mt-0.5">or tap to browse</div>
+        {/* The input is visually hidden but kept in the layout. Tailwind's
+         * `hidden` class (display: none) is unreliable here: on iOS Safari,
+         * calling `.click()` on a `display: none` file input often fails to
+         * open the OS picker at all. Position-absolute + opacity-0 keeps it
+         * rendered so the programmatic click works on every platform. */}
         <input
           ref={inputRef}
           type="file"
           accept=".gpx,application/gpx+xml,application/xml,text/xml"
-          className="hidden"
+          className="absolute w-px h-px opacity-0 pointer-events-none"
+          tabIndex={-1}
+          aria-hidden="true"
           data-testid="upload-gpx-file-input"
           onChange={(e) => {
             const file = e.target.files?.[0];

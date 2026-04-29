@@ -101,12 +101,17 @@ export default function TrailPhotosPanel({ trailId, onCountsChanged }: Props) {
         </p>
         {isSignedIn ? (
           <>
+            {/* Visually hidden but kept in the layout — `display: none`
+             * inputs can't be reliably triggered via `.click()` on iOS
+             * Safari, which makes the photo picker fail silently. */}
             <input
               ref={fileInputRef}
               type="file"
               accept="image/*"
               multiple
-              className="hidden"
+              className="absolute w-px h-px opacity-0 pointer-events-none"
+              tabIndex={-1}
+              aria-hidden="true"
               onChange={(e) => handleFiles(e.target.files)}
               data-testid="photo-file-input"
             />
