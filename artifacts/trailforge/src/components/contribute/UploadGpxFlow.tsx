@@ -216,10 +216,16 @@ interface DropZoneProps {
 }
 
 function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  // Use `<label htmlFor>` rather than a JS-triggered `.click()` on a hidden
+  // input. The native label-to-input association opens the OS file picker
+  // without any JavaScript activation step, which is the only pattern that
+  // works reliably across iOS Safari, iOS standalone PWAs, and sandboxed
+  // iframes (such as the workspace preview pane) where a JS-driven click
+  // can be silently dropped or fail to deliver the chosen file back.
   return (
     <>
-      <div
+      <label
+        htmlFor="upload-gpx-file-input"
         onDragOver={(e) => {
           e.preventDefault();
           onDragOver(true);
@@ -231,8 +237,7 @@ function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
           const file = e.dataTransfer.files?.[0];
           if (file) void onPick(file);
         }}
-        onClick={() => inputRef.current?.click()}
-        className={`rounded-xl border-2 border-dashed p-6 text-center cursor-pointer transition-all ${
+        className={`relative block rounded-xl border-2 border-dashed p-6 text-center cursor-pointer transition-all ${
           dragOver
             ? "border-amber-500 bg-amber-500/10"
             : "border-stone-700 hover:border-amber-500/60 bg-[hsl(22,15%,12%)]"
@@ -248,13 +253,11 @@ function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
           Drop your GPX file here
         </div>
         <div className="text-xs text-stone-500 mt-0.5">or tap to browse</div>
-        {/* The input is visually hidden but kept in the layout. Tailwind's
-         * `hidden` class (display: none) is unreliable here: on iOS Safari,
-         * calling `.click()` on a `display: none` file input often fails to
-         * open the OS picker at all. Position-absolute + opacity-0 keeps it
-         * rendered so the programmatic click works on every platform. */}
+        {/* Visually hidden but still in the layout so the label can drive
+         * it natively. `display: none` would break the label association
+         * on some browsers. */}
         <input
-          ref={inputRef}
+          id="upload-gpx-file-input"
           type="file"
           accept=".gpx,application/gpx+xml,application/xml,text/xml"
           className="absolute w-px h-px opacity-0 pointer-events-none"
@@ -267,7 +270,7 @@ function DropZone({ dragOver, onDragOver, onPick, error }: DropZoneProps) {
             e.target.value = "";
           }}
         />
-      </div>
+      </label>
       {error && (
         <div className="mt-3 bg-red-900/40 border border-red-500/40 rounded-lg px-3 py-2">
           <p className="text-xs text-red-300" data-testid="upload-gpx-error">{error}</p>
