@@ -593,6 +593,38 @@ export type GpxUploadResult =
  * instead of a generic "Could not upload" message that masked failures
  * on iOS standalone PWAs (see SaveTrailForm).
  */
+/**
+ * Wrap a fetch call with an AbortController-driven timeout. Mobile PWAs
+ * occasionally see fetches hang indefinitely (e.g. when a CORS preflight
+ * to a signed object-storage URL is silently dropped on a flaky cellular
+ * link). Without a timeout the rider would stare at "Saving…" forever
+ * with no error feedback. We also tag every abort with a distinct error
+ * so the caller can show the rider where the hang happened.
+ */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      const timeoutErr = new Error(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s while ${label}. Check your connection and try again.`,
+      );
+      (timeoutErr as Error & { isTimeout?: boolean }).isTimeout = true;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function uploadGpxToStorage(
   gpxText: string,
 ): Promise<GpxUploadResult> {
@@ -601,12 +633,17 @@ export async function uploadGpxToStorage(
   // failures (Clerk session expired in the standalone PWA).
   let ticket: GpxUploadTicket;
   try {
-    const ticketRes = await fetch("/api/trails/gpx/upload-url", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
+    const ticketRes = await fetchWithTimeout(
+      "/api/trails/gpx/upload-url",
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      20_000,
+      "preparing upload",
+    );
     if (!ticketRes.ok) {
       const body = await ticketRes.text().catch(() => "");
       console.error("gpx upload-url error:", ticketRes.status, body);
@@ -624,22 +661,27 @@ export async function uploadGpxToStorage(
     ticket = (await ticketRes.json()) as GpxUploadTicket;
   } catch (err) {
     console.error("gpx upload-url network error:", err);
-    return {
-      ok: false,
-      error:
-        "Network error while preparing upload. Check your connection and try again.",
-    };
+    const msg =
+      err instanceof Error && err.message
+        ? err.message
+        : "Network error while preparing upload. Check your connection and try again.";
+    return { ok: false, error: msg };
   }
 
   // Step 2 — PUT the raw XML straight to the signed object-storage URL.
   // A failure here is usually CORS (preflight blocked) or a network drop;
   // surface the HTTP status so we can diagnose from the rider's report.
   try {
-    const putRes = await fetch(ticket.uploadURL, {
-      method: "PUT",
-      headers: { "Content-Type": "application/gpx+xml" },
-      body: gpxText,
-    });
+    const putRes = await fetchWithTimeout(
+      ticket.uploadURL,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/gpx+xml" },
+        body: gpxText,
+      },
+      45_000,
+      "uploading GPX to storage",
+    );
     if (!putRes.ok) {
       console.error("gpx PUT to storage failed:", putRes.status);
       return {
@@ -650,11 +692,11 @@ export async function uploadGpxToStorage(
     return { ok: true, ticket };
   } catch (err) {
     console.error("gpx PUT network error:", err);
-    return {
-      ok: false,
-      error:
-        "Storage upload was blocked by your browser or network. Please try again, or use a different network.",
-    };
+    const msg =
+      err instanceof Error && err.message
+        ? err.message
+        : "Storage upload was blocked by your browser or network. Please try again, or use a different network.";
+    return { ok: false, error: msg };
   }
 }
 

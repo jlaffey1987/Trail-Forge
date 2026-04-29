@@ -86,6 +86,11 @@ export default function SaveTrailForm({
   const [privacy, setPrivacy] = useState<TrailPrivacy>("private");
 
   const [submitting, setSubmitting] = useState(false);
+  // Step-grained label so the rider sees WHERE the save is sitting if it
+  // takes a while, instead of an opaque "Saving…" forever. Also helps us
+  // diagnose hangs from a screen-shot ("stuck on Uploading GPX…" tells us
+  // the signed-PUT to storage is the culprit, not the API call).
+  const [submitStep, setSubmitStep] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   // Used to scroll the error banner into view when it appears — riders on
   // small screens were missing the message because the form's scrollable
@@ -167,19 +172,26 @@ export default function SaveTrailForm({
       const bbox = bboxFromWaypoints(waypoints);
 
       setSubmitting(true);
+      setSubmitStep("Uploading GPX…");
+      console.log("[save-trail] starting upload, bytes=", gpxData.length);
 
       // Upload the canonical GPX XML to object storage so it lives outside
       // the database (as required by the storage architecture). The server
       // keeps a reference via `gpx_object_path` and finalizes the ACL on
       // save. uploadGpxToStorage now returns a tagged result so we can
       // surface the precise reason (auth, signing, CORS, network) instead
-      // of a generic message that riders couldn't act on.
+      // of a generic message that riders couldn't act on. It also enforces
+      // its own 20s/45s timeouts so a network hang surfaces here as an
+      // error message instead of an infinite "Saving…".
       const upload = await uploadGpxToStorage(gpxData);
       if (!upload.ok) {
+        console.warn("[save-trail] upload failed:", upload.error);
         setSubmitting(false);
+        setSubmitStep("");
         setError(upload.error);
         return;
       }
+      console.log("[save-trail] upload ok, objectPath=", upload.ticket.objectPath);
 
       const input: CreateTrailInput = {
         name: trimmedName,
@@ -198,19 +210,25 @@ export default function SaveTrailForm({
         bbox_max_lng: bbox?.maxLng ?? null,
       };
 
+      setSubmitStep("Creating trail…");
       const result = await onSave({
         input,
         selectedGroupIds: privacy === "group" ? selectedGroupIds : [],
       });
       if (!result.ok) {
+        console.warn("[save-trail] onSave failed:", result.error);
         setSubmitting(false);
+        setSubmitStep("");
         setError(result.error ?? "Could not save trail");
         return;
       }
+      console.log("[save-trail] saved");
       setSubmitting(false);
+      setSubmitStep("");
     } catch (err) {
-      console.error("SaveTrailForm.handleSubmit threw:", err);
+      console.error("[save-trail] handleSubmit threw:", err);
       setSubmitting(false);
+      setSubmitStep("");
       const message =
         err instanceof Error && err.message
           ? `Save failed: ${err.message}`
@@ -482,7 +500,7 @@ export default function SaveTrailForm({
             style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
             data-testid="save-trail-submit"
           >
-            {submitting ? "Saving…" : "Save Trail"}
+            {submitting ? (submitStep || "Saving…") : "Save Trail"}
           </button>
         </div>
       </div>
