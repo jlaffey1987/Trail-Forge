@@ -23,6 +23,15 @@ const DIFFICULTY_COLORS: Record<number, string> = {
   6: "#fb923c", 7: "#f97316", 8: "#ef4444", 9: "#dc2626", 10: "#7f1d1d",
 };
 
+const UPLOAD_GPX_INTENT_KEY_PREFIX = "trailforge.upload_gpx_intent_at:";
+const UPLOAD_GPX_INTENT_TTL_MS = 5 * 60 * 1000;
+
+function uploadIntentKey(userId: string | null | undefined): string {
+  // Namespace by user (or "anon") so a previous user's interrupted upload
+  // never auto-pops the modal for whoever signs in next on a shared device.
+  return `${UPLOAD_GPX_INTENT_KEY_PREFIX}${userId ?? "anon"}`;
+}
+
 function formatDistance(km: number | null) {
   return km != null ? `${km.toFixed(1)} km` : "—";
 }
@@ -82,6 +91,49 @@ export default function MyTrailsTab() {
     const t = window.setTimeout(() => setToast(null), 3500);
     return () => window.clearTimeout(t);
   }, [toast]);
+
+  // Recovery for the iOS standalone PWA edge case: if the OS file picker
+  // (or any other system sheet) caused our WebView to be evicted while the
+  // upload modal was open, the page reloads cold and the user lands on the
+  // empty My Trails screen — confused, because they were just halfway
+  // through an upload. We persist a short-lived intent flag so on next
+  // mount we re-open the modal automatically. The 5-minute TTL stops a
+  // crash from yesterday auto-popping the upload modal today, and the
+  // per-user key stops a previous user's interrupted upload from popping
+  // for whoever signs in next on a shared device. We gate on `isLoaded`
+  // so we only check once the auth state (and therefore the right key) is
+  // known.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!isLoaded) return;
+    try {
+      const raw = window.localStorage.getItem(uploadIntentKey(userId));
+      if (!raw) return;
+      const ts = Number(raw);
+      if (Number.isFinite(ts) && Date.now() - ts < UPLOAD_GPX_INTENT_TTL_MS) {
+        setShowUploadGpx(true);
+      } else {
+        window.localStorage.removeItem(uploadIntentKey(userId));
+      }
+    } catch {
+      /* localStorage may be unavailable in private mode — non-fatal. */
+    }
+  }, [isLoaded, userId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!isLoaded) return;
+    try {
+      const key = uploadIntentKey(userId);
+      if (showUploadGpx) {
+        window.localStorage.setItem(key, Date.now().toString());
+      } else {
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      /* non-fatal */
+    }
+  }, [showUploadGpx, isLoaded, userId]);
 
   const handleAddChoice = (choice: AddTrailChoice) => {
     setShowAddMenu(false);
