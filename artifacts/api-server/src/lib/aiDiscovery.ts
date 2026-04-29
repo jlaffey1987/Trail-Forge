@@ -507,9 +507,22 @@ export function distanceKmFromPoints(points: GpxPoint[]): number {
 
 /**
  * For an AI-discovered post that has no linked GPX, geocode the named
- * location via Nominatim and return a "best-effort" 1-point pseudo-track.
- * The trail will be marked `verification_status='ai-approximated'` and
- * excluded from navigation.
+ * location via Nominatim and snap the result to the nearest OpenStreetMap
+ * off-road track. Returns the snapped waypoints + bbox so the row can be
+ * persisted with a real (if approximated) geometry. The caller marks the
+ * resulting trail as `verification_status='ai-approximated'` and excludes
+ * it from navigation.
+ *
+ * Returns `null` when:
+ *   - the location is blank,
+ *   - Nominatim cannot geocode the place,
+ *   - or no real OSM track exists within the snap radius.
+ *
+ * In the third case the caller MUST skip the post entirely. We deliberately
+ * do not synthesise a 2-point pseudo-track as a fallback any more —
+ * historically that produced straight-line "phantom trails" cutting across
+ * the countryside that polluted the map even with the ai-approximated
+ * badge.
  */
 export async function approximateTrackFromLocation(
   location: string,
@@ -533,26 +546,19 @@ export async function approximateTrackFromLocation(
     return null;
   }
 
-  // Step 2: best-effort snap to the OSM track network within ~750m of
-  // the geocoded centre. We pick the longest matching way and use its
-  // real geometry. The trail will still be marked verification_status =
-  // 'ai-approximated' so it's excluded from navigation; this just gives
-  // moderators a real track shape to inspect instead of a meaningless
-  // 2-point line.
+  // Step 2: snap to the OSM track network within ~750m of the geocoded
+  // centre. We pick the longest matching way and use its real geometry,
+  // which gives moderators a track shape to inspect. The published trail
+  // still carries verification_status='ai-approximated' so it stays out of
+  // navigation.
+  //
+  // If Overpass has nothing nearby (or is down), we return null — the
+  // caller will skip the post rather than persist a fake straight line.
   const snapped = await snapToNearestOsmTrack(lat, lon, 750);
   if (snapped && snapped.length >= 2) {
     return { waypoints: snapped, bbox: bboxFromPoints(snapped) };
   }
-
-  // Step 3: fallback when Overpass has nothing nearby (or is down). We
-  // still need >=2 points for the trails table; use a tiny offset and
-  // rely on the ai-approximated badge.
-  const dLat = 0.005; // ~500m
-  const waypoints: GpxPoint[] = [
-    { lat, lon, ele: null },
-    { lat: lat + dLat, lon, ele: null },
-  ];
-  return { waypoints, bbox: bboxFromPoints(waypoints) };
+  return null;
 }
 
 /**

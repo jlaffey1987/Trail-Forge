@@ -1,4 +1,4 @@
-import { type Trail } from "@/lib/supabase";
+import { isSyntheticPlaceholderTrail, type Trail } from "@/lib/supabase";
 import { parseGPX, type Waypoint } from "@/lib/gpx";
 
 export const DIFFICULTY_COLORS: Record<number, string> = {
@@ -307,6 +307,9 @@ export function clusterTrails(trails: Trail[], zoom: number): TrailCluster[] {
   const cells = new Map<string, Bucket>();
 
   for (const t of trails) {
+    // Mirror renderTrailLayer: never let a synthetic 2-point AI placeholder
+    // contribute to a cluster count or marker position.
+    if (isSyntheticPlaceholderTrail(t)) continue;
     const bbox = getTrailBbox(t);
     if (!bbox) continue;
     const cLat = (bbox.minLat + bbox.maxLat) / 2;
@@ -494,6 +497,11 @@ export function renderTrailLayer(
   const selectedList = Array.from(selectedIds);
 
   for (const trail of trails) {
+    // Defence in depth: even if a synthetic 2-point AI placeholder slipped
+    // past the fetch-time filter (e.g. via a future code path that builds
+    // a Trail[] directly), never render it as a polyline. See
+    // isSyntheticPlaceholderTrail in supabase.ts for the criteria.
+    if (isSyntheticPlaceholderTrail(trail)) continue;
     const latlngs = options.simplifyForZoom != null
       ? getSimplifiedLatLngs(trail, options.simplifyForZoom)
       : getTrailLatLngs(trail);

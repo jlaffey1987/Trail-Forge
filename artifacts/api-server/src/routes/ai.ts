@@ -497,6 +497,18 @@ export async function runForumScan(opts?: { oneOffUrl?: string | null }): Promis
             }
           }
 
+          // No real geometry could be obtained — neither a downloadable GPX
+          // nor an OSM-track snap. Skip the post rather than persist a
+          // straight-line "phantom trail" placeholder. (Historically we
+          // wrote a 2-point ~500m offset here; that polluted the map.)
+          if (waypoints.length < 2 || !bbox) {
+            skipped++;
+            errors.push(
+              `skipped "${extracted.trailName ?? postUrl}": no GPX and no nearby OSM track to snap to`,
+            );
+            continue;
+          }
+
           // Bbox-aware dedupe: skip if we already publish this trail.
           if (extracted.trailName && bbox) {
             const match = await findExistingTrailMatch(supa, {

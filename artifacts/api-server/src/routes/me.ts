@@ -22,6 +22,43 @@ const PutPlannerRouteBody = z.object({
   trailIds: z.array(z.string().min(1)).max(50),
 });
 
+/**
+ * Server-side mirror of trailforge's `isSyntheticPlaceholderTrail` helper.
+ *
+ * Returns true for the legacy 2-point ai-approximated placeholders that
+ * the AI forum scanner used to persist when no GPX and no nearby OSM
+ * track was available. We hide those rows from My Trails so users who
+ * saved one in the past don't keep seeing a phantom straight line on
+ * the map. Conservative criteria — only matches the exact shape the old
+ * `approximateTrackFromLocation` fallback wrote (lat+0.005 offset,
+ * identical longitude, exactly 2 waypoints).
+ */
+function isLegacySyntheticPlaceholder(
+  trail: Record<string, unknown> | null,
+): boolean {
+  if (!trail) return false;
+  if (trail.verification_status !== "ai-approximated") return false;
+  const ptCount = trail.path_point_count;
+  if (ptCount != null && typeof ptCount === "number" && ptCount !== 2) {
+    return false;
+  }
+  const minLat = trail.bbox_min_lat;
+  const maxLat = trail.bbox_max_lat;
+  const minLng = trail.bbox_min_lng;
+  const maxLng = trail.bbox_max_lng;
+  if (
+    typeof minLat !== "number" ||
+    typeof maxLat !== "number" ||
+    typeof minLng !== "number" ||
+    typeof maxLng !== "number"
+  ) {
+    return false;
+  }
+  const latSpanM = Math.abs(maxLat - minLat) * 111_320;
+  const lngSpanDeg = Math.abs(maxLng - minLng);
+  return lngSpanDeg < 1e-6 && latSpanM >= 400 && latSpanM <= 700;
+}
+
 const router: IRouter = Router();
 
 router.post("/me/sync", async (req: Request, res: Response) => {
@@ -139,12 +176,22 @@ router.get("/me/saved-trails", async (req: Request, res: Response) => {
       trails: TrailRel | TrailRel[] | null;
     }
     const rows = (data ?? []) as SavedTrailRow[];
-    const items = rows.map((row) => ({
-      trail_id: row.trail_id,
-      status: row.status,
-      saved_at: row.saved_at,
-      trail: Array.isArray(row.trails) ? (row.trails[0] ?? null) : row.trails,
-    }));
+    const items = rows
+      .map((row) => ({
+        trail_id: row.trail_id,
+        status: row.status,
+        saved_at: row.saved_at,
+        trail: Array.isArray(row.trails) ? (row.trails[0] ?? null) : row.trails,
+      }))
+      // Hide legacy synthetic 2-point AI placeholders that were persisted by
+      // the old approximateTrackFromLocation fallback before it was removed.
+      // Mirrors trailforge's `isSyntheticPlaceholderTrail` so a user who
+      // saved a phantom trail in the past doesn't keep seeing it in My
+      // Trails. Conservative — only drops rows that match all of:
+      //   verification_status='ai-approximated' AND
+      //   simplified path is 2 points (or unknown) AND
+      //   bbox lng-span ~0 AND lat-span ~400-700m (the legacy 0.005° offset).
+      .filter((it) => !isLegacySyntheticPlaceholder(it.trail));
 
     res.json(ListMySavedTrailsResponse.parse({ items }));
   } catch (err) {

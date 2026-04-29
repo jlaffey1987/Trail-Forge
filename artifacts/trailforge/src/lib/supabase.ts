@@ -105,6 +105,50 @@ export interface MapBbox {
   maxLng: number;
 }
 
+/**
+ * Detect a synthetic "phantom" AI-discovered trail.
+ *
+ * Until this was tightened up, the AI forum scanner would persist a fake
+ * 2-point ~500m straight-line placeholder whenever it had no GPX and could
+ * not snap to a real OSM track. Those rows look like ruler-straight lines
+ * cutting across countryside on the map — they're essentially noise, even
+ * though they carry the dashed `ai-approximated` styling.
+ *
+ * Going forward those rows are no longer created (the server now skips the
+ * post). This helper hides any pre-existing rows from query consumers
+ * without needing a DB migration. Trails legitimately approximated to a
+ * real OSM way (the snap path) keep many waypoints over a real bbox and
+ * are NOT flagged as synthetic, so they continue to render.
+ *
+ * Detection is conservative: only flips to true when ALL of the following
+ * hold so a real snapped trail is never hidden by accident:
+ *   1. verification_status === 'ai-approximated'
+ *   2. simplified path is exactly 2 points (or unknown but bbox is degenerate)
+ *   3. bbox has zero longitude span and ~400-700m latitude span — the exact
+ *      shape of the legacy `dLat = 0.005, same lng` placeholder.
+ */
+export function isSyntheticPlaceholderTrail(trail: Trail): boolean {
+  if (trail.verification_status !== "ai-approximated") return false;
+  // If we know the simplified-path point count, anything other than 2
+  // points cannot be the legacy 2-point placeholder.
+  if (trail.path_point_count != null && trail.path_point_count !== 2) {
+    return false;
+  }
+  if (
+    trail.bbox_min_lat == null ||
+    trail.bbox_max_lat == null ||
+    trail.bbox_min_lng == null ||
+    trail.bbox_max_lng == null
+  ) {
+    return false;
+  }
+  const latSpanDeg = Math.abs(trail.bbox_max_lat - trail.bbox_min_lat);
+  const lngSpanDeg = Math.abs(trail.bbox_max_lng - trail.bbox_min_lng);
+  // 1 degree of latitude ≈ 111.32 km everywhere.
+  const latSpanM = latSpanDeg * 111_320;
+  return lngSpanDeg < 1e-6 && latSpanM >= 400 && latSpanM <= 700;
+}
+
 export interface BboxFetchOptions {
   difficulties?: number[];
   trailTypes?: string[];
@@ -200,10 +244,16 @@ export async function fetchTrailsInBbox(
     return q.limit(limit);
   };
 
+  // Drop legacy synthetic 2-point AI placeholders here so neither the map
+  // layer nor the trail list has a chance to render them. The geometry test
+  // is conservative — see isSyntheticPlaceholderTrail for the criteria.
+  const dropPhantoms = (rows: Trail[]) =>
+    rows.filter((t) => !isSyntheticPlaceholderTrail(t));
+
   // Try slim + bbox first (the fast path).
   let { data, error } = await buildBbox(TRAIL_SLIM_COLUMNS);
   if (!error) {
-    return { trails: (data as unknown as Trail[]) || [], usedBbox: true };
+    return { trails: dropPhantoms((data as unknown as Trail[]) || []), usedBbox: true };
   }
 
   const msg = error.message ?? "";
@@ -221,13 +271,13 @@ export async function fetchTrailsInBbox(
         console.error("Trail bbox fallback fetch failed:", r.error.message);
         return { trails: [], usedBbox: false };
       }
-      return { trails: (r.data as unknown as Trail[]) || [], usedBbox: false };
+      return { trails: dropPhantoms((r.data as unknown as Trail[]) || []), usedBbox: false };
     }
 
     // Slim columns missing (migration 0008 not applied) → retry bbox with "*".
     const r = await buildBbox("*");
     if (!r.error) {
-      return { trails: (r.data as unknown as Trail[]) || [], usedBbox: true };
+      return { trails: dropPhantoms((r.data as unknown as Trail[]) || []), usedBbox: true };
     }
     if (r.error.code === "42703" && /bbox/i.test(r.error.message ?? "")) {
       const all = await buildAll("*");
@@ -235,7 +285,7 @@ export async function fetchTrailsInBbox(
         console.error("Trail bbox fallback fetch failed:", all.error.message);
         return { trails: [], usedBbox: false };
       }
-      return { trails: (all.data as unknown as Trail[]) || [], usedBbox: false };
+      return { trails: dropPhantoms((all.data as unknown as Trail[]) || []), usedBbox: false };
     }
     console.error("Trail bbox fetch failed:", r.error.message);
     return { trails: [], usedBbox: false };
@@ -284,7 +334,7 @@ export async function fetchCommunityTrails(): Promise<Trail[]> {
     console.error("Failed to fetch trails:", error.message);
     return [];
   }
-  return data || [];
+  return (data || []).filter((t: Trail) => !isSyntheticPlaceholderTrail(t));
 }
 
 export async function searchTrails(opts: {
@@ -308,7 +358,7 @@ export async function searchTrails(opts: {
     console.error("Search error:", error.message);
     return [];
   }
-  return data || [];
+  return (data || []).filter((t: Trail) => !isSyntheticPlaceholderTrail(t));
 }
 
 export interface SaveOwner {
@@ -363,7 +413,12 @@ export async function fetchSavedTrails(owner: SaveOwner): Promise<Trail[]> {
     const json = (await res.json()) as { items: SavedTrailItem[] };
     return (json.items ?? [])
       .map((it) => it.trail)
-      .filter((t): t is Trail => t != null);
+      .filter((t): t is Trail => t != null)
+      // Defence in depth: the API server already filters legacy synthetic
+      // 2-point AI placeholders out of /api/me/saved-trails, but if an
+      // older deploy or another future caller forgets, drop them here too
+      // so the My Trails list never shows a phantom straight-line trail.
+      .filter((t) => !isSyntheticPlaceholderTrail(t));
   } catch (err) {
     console.error("Fetch saved trails error:", err);
     return [];
