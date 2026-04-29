@@ -296,6 +296,66 @@ export async function fetchTrailsInBbox(
 }
 
 /**
+ * In-memory cache of `gpx_data` keyed by trail id, populated by
+ * `fetchTrailGpxByIds`. Persists for the lifetime of the page so
+ * reopening the same trail or reordering planner trails does not
+ * re-download the (often 50–500 KB) GPX XML.
+ *
+ * Local mutations that change a trail's GPX (re-upload, edit, delete)
+ * MUST call `invalidateTrailGpxCache(trailId)` so the next fetch goes
+ * back to Supabase. `addTrail` does not need to invalidate because the
+ * new id was never cached.
+ */
+const trailGpxCache = new Map<string, unknown>();
+
+/**
+ * Per-id in-flight tracker for `fetchTrailGpxByIds`. If the user reorders
+ * the planner or opens the same trail again before the first request
+ * resolves, the second call awaits the same network round-trip rather
+ * than firing a duplicate one.
+ */
+const trailGpxInflight = new Map<string, Promise<void>>();
+
+/**
+ * Per-id generation counter. Bumped by `invalidateTrailGpxCache(id)` so
+ * that an in-flight fetch which raced an invalidation can't write its
+ * (potentially stale) result back into the cache after the fact. Each
+ * fetch snapshots the generation at start and only writes if the
+ * snapshot still matches at completion.
+ */
+const trailGpxGeneration = new Map<string, number>();
+
+/**
+ * Drop the cached `gpx_data` for `trailId`, or the entire cache when
+ * `trailId` is omitted. Call this after any local mutation that changes
+ * a trail's GPX so subsequent reads pick up the new payload.
+ *
+ * Also bumps the per-id generation and forgets any in-flight fetch for
+ * the same id, so a request that was already on the wire when the
+ * mutation happened can't repopulate the cache with a stale value.
+ */
+export function invalidateTrailGpxCache(trailId?: string): void {
+  if (trailId == null) {
+    trailGpxCache.clear();
+    // Bump every id we've ever seen (cached or in-flight) so any racing
+    // fetch in progress is discarded on completion.
+    for (const id of trailGpxInflight.keys()) {
+      trailGpxGeneration.set(id, (trailGpxGeneration.get(id) ?? 0) + 1);
+    }
+    trailGpxInflight.clear();
+    return;
+  }
+  trailGpxCache.delete(trailId);
+  trailGpxGeneration.set(trailId, (trailGpxGeneration.get(trailId) ?? 0) + 1);
+  trailGpxInflight.delete(trailId);
+}
+
+/** Test-only: read the cached value (or `undefined` if not cached). */
+export function __getCachedTrailGpx(trailId: string): unknown | undefined {
+  return trailGpxCache.get(trailId);
+}
+
+/**
  * Lazy-fetch the raw `gpx_data` XML for the given trail ids.
  *
  * Used by the planner / route-builder flows that need full GPX (combined
@@ -303,22 +363,82 @@ export async function fetchTrailsInBbox(
  * slim Map-tab response. Anon-key reads are constrained by RLS to public
  * trails — for private group-shared trails the gpx_data is already
  * populated when the trail row arrives via `/api/me/group-trails`.
+ *
+ * Results are cached in `trailGpxCache` for the lifetime of the page —
+ * subsequent calls for the same ids resolve immediately without hitting
+ * Supabase. Concurrent calls for the same id share a single network
+ * request via `trailGpxInflight`. Use `invalidateTrailGpxCache(id)` to
+ * drop a stale entry after a local mutation.
  */
 export async function fetchTrailGpxByIds(
   trailIds: string[],
 ): Promise<Map<string, unknown>> {
   const out = new Map<string, unknown>();
   if (trailIds.length === 0) return out;
-  const { data, error } = await supabase
-    .from("trails")
-    .select("id, gpx_data")
-    .in("id", trailIds);
-  if (error) {
-    console.error("fetchTrailGpxByIds error:", error.message);
-    return out;
+
+  const dedupedIds = Array.from(new Set(trailIds));
+  const toFetch: string[] = [];
+  const awaiting: Array<Promise<void>> = [];
+
+  for (const id of dedupedIds) {
+    if (trailGpxCache.has(id)) continue;
+    const inflight = trailGpxInflight.get(id);
+    if (inflight) {
+      awaiting.push(inflight);
+    } else {
+      toFetch.push(id);
+    }
   }
-  for (const row of (data as Array<{ id: string; gpx_data: unknown }>) || []) {
-    out.set(row.id, row.gpx_data);
+
+  if (toFetch.length > 0) {
+    // Snapshot the generation per id at request start so a concurrent
+    // `invalidateTrailGpxCache(id)` (e.g. user re-uploads while a planner
+    // hydration is on the wire) bumps the generation and causes our
+    // late-arriving result to be discarded instead of repopulating the
+    // cache with a stale payload.
+    const startGen = new Map<string, number>();
+    for (const id of toFetch) {
+      startGen.set(id, trailGpxGeneration.get(id) ?? 0);
+    }
+    const fetchPromise = (async () => {
+      const { data, error } = await supabase
+        .from("trails")
+        .select("id, gpx_data")
+        .in("id", toFetch);
+      if (error) {
+        console.error("fetchTrailGpxByIds error:", error.message);
+        return;
+      }
+      for (const row of (data as Array<{ id: string; gpx_data: unknown }>) || []) {
+        const startedAt = startGen.get(row.id) ?? 0;
+        const currentGen = trailGpxGeneration.get(row.id) ?? 0;
+        if (startedAt === currentGen) {
+          trailGpxCache.set(row.id, row.gpx_data);
+        }
+        // else: an invalidation raced this fetch — drop the result.
+      }
+    })();
+    const tracked = fetchPromise.finally(() => {
+      for (const id of toFetch) {
+        if (trailGpxInflight.get(id) === tracked) {
+          trailGpxInflight.delete(id);
+        }
+      }
+    });
+    for (const id of toFetch) {
+      trailGpxInflight.set(id, tracked);
+    }
+    awaiting.push(tracked);
+  }
+
+  if (awaiting.length > 0) {
+    await Promise.all(awaiting);
+  }
+
+  for (const id of dedupedIds) {
+    if (trailGpxCache.has(id)) {
+      out.set(id, trailGpxCache.get(id));
+    }
   }
   return out;
 }
@@ -599,6 +719,10 @@ export async function updateOwnedTrail(
       console.error("updateOwnedTrail error:", res.status, await res.text());
       return null;
     }
+    // Metadata edits don't change `gpx_data`, but the trail row itself has
+    // changed locally — drop the cached GPX so the next planner / detail
+    // open reads through to the latest server state.
+    invalidateTrailGpxCache(trailId);
     return (await res.json()) as Trail;
   } catch (err) {
     console.error("updateOwnedTrail error:", err);
@@ -612,6 +736,7 @@ export async function deleteOwnedTrail(trailId: string): Promise<boolean> {
       method: "DELETE",
       credentials: "include",
     });
+    if (res.ok) invalidateTrailGpxCache(trailId);
     return res.ok;
   } catch (err) {
     console.error("deleteOwnedTrail error:", err);
@@ -645,6 +770,8 @@ export async function replaceOwnedTrailGpx(
       console.error("replaceOwnedTrailGpx error:", res.status, await res.text());
       return null;
     }
+    // The GPX has just been replaced — any cached copy is now stale.
+    invalidateTrailGpxCache(trailId);
     return (await res.json()) as Trail;
   } catch (err) {
     console.error("replaceOwnedTrailGpx error:", err);
