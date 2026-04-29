@@ -8,6 +8,7 @@ import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTr
 import SaveTrailForm from "@/components/contribute/SaveTrailForm";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import MapRoutePanel from "@/components/MapRoutePanel";
+import LoadingBackdrop from "@/components/LoadingBackdrop";
 import { getTrailLatLngs } from "@/lib/trailLayer";
 import { useLeaflet } from "@/lib/useLeaflet";
 import {
@@ -885,12 +886,11 @@ ${trkpts}
         style={{ cursor: mapMode === "draw" ? "crosshair" : "grab" }}
       >
         {!leafletLoaded && (
-          <div className="w-full h-full flex items-center justify-center bg-[hsl(22,15%,8%)]">
-            <div className="text-center">
-              <div className="w-8 h-8 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin mx-auto mb-3"></div>
-              <p className="text-sm text-stone-400">Loading satellite map...</p>
-            </div>
-          </div>
+          <LoadingBackdrop
+            variant="ride2"
+            label="Loading satellite map…"
+            testId="map-loading-backdrop"
+          />
         )}
       </div>
 

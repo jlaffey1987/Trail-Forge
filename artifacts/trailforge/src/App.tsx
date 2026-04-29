@@ -24,6 +24,7 @@ import InvitesBadge from "@/components/groups/InvitesBadge";
 import NotificationsBell from "@/components/groups/NotificationsBell";
 import InviteAcceptPage from "@/components/groups/InviteAcceptPage";
 import AdminPage from "@/pages/AdminPage";
+import IntroSplash from "@/components/IntroSplash";
 import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
 import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
@@ -250,8 +251,7 @@ function MainShell() {
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
       <header
-        className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[hsl(30,12%,14%)]"
-        style={{ background: "linear-gradient(180deg, hsl(22,18%,9%) 0%, hsl(22,15%,8%) 100%)" }}
+        className="tf-header shrink-0 flex items-center justify-between px-4 py-3.5 border-b border-[hsl(30,12%,14%)]"
       >
         <div className="flex items-center gap-2.5">
           <div
@@ -294,10 +294,7 @@ function MainShell() {
         </div>
       </main>
 
-      <nav
-        className="shrink-0 border-t border-[hsl(30,12%,14%)] safe-bottom"
-        style={{ background: "linear-gradient(0deg, hsl(22,18%,7%) 0%, hsl(22,15%,9%) 100%)" }}
-      >
+      <nav className="tf-nav shrink-0 border-t border-[hsl(30,12%,14%)] safe-bottom">
         <div className="flex">
           {NAV_ITEMS.map((item) => {
             const isActive = activeTab === item.id;
@@ -305,27 +302,14 @@ function MainShell() {
               <button
                 key={item.id}
                 onClick={() => setLocation(TAB_PATHS[item.id])}
-                className="flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 relative transition-all"
+                className={`tf-nav__item ${isActive ? "tf-nav__item--active" : ""}`}
                 data-testid={`nav-${item.id}`}
+                aria-current={isActive ? "page" : undefined}
               >
-                {isActive && (
-                  <span
-                    className="absolute top-0 left-1/2 -translate-x-1/2 w-8 h-0.5 rounded-full"
-                    style={{ background: "linear-gradient(90deg, #d4870c, #f0a832)" }}
-                  />
-                )}
+                <span className="relative z-10">{item.icon}</span>
                 <span
-                  className="transition-colors"
-                  style={{ color: isActive ? "#f0a832" : "#6b7280" }}
-                >
-                  {item.icon}
-                </span>
-                <span
-                  className="text-[10px] font-semibold uppercase tracking-wider transition-colors"
-                  style={{
-                    color: isActive ? "#f0a832" : "#6b7280",
-                    letterSpacing: "0.06em",
-                  }}
+                  className="text-[10px] font-semibold uppercase tracking-wider relative z-10"
+                  style={{ letterSpacing: "0.06em" }}
                 >
                   {item.label}
                 </span>
@@ -441,6 +425,7 @@ function ClerkProviderWithRoutes() {
 export default function App() {
   return (
     <WouterRouter base={basePath}>
+      <IntroSplash />
       <ClerkProviderWithRoutes />
     </WouterRouter>
   );

@@ -11,6 +11,7 @@ import {
   type SharedTrail,
 } from "@/lib/groups";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
+import LoadingBackdrop from "@/components/LoadingBackdrop";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -219,9 +220,12 @@ export default function DiscoverTab() {
 
       {/* Loading */}
       {loading && (
-        <div className="flex flex-col items-center justify-center py-16 px-4">
-          <div className="w-8 h-8 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin mb-3"></div>
-          <p className="text-sm text-stone-400">Loading live trails from Supabase...</p>
+        <div className="flex-1 min-h-[260px] mx-4 mb-4 rounded-xl overflow-hidden">
+          <LoadingBackdrop
+            variant="ride"
+            label="Loading live community trails…"
+            testId="discover-loading-backdrop"
+          />
         </div>
       )}
 
