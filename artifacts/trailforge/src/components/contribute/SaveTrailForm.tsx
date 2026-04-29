@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Waypoint } from "@/lib/gpx";
 import { distanceKmFromWaypoints, bboxFromWaypoints } from "@/lib/gpx";
 import { uploadGpxToStorage, type CreateTrailInput, type TrailPrivacy } from "@/lib/supabase";
@@ -87,6 +87,10 @@ export default function SaveTrailForm({
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Used to scroll the error banner into view when it appears — riders on
+  // small screens were missing the message because the form's scrollable
+  // body was parked at the Save button.
+  const errorRef = useRef<HTMLDivElement | null>(null);
 
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
@@ -134,69 +138,95 @@ export default function SaveTrailForm({
 
   if (!open) return null;
 
+  // Wrap every step in a single try/catch. On iOS standalone PWAs an
+  // unhandled rejection inside the click handler can tear down the
+  // WebView (the rider sees the app "restart"), so we MUST catch
+  // everything and convert it into a visible error banner instead.
   const handleSubmit = async () => {
-    setError(null);
-    const trimmedName = name.trim();
-    if (trimmedName.length < 2) {
-      setError("Trail name must be at least 2 characters");
-      return;
-    }
-    if (waypoints.length < 2) {
-      setError("Trail needs at least 2 waypoints");
-      return;
-    }
-    const distNum = parseFloat(distanceKm);
-    if (isNaN(distNum) || distNum <= 0) {
-      setError("Distance must be a positive number");
-      return;
-    }
-    if (privacy === "group" && selectedGroupIds.length === 0) {
-      setError("Pick at least one group to share into, or choose Private/Public.");
-      return;
-    }
+    try {
+      setError(null);
+      const trimmedName = name.trim();
+      if (trimmedName.length < 2) {
+        setError("Trail name must be at least 2 characters");
+        return;
+      }
+      if (waypoints.length < 2) {
+        setError("Trail needs at least 2 waypoints");
+        return;
+      }
+      const distNum = parseFloat(distanceKm);
+      if (isNaN(distNum) || distNum <= 0) {
+        setError("Distance must be a positive number");
+        return;
+      }
+      if (privacy === "group" && selectedGroupIds.length === 0) {
+        setError("Pick at least one group to share into, or choose Private/Public.");
+        return;
+      }
 
-    const bbox = bboxFromWaypoints(waypoints);
+      const bbox = bboxFromWaypoints(waypoints);
 
-    setSubmitting(true);
+      setSubmitting(true);
 
-    // Upload the canonical GPX XML to object storage so it lives outside the
-    // database (as required by the storage architecture). The server keeps a
-    // reference via `gpx_object_path` and finalizes the ACL on save.
-    const ticket = await uploadGpxToStorage(gpxData);
-    if (!ticket) {
+      // Upload the canonical GPX XML to object storage so it lives outside
+      // the database (as required by the storage architecture). The server
+      // keeps a reference via `gpx_object_path` and finalizes the ACL on
+      // save. uploadGpxToStorage now returns a tagged result so we can
+      // surface the precise reason (auth, signing, CORS, network) instead
+      // of a generic message that riders couldn't act on.
+      const upload = await uploadGpxToStorage(gpxData);
+      if (!upload.ok) {
+        setSubmitting(false);
+        setError(upload.error);
+        return;
+      }
+
+      const input: CreateTrailInput = {
+        name: trimmedName,
+        type: legalStatus,
+        legal_status: legalStatus,
+        difficulty,
+        terrain,
+        distance_km: parseFloat(distNum.toFixed(2)),
+        gpx_data: gpxData,
+        gpx_object_path: upload.ticket.objectPath,
+        description: description.trim() || null,
+        privacy,
+        bbox_min_lat: bbox?.minLat ?? null,
+        bbox_max_lat: bbox?.maxLat ?? null,
+        bbox_min_lng: bbox?.minLng ?? null,
+        bbox_max_lng: bbox?.maxLng ?? null,
+      };
+
+      const result = await onSave({
+        input,
+        selectedGroupIds: privacy === "group" ? selectedGroupIds : [],
+      });
+      if (!result.ok) {
+        setSubmitting(false);
+        setError(result.error ?? "Could not save trail");
+        return;
+      }
       setSubmitting(false);
-      setError("Could not upload GPX to storage. Please try again.");
-      return;
-    }
-
-    const input: CreateTrailInput = {
-      name: trimmedName,
-      type: legalStatus,
-      legal_status: legalStatus,
-      difficulty,
-      terrain,
-      distance_km: parseFloat(distNum.toFixed(2)),
-      gpx_data: gpxData,
-      gpx_object_path: ticket.objectPath,
-      description: description.trim() || null,
-      privacy,
-      bbox_min_lat: bbox?.minLat ?? null,
-      bbox_max_lat: bbox?.maxLat ?? null,
-      bbox_min_lng: bbox?.minLng ?? null,
-      bbox_max_lng: bbox?.maxLng ?? null,
-    };
-
-    const result = await onSave({
-      input,
-      selectedGroupIds: privacy === "group" ? selectedGroupIds : [],
-    });
-    if (!result.ok) {
+    } catch (err) {
+      console.error("SaveTrailForm.handleSubmit threw:", err);
       setSubmitting(false);
-      setError(result.error ?? "Could not save trail");
-      return;
+      const message =
+        err instanceof Error && err.message
+          ? `Save failed: ${err.message}`
+          : "Save failed. Please try again.";
+      setError(message);
     }
-    setSubmitting(false);
   };
+
+  // Whenever a new error appears, scroll it into view so the rider
+  // actually sees what went wrong even if the form is scrolled to the
+  // bottom near the Save button.
+  useEffect(() => {
+    if (error && errorRef.current) {
+      errorRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [error]);
 
   return (
     <div
@@ -427,7 +457,10 @@ export default function SaveTrailForm({
           </div>
 
           {error && (
-            <div className="bg-red-900/40 border border-red-500/40 rounded-lg px-3 py-2">
+            <div
+              ref={errorRef}
+              className="bg-red-900/40 border border-red-500/40 rounded-lg px-3 py-2"
+            >
               <p className="text-xs text-red-300" data-testid="save-trail-error">{error}</p>
             </div>
           )}

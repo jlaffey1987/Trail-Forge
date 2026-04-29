@@ -145,15 +145,15 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
     // Upload the new GPX file to object storage first; pass the resulting
     // objectPath to the replace endpoint so the server can finalize the ACL,
     // persist the new artifact reference, and remove the old object.
-    const ticket = await uploadGpxToStorage(text);
-    if (!ticket) {
+    const upload = await uploadGpxToStorage(text);
+    if (!upload.ok) {
       setReplacing(false);
-      setError("Could not upload GPX to storage");
+      setError(upload.error);
       return;
     }
     const updated = await replaceOwnedTrailGpx(trail.id, {
       gpx_data: text,
-      gpx_object_path: ticket.objectPath,
+      gpx_object_path: upload.ticket.objectPath,
       distance_km: parseFloat(v.distanceKm.toFixed(2)),
       bbox_min_lat: v.bbox?.minLat ?? null,
       bbox_max_lat: v.bbox?.maxLat ?? null,

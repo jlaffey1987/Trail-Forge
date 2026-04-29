@@ -579,18 +579,27 @@ export interface GpxUploadTicket {
   objectPath: string;
 }
 
+export type GpxUploadResult =
+  | { ok: true; ticket: GpxUploadTicket }
+  | { ok: false; error: string };
+
 /**
  * Two-step upload of a raw GPX file to object storage:
  *   1) Ask the API server for a signed PUT URL.
  *   2) PUT the GPX text to that URL with `Content-Type: application/gpx+xml`.
  *
- * On success, returns the `objectPath` to send back with `addTrail` /
- * `replaceOwnedTrailGpx` so the server can finalize the ACL and persist
- * the artifact reference on the trail row.
+ * Returns a tagged result so callers can surface a precise, rider-readable
+ * reason when something goes wrong (auth, signing, CORS, network, etc.)
+ * instead of a generic "Could not upload" message that masked failures
+ * on iOS standalone PWAs (see SaveTrailForm).
  */
 export async function uploadGpxToStorage(
   gpxText: string,
-): Promise<GpxUploadTicket | null> {
+): Promise<GpxUploadResult> {
+  // Step 1 — ask our API for a fresh signed PUT URL. requireAuth() on the
+  // server side means a 401 here is the most common cause of upload
+  // failures (Clerk session expired in the standalone PWA).
+  let ticket: GpxUploadTicket;
   try {
     const ticketRes = await fetch("/api/trails/gpx/upload-url", {
       method: "POST",
@@ -599,11 +608,33 @@ export async function uploadGpxToStorage(
       body: JSON.stringify({}),
     });
     if (!ticketRes.ok) {
-      console.error("gpx upload-url error:", ticketRes.status, await ticketRes.text());
-      return null;
+      const body = await ticketRes.text().catch(() => "");
+      console.error("gpx upload-url error:", ticketRes.status, body);
+      if (ticketRes.status === 401 || ticketRes.status === 403) {
+        return {
+          ok: false,
+          error: "You need to sign in again before uploading a GPX file.",
+        };
+      }
+      return {
+        ok: false,
+        error: `Couldn't prepare upload (server returned ${ticketRes.status}). Please try again.`,
+      };
     }
-    const ticket = (await ticketRes.json()) as GpxUploadTicket;
+    ticket = (await ticketRes.json()) as GpxUploadTicket;
+  } catch (err) {
+    console.error("gpx upload-url network error:", err);
+    return {
+      ok: false,
+      error:
+        "Network error while preparing upload. Check your connection and try again.",
+    };
+  }
 
+  // Step 2 — PUT the raw XML straight to the signed object-storage URL.
+  // A failure here is usually CORS (preflight blocked) or a network drop;
+  // surface the HTTP status so we can diagnose from the rider's report.
+  try {
     const putRes = await fetch(ticket.uploadURL, {
       method: "PUT",
       headers: { "Content-Type": "application/gpx+xml" },
@@ -611,13 +642,19 @@ export async function uploadGpxToStorage(
     });
     if (!putRes.ok) {
       console.error("gpx PUT to storage failed:", putRes.status);
-      return null;
+      return {
+        ok: false,
+        error: `Storage upload failed (HTTP ${putRes.status}). Please try again.`,
+      };
     }
-
-    return ticket;
+    return { ok: true, ticket };
   } catch (err) {
-    console.error("uploadGpxToStorage error:", err);
-    return null;
+    console.error("gpx PUT network error:", err);
+    return {
+      ok: false,
+      error:
+        "Storage upload was blocked by your browser or network. Please try again, or use a different network.",
+    };
   }
 }
 
