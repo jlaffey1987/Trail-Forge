@@ -7,6 +7,11 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const VIDEO_DURATION_MS = 6_000;
 const POSTER_FALLBACK_MS = 600;
 
+// PREVIEW MODE: when true, the intro plays on every page load instead of
+// at most once per 24h. Flip back to `false` to restore production
+// once-per-day behavior. Path exclusions (/sign-in etc.) still apply.
+const ALWAYS_SHOW_INTRO = true;
+
 const EXCLUDED_PATH_PATTERNS = [
   /^\/sign-in(\/|$)/,
   /^\/sign-up(\/|$)/,
@@ -24,14 +29,16 @@ function pickInitialMode(): SplashMode {
     : window.location.pathname;
   if (EXCLUDED_PATH_PATTERNS.some((re) => re.test(path))) return "off";
 
-  let lastShown = 0;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) lastShown = Number.parseInt(raw, 10) || 0;
-  } catch {
-    // localStorage unavailable — default to lastShown=0
+  if (!ALWAYS_SHOW_INTRO) {
+    let lastShown = 0;
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw) lastShown = Number.parseInt(raw, 10) || 0;
+    } catch {
+      // localStorage unavailable — default to lastShown=0
+    }
+    if (Date.now() - lastShown < ONE_DAY_MS) return "off";
   }
-  if (Date.now() - lastShown < ONE_DAY_MS) return "off";
 
   if (typeof navigator !== "undefined") {
     if (navigator.onLine === false) return "poster";
