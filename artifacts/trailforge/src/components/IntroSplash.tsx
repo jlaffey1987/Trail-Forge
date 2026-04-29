@@ -2,15 +2,15 @@ import { useEffect, useRef, useState } from "react";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-const STORAGE_KEY = "trailforge:intro-last-shown";
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const VIDEO_DURATION_MS = 6_000;
 const POSTER_FALLBACK_MS = 600;
 
-// PREVIEW MODE: when true, the intro plays on every page load instead of
-// at most once per 24h. Flip back to `false` to restore production
-// once-per-day behavior. Path exclusions (/sign-in etc.) still apply.
-const ALWAYS_SHOW_INTRO = true;
+// The intro plays on every fresh app load / reload — it is part of the
+// product's launch identity. Path exclusions below still apply so deep
+// links into sign-in / sign-up / invite / admin are never blocked, and
+// the network-aware branch below falls back to a static poster on
+// offline / Save-Data / 2g connections so we never burn a slow user's
+// data.
 
 const EXCLUDED_PATH_PATTERNS = [
   /^\/sign-in(\/|$)/,
@@ -29,17 +29,6 @@ function pickInitialMode(): SplashMode {
     : window.location.pathname;
   if (EXCLUDED_PATH_PATTERNS.some((re) => re.test(path))) return "off";
 
-  if (!ALWAYS_SHOW_INTRO) {
-    let lastShown = 0;
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) lastShown = Number.parseInt(raw, 10) || 0;
-    } catch {
-      // localStorage unavailable — default to lastShown=0
-    }
-    if (Date.now() - lastShown < ONE_DAY_MS) return "off";
-  }
-
   if (typeof navigator !== "undefined") {
     if (navigator.onLine === false) return "poster";
     const conn = (navigator as Navigator & {
@@ -56,14 +45,6 @@ function pickInitialMode(): SplashMode {
   return "video";
 }
 
-function markShown() {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, String(Date.now()));
-  } catch {
-    // ignore
-  }
-}
-
 export default function IntroSplash() {
   const [mode, setMode] = useState<SplashMode>(() => pickInitialMode());
   const [closing, setClosing] = useState(false);
@@ -72,7 +53,6 @@ export default function IntroSplash() {
 
   useEffect(() => {
     if (mode === "off") return;
-    markShown();
 
     if (mode === "poster") {
       closeTimerRef.current = window.setTimeout(() => {
