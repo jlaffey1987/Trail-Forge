@@ -13,7 +13,6 @@ import {
   type GroupShare,
   getTrailShares,
   listMyGroups,
-  setTrailShares,
 } from "@/lib/groups";
 
 const TRAIL_TYPES = ["BOAT", "Green Lane", "UCR", "Other"];
@@ -100,6 +99,11 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
       return;
     }
     setSubmitting(true);
+    // Pass group_ids alongside the metadata fields so PATCH /trails/:id can
+    // reconcile the trail row + trail_shares rows in one request. The server
+    // applies the share diff BEFORE updating metadata so a share-write
+    // failure leaves the trail untouched (visibility never goes out of sync
+    // with privacy).
     const input: UpdateTrailInput = {
       name: name.trim(),
       difficulty,
@@ -109,20 +113,12 @@ export default function EditTrailDialog({ open, trail, onClose, onChanged }: Pro
       distance_km: distNum,
       description: description.trim() || null,
       privacy,
+      group_ids: privacy === "group" ? selectedGroupIds : [],
     };
     const updated = await updateOwnedTrail(trail.id, input);
-    if (!updated) {
-      setSubmitting(false);
-      setError("Could not update trail");
-      return;
-    }
-    // Sync shares: when privacy=group save the picked ids; otherwise clear.
-    const sharesToWrite = privacy === "group" ? selectedGroupIds : [];
-    const sharesOk = await setTrailShares(trail.id, sharesToWrite);
     setSubmitting(false);
-    if (!sharesOk) {
-      setError("Trail saved, but could not update group shares.");
-      onChanged(updated);
+    if (!updated) {
+      setError("Could not update trail");
       return;
     }
     onChanged(updated);

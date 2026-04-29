@@ -26,9 +26,10 @@ export interface SaveTrailFormResult {
   /** Final input ready to send to `addTrail()`. */
   input: CreateTrailInput;
   /**
-   * Group ids the user picked to share into. The caller is responsible for
-   * persisting these via `setTrailShares(trailId, selectedGroupIds)` after
-   * the trail row has been created.
+   * Group ids the user picked to share into. The caller forwards these to
+   * `addTrail({ ..., group_ids: selectedGroupIds })` so POST /trails can
+   * create the trail row and the matching `trail_shares` rows in one
+   * handler (and roll back the trail if the share insert fails).
    */
   selectedGroupIds: string[];
 }

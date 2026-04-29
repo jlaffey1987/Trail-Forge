@@ -26,6 +26,11 @@ const ExtraTrailFields = z.object({
   // "/objects/trails/source/<uuid>.gpx" (returned by
   // POST /trails/gpx/upload-url).
   gpx_object_path: z.string().min(1).max(512).nullish(),
+  // Optional group ids to share the new trail into. When privacy=group, the
+  // server creates the matching `trail_shares` rows in the same handler — if
+  // the share insert fails, the trail row is rolled back so the user never
+  // ends up with a private trail they thought they shared. See POST /trails.
+  group_ids: z.array(z.string().uuid()).max(50).optional(),
 });
 
 const PatchTrailBody = z.object({
@@ -38,6 +43,11 @@ const PatchTrailBody = z.object({
   description: z.string().max(5000).nullable().optional(),
   is_public: z.boolean().optional(),
   privacy: PrivacyEnum.optional(),
+  // Optional replacement set of group ids to share the trail into. When
+  // present, the server diffs against the current `trail_shares` and applies
+  // the additions / removals BEFORE touching trail metadata so a share-write
+  // failure cannot leave the trail with stale visibility.
+  group_ids: z.array(z.string().uuid()).max(50).optional(),
 });
 
 const ReplaceGpxBody = z.object({
@@ -119,6 +129,53 @@ async function fetchOwnedTrailRow(trailId: string, userId: string) {
 }
 
 /**
+ * Verify the caller belongs to every requested group id. Returns the missing
+ * ids (empty array = all good). When the `group_members` table is missing
+ * (older Supabase migration window) we treat every requested id as missing
+ * so the caller cannot smuggle in shares against a partial schema.
+ */
+async function findMissingGroupMemberships(
+  groupIds: string[],
+  userId: string,
+): Promise<string[]> {
+  if (groupIds.length === 0) return [];
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from("group_members")
+    .select("group_id")
+    .eq("user_id", userId)
+    .in("group_id", groupIds);
+  if (error) return [...groupIds];
+  const owned = new Set(((data ?? []) as Array<{ group_id: string }>).map((m) => m.group_id));
+  return groupIds.filter((g) => !owned.has(g));
+}
+
+/**
+ * Insert `trail_shares` rows for a freshly-created trail. Returns the
+ * underlying error if the insert fails so the caller can roll back the
+ * trail row. A no-op for empty `groupIds`.
+ */
+async function insertTrailShares(
+  trailId: string,
+  groupIds: string[],
+  userId: string,
+): Promise<{ error: { code?: string; message?: string } | null }> {
+  if (groupIds.length === 0) return { error: null };
+  const supa = getSupabaseAdmin();
+  const { error } = await supa.from("trail_shares").insert(
+    groupIds.map((gid) => ({
+      trail_id: trailId,
+      group_id: gid,
+      shared_by_user_id: userId,
+    })),
+  );
+  // Duplicate inserts (caller picked the same group twice in some edge case)
+  // are treated as success — the share already exists.
+  if (error && error.code === "23505") return { error: null };
+  return { error };
+}
+
+/**
  * Best-effort delete of an object-storage entity associated with a trail.
  * Logs failures but never throws — storage cleanup is non-fatal so we don't
  * leave a half-deleted trail in the database when GCS hiccups.
@@ -188,13 +245,31 @@ router.post("/trails", async (req: Request, res: Response) => {
   // for safety. "group" privacy keeps the trail row itself private
   // (is_public=false) — group visibility is layered on top via rows in
   // `trail_shares` and surfaced to members through `/api/me/group-trails`.
-  // Callers create the share rows in a follow-up `PUT /api/trails/:id/shares`
-  // request once they have the new trail id.
+  // When `group_ids` accompanies `privacy=group` we create the share rows
+  // here in the same handler (and roll back the trail row on failure) so a
+  // half-shared trail can never silently end up private. See
+  // `insertTrailShares` below.
   const data = parsed.data;
   let isPublic = data.is_public ?? false;
   if (extras.data.privacy === "public") isPublic = true;
   else if (extras.data.privacy === "private") isPublic = false;
   else if (extras.data.privacy === "group") isPublic = false;
+
+  // Only honour group_ids when privacy=group so a stray field on a public /
+  // private trail can't accidentally fan it out to groups.
+  const groupIds: string[] = (extras.data.privacy === "group" && extras.data.group_ids)
+    ? Array.from(new Set(extras.data.group_ids))
+    : [];
+
+  // Validate group memberships BEFORE creating the trail so an invalid
+  // request never leaves an orphan row behind.
+  if (groupIds.length > 0) {
+    const missing = await findMissingGroupMemberships(groupIds, auth.userId);
+    if (missing.length > 0) {
+      res.status(403).json({ error: "Cannot share into a group you don't belong to" });
+      return;
+    }
+  }
 
   try {
     const supa = getSupabaseAdmin();
@@ -261,6 +336,45 @@ router.post("/trails", async (req: Request, res: Response) => {
       res.status(500).json({ error: "Failed to create trail" });
       return;
     }
+
+    // Now that the trail row exists, fan out the group shares atomically:
+    // if the share insert fails for any reason (network blip, race against
+    // a group being deleted, FK constraint, etc.) we delete the trail row
+    // we just created so the user never ends up with a private trail they
+    // thought they shared with a group.
+    const newTrailId = (row as { id?: string } | null)?.id ?? null;
+    if (groupIds.length > 0 && newTrailId) {
+      const { error: shareErr } = await insertTrailShares(
+        newTrailId,
+        groupIds,
+        auth.userId,
+      );
+      if (shareErr) {
+        req.log.error(
+          { err: shareErr, trailId: newTrailId },
+          "createTrail shares insert failed — rolling back trail row",
+        );
+        const { error: rollbackErr } = await supa
+          .from("trails")
+          .delete()
+          .eq("id", newTrailId)
+          .eq("owner_user_id", auth.userId);
+        if (rollbackErr) {
+          req.log.error(
+            { err: rollbackErr, trailId: newTrailId },
+            "createTrail rollback failed — orphan trail row may remain",
+          );
+        }
+        // Also clean up the GPX object we finalized for this aborted trail
+        // so storage doesn't leak.
+        await tryDeleteGpxObject(normalizedObjectPath, req.log);
+        res.status(500).json({
+          error: "Failed to share trail with selected groups — trail not created",
+        });
+        return;
+      }
+    }
+
     res.json(CreateTrailResponse.parse(row));
   } catch (err) {
     req.log.error({ err }, "createTrail failed");
@@ -336,16 +450,112 @@ router.patch(
     }
 
     // See POST /trails for the privacy → is_public mapping. "group" privacy
-    // keeps the trail row private; group share rows are managed separately
-    // via `PUT /api/trails/:id/shares` (so this endpoint never touches the
-    // `trail_shares` table).
+    // keeps the trail row private and lets `group_ids` (when supplied) drive
+    // the matching `trail_shares` rows. Shares are reconciled BEFORE the
+    // metadata update so a share-write failure leaves the trail unchanged
+    // (rather than flipping it to a privacy state that contradicts its
+    // current shares).
     const update: Record<string, unknown> = { ...parsed.data };
     if (parsed.data.privacy === "public") update.is_public = true;
     else if (parsed.data.privacy === "private") update.is_public = false;
     else if (parsed.data.privacy === "group") update.is_public = false;
     delete update.privacy;
+    delete update.group_ids;
 
     const supa = getSupabaseAdmin();
+
+    // Reconcile shares first if the caller passed an explicit `group_ids`
+    // list (and / or moved away from privacy=group). Both POST and PATCH
+    // accept group_ids so the client never has to fall back to a separate
+    // `setTrailShares` follow-up call.
+    if (parsed.data.group_ids != null || parsed.data.privacy != null) {
+      // Resolve the desired share set:
+      //   privacy=public or private  → always clears shares (visibility no
+      //     longer needs them, and a stray `group_ids` array shouldn't
+      //     contradict the privacy flip)
+      //   privacy=group              → use the supplied `group_ids` (or [] when
+      //     omitted, but `shouldReconcile` below will skip the no-op case)
+      //   privacy unchanged          → use the supplied `group_ids` directly,
+      //     so callers can edit just the share list without re-asserting
+      //     privacy on every PATCH
+      const targetIdsRaw =
+        parsed.data.privacy === "public" || parsed.data.privacy === "private"
+          ? []
+          : (parsed.data.group_ids ?? []);
+      const targetIds = Array.from(new Set(targetIdsRaw));
+
+      // Skip the reconcile entirely when the caller didn't provide group_ids
+      // AND isn't switching away from group privacy — there's nothing to do.
+      const shouldReconcile = parsed.data.group_ids != null ||
+        parsed.data.privacy === "private" ||
+        parsed.data.privacy === "public";
+
+      if (shouldReconcile) {
+        if (targetIds.length > 0) {
+          const missing = await findMissingGroupMemberships(targetIds, userId);
+          if (missing.length > 0) {
+            res.status(403).json({ error: "Cannot share into a group you don't belong to" });
+            return;
+          }
+        }
+
+        const { data: existingShares, error: existingErr } = await supa
+          .from("trail_shares")
+          .select("group_id")
+          .eq("trail_id", trailId);
+        if (existingErr && !isMissingTableError(existingErr)) {
+          req.log.error({ err: existingErr }, "patch trail load shares failed");
+          res.status(500).json({ error: "Failed to update trail shares" });
+          return;
+        }
+        const existingSet = new Set(
+          ((existingShares ?? []) as Array<{ group_id: string }>).map((r) => r.group_id),
+        );
+        const targetSet = new Set(targetIds);
+        const toAdd = targetIds.filter((g) => !existingSet.has(g));
+        const toRemove = [...existingSet].filter((g) => !targetSet.has(g));
+
+        if (toAdd.length > 0) {
+          const { error: addErr } = await insertTrailShares(trailId, toAdd, userId);
+          if (addErr) {
+            req.log.error({ err: addErr }, "patch trail add shares failed");
+            res.status(500).json({ error: "Failed to update trail shares" });
+            return;
+          }
+        }
+        if (toRemove.length > 0) {
+          const { error: delErr } = await supa
+            .from("trail_shares")
+            .delete()
+            .eq("trail_id", trailId)
+            .in("group_id", toRemove);
+          if (delErr) {
+            req.log.error({ err: delErr }, "patch trail remove shares failed");
+            res.status(500).json({ error: "Failed to update trail shares" });
+            return;
+          }
+        }
+      }
+    }
+
+    // If the only thing the caller sent was `group_ids` (already applied
+    // above), there's no metadata to write — just echo back the trail row.
+    if (Object.keys(update).length === 0) {
+      const { data: row, error: selErr } = await supa
+        .from("trails")
+        .select()
+        .eq("id", trailId)
+        .eq("owner_user_id", userId)
+        .single();
+      if (selErr) {
+        req.log.error({ err: selErr }, "patch trail (shares-only) re-read failed");
+        res.status(500).json({ error: "Failed to update trail" });
+        return;
+      }
+      res.json(row);
+      return;
+    }
+
     let { data: row, error } = await supa
       .from("trails")
       .update(update)

@@ -1676,11 +1676,12 @@ router.get(
 // Adds new shares, removes shares not in the list. Each group_id must be
 // one the caller is a member of.
 //
-// This is the second step of the two-step group-share flow: the trail row
-// itself is created/updated by `routes/trails.ts` (POST /trails or
-// PATCH /trails/:id) with `privacy: "group"` (which keeps `is_public=false`),
-// and group visibility is layered on by writing rows here. Reads come back
-// out via `GET /me/group-trails` further below.
+// Standalone share-management endpoint kept for the EditTrailDialog "Sharing"
+// panel and any future "manage group shares without touching trail metadata"
+// flows. Trail-create and trail-edit also accept `group_ids` directly so the
+// trail row + share rows can be persisted in one atomic call (see
+// `routes/trails.ts` POST / PATCH); this route is no longer used by the
+// initial create flow.
 // ---------------------------------------------------------------------------
 
 router.put(

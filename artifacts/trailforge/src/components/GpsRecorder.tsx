@@ -3,7 +3,6 @@ import { downloadGPX } from "@/lib/gpx";
 import { addTrail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import SaveTrailForm from "@/components/contribute/SaveTrailForm";
-import { setTrailShares } from "@/lib/groups";
 
 interface RecordedPoint {
   lat: number;
@@ -625,11 +624,12 @@ export default function GpsRecorder({ mapRef, leafletLoaded, onSaved }: Props) {
           }}
           onCancel={() => setShowSaveForm(false)}
           onSave={async ({ input, selectedGroupIds }) => {
-            const saved = await addTrail(input);
+            // Pass selectedGroupIds straight through — POST /trails creates
+            // the trail row and the matching trail_shares rows in one
+            // handler (and rolls back the trail row if shares fail), so a
+            // failed share can never leave behind an orphan private trail.
+            const saved = await addTrail({ ...input, group_ids: selectedGroupIds });
             if (!saved) return { ok: false, error: "Could not save trail" };
-            if (selectedGroupIds.length > 0) {
-              await setTrailShares(saved.id, selectedGroupIds);
-            }
             setShowSaveForm(false);
             clearMapLayers();
             setPoints([]);

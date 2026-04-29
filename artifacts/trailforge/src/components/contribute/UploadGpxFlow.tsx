@@ -6,7 +6,6 @@ import {
 } from "@/lib/gpx";
 import SaveTrailForm from "./SaveTrailForm";
 import { addTrail } from "@/lib/supabase";
-import { setTrailShares } from "@/lib/groups";
 import { useLeaflet } from "@/lib/useLeaflet";
 
 declare global {
@@ -184,12 +183,12 @@ export default function UploadGpxFlow({ open, onClose, onSaved }: Props) {
         }}
         onCancel={() => setStep("preview")}
         onSave={async ({ input, selectedGroupIds }) => {
-          const trail = await addTrail(input);
+          // Pass selectedGroupIds straight through — the server creates the
+          // trail row and the matching trail_shares rows in one handler so
+          // a failed share can never leave behind an orphan private trail.
+          const trail = await addTrail({ ...input, group_ids: selectedGroupIds });
           if (!trail) {
             return { ok: false, error: "Could not save trail. Are you signed in?" };
-          }
-          if (selectedGroupIds.length > 0) {
-            await setTrailShares(trail.id, selectedGroupIds);
           }
           onSaved?.();
           onClose();

@@ -443,6 +443,14 @@ export interface CreateTrailInput {
   bbox_max_lat?: number | null;
   bbox_min_lng?: number | null;
   bbox_max_lng?: number | null;
+  /**
+   * Group ids to share the new trail into. Only honoured when
+   * `privacy === "group"`. The server creates the trail row and the
+   * matching `trail_shares` rows in the same handler — if the share
+   * insert fails the trail row is rolled back, so a failed share never
+   * leaves an orphan private trail behind.
+   */
+  group_ids?: string[];
 }
 
 export interface GpxUploadTicket {
@@ -517,6 +525,11 @@ export async function addTrail(
         bbox_max_lat: input.bbox_max_lat,
         bbox_min_lng: input.bbox_min_lng,
         bbox_max_lng: input.bbox_max_lng,
+        // Server creates the trail and trail_shares rows in one handler when
+        // privacy=group; if the shares fail the trail row is rolled back.
+        ...(input.privacy === "group" && input.group_ids
+          ? { group_ids: input.group_ids }
+          : {}),
       }),
     });
     if (!res.ok) {
@@ -560,6 +573,15 @@ export interface UpdateTrailInput {
   distance_km?: number | null;
   description?: string | null;
   privacy?: TrailPrivacy;
+  /**
+   * Replacement set of group ids the trail should be shared into. The
+   * server diffs against the current `trail_shares`, applies the changes
+   * BEFORE updating metadata, and returns 500 on failure (leaving the
+   * trail untouched) so visibility can never go out of sync with privacy.
+   * When privacy is changed to "private" or "public" any leftover shares
+   * are cleared regardless of this field.
+   */
+  group_ids?: string[];
 }
 
 export async function updateOwnedTrail(
