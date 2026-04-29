@@ -468,6 +468,13 @@ export interface RenderTrailLayerOptions {
   interactive?: boolean;
   /** Optional Leaflet pane name to render trail layers into (lets callers stack other overlays on top). */
   pane?: string;
+  /**
+   * When true, drop a small "Shared via {Group}" badge marker on the
+   * midpoint of any trail whose `shared_groups` array is non-empty so
+   * members can tell at a glance which trails are visible only because
+   * they belong to a group. Defaults to false.
+   */
+  showSharedGroupBadges?: boolean;
 }
 
 export interface TrailLayerHandle {
@@ -495,6 +502,7 @@ export function renderTrailLayer(
   const pane = options.pane;
 
   const selectedList = Array.from(selectedIds);
+  const showSharedGroupBadges = options.showSharedGroupBadges ?? false;
 
   for (const trail of trails) {
     // Defence in depth: even if a synthetic 2-point AI placeholder slipped
@@ -546,6 +554,72 @@ export function renderTrailLayer(
     layers.push(main);
 
     for (const c of latlngs) bounds.push(c);
+
+    // Group-shared badge marker — surfaces "Shared via {Group Name}" on
+    // the map for trails the viewer can only see because they belong to
+    // the group(s) listed in `shared_groups`. We anchor the marker at
+    // the polyline's midpoint so it follows the trail rather than its
+    // arbitrary first vertex. Public trails (no `shared_groups`) get no
+    // badge so the visual stays unchanged for them.
+    const sharedGroups = trail.shared_groups ?? [];
+    if (showSharedGroupBadges && sharedGroups.length > 0) {
+      const mid = latlngs[Math.floor(latlngs.length / 2)];
+      const primary = sharedGroups[0]!;
+      const extra = sharedGroups.length > 1 ? ` +${sharedGroups.length - 1}` : "";
+      // Visible label and tooltip both lead with "Shared via" so the
+      // map matches the wording used by the trail-detail sheet and the
+      // Discover card.
+      const fullList = sharedGroups.map((g) => g.name).join(", ");
+      const visibleLabel = esc(`Shared via ${primary.name}${extra}`);
+      const tooltip = esc(`Shared via ${fullList}`);
+      // Gate pointer events by interactivity: in Draw / Record modes the
+      // polylines are rendered non-interactive so map clicks pass through
+      // to the waypoint / GPS handlers, and the badge must do the same so
+      // it doesn't accidentally swallow taps.
+      const pointerEvents = interactive ? "auto" : "none";
+      const cursor = interactive && options.onTrailClick ? "pointer" : "default";
+      const html = `<div title="${tooltip}" style="
+          display:inline-flex;align-items:center;gap:3px;
+          background:rgba(146,64,14,0.92);
+          color:#fde68a;
+          border:1.5px solid rgba(245,158,11,0.85);
+          border-radius:9999px;
+          padding:1px 6px 1px 4px;
+          font-family:system-ui,-apple-system,sans-serif;
+          font-size:9px;font-weight:800;
+          letter-spacing:0.04em;text-transform:uppercase;
+          white-space:nowrap;
+          box-shadow:0 2px 6px rgba(0,0,0,0.55);
+          cursor:${cursor};
+          transform:translate(-50%,-50%);
+          pointer-events:${pointerEvents};
+        ">
+          <svg viewBox="0 0 24 24" width="9" height="9" fill="none"
+            stroke="currentColor" stroke-width="2.5">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span>${visibleLabel}</span>
+        </div>`;
+      const badge = L.marker(mid, {
+        icon: L.divIcon({
+          html,
+          iconSize: [0, 0],
+          iconAnchor: [0, 0],
+          className: "trail-shared-group-badge",
+        }),
+        interactive,
+        ...(pane ? { pane } : {}),
+      } as Parameters<typeof L.marker>[1]).addTo(map);
+      badge.options.alt = `shared-group:${trail.id}`;
+      if (interactive && options.onTrailClick) {
+        const handler = options.onTrailClick;
+        badge.on("click", () => handler(trail));
+      }
+      layers.push(badge);
+    }
 
     if (showLabels) {
       const mid = latlngs[Math.floor(latlngs.length / 2)];

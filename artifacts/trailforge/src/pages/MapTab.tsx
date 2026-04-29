@@ -421,6 +421,10 @@ export default function MapTab() {
       pane: "trailsPane",
       interactive: isExplore,
       onTrailClick: isExplore ? (trail) => setSelectedTrail(trail) : undefined,
+      // Highlight trails that are visible only because the viewer belongs
+      // to one of the listed groups. Non-shared (public) trails render as
+      // before — see lib/trailLayer.ts.
+      showSharedGroupBadges: true,
     });
     trailLayerHandleRef.current = handle;
   }, [trailsForRender, mapMode, routeIdSet, currentZoom, zoomToCluster]);
