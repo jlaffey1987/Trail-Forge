@@ -1,5 +1,6 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { getAuth, clerkClient } from "@clerk/express";
+import { z } from "zod";
 import {
   SyncMeResponse,
   SaveTrailBody,
@@ -9,6 +10,17 @@ import {
   MigrateSessionSavedTrailsResponse,
 } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+
+/**
+ * Body schema for `PUT /me/planner-route`. The trail order matters — we
+ * persist the array exactly as sent so the user's chosen route reads back
+ * identically from another device. `trailIds` is capped at 50 because the
+ * planner UI can't usefully chain more than that and the cap keeps the
+ * jsonb payload bounded.
+ */
+const PutPlannerRouteBody = z.object({
+  trailIds: z.array(z.string().min(1)).max(50),
+});
 
 const router: IRouter = Router();
 
@@ -292,5 +304,271 @@ router.post(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// Planner route — persisted ordered list of trail ids the user is building
+// on the Map / Planner. Per-user singleton (one row per Clerk user id).
+//
+// Schema is in `supabase/migrations/0012_planner_routes.sql`. The same
+// "missing table = soft no-op" tolerance the saved-trails endpoints use is
+// applied here so the UI keeps working on a database that hasn't had the
+// migration applied yet — the route then stays in localStorage only.
+// ---------------------------------------------------------------------------
+
+const PLANNER_TRAIL_COLUMNS = [
+  "id",
+  "user_id",
+  "owner_user_id",
+  "name",
+  "type",
+  "difficulty",
+  "distance_km",
+  "terrain",
+  "legal_status",
+  "is_public",
+  "created_at",
+  "bbox_min_lat",
+  "bbox_max_lat",
+  "bbox_min_lng",
+  "bbox_max_lng",
+  "description",
+  "deleted_at",
+  "gpx_object_path",
+  "source",
+  "source_url",
+  "verification_status",
+  "ai_grade",
+  "ai_grade_rationale",
+  "ai_grade_model",
+  "ai_graded_at",
+  "simplified_path",
+  "path_geojson",
+  "path_point_count",
+  "elevation_profile",
+  "elevation_gain_m",
+  "elevation_loss_m",
+].join(",");
+
+function isMissingTableError(err: { code?: string; message?: string } | null) {
+  if (!err) return false;
+  return (
+    err.code === "42P01" ||
+    err.code === "PGRST205" ||
+    /relation .* does not exist/i.test(err.message ?? "")
+  );
+}
+
+router.get("/me/planner-route", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("planner_routes")
+      .select("trail_ids, updated_at")
+      .eq("user_id", auth.userId)
+      .maybeSingle();
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        // Migration 0012 not yet applied — behave as if the row is empty
+        // so the client falls back to localStorage-only mode silently.
+        res.json({ trailIds: [], trails: [], updatedAt: null });
+        return;
+      }
+      req.log.error({ err: error }, "fetchPlannerRoute failed");
+      res.status(500).json({ error: "Failed to fetch planner route" });
+      return;
+    }
+
+    const rawIds = (data?.trail_ids ?? []) as unknown;
+    const trailIds = Array.isArray(rawIds)
+      ? rawIds.filter((v): v is string => typeof v === "string")
+      : [];
+
+    if (trailIds.length === 0) {
+      res.json({
+        trailIds: [],
+        trails: [],
+        updatedAt: data?.updated_at ?? null,
+      });
+      return;
+    }
+
+    // Hydrate the trail rows so the client can render the route immediately
+    // on a fresh device. We project the same slim columns the Map tab uses
+    // to keep the payload light. Soft-deleted trails are filtered out.
+    //
+    // SECURITY: this endpoint is server-mediated with the service-role key,
+    // which bypasses RLS. We MUST therefore re-apply trail visibility here
+    // — otherwise an authenticated caller could PUT arbitrary trail ids
+    // into their own planner_routes row and read back any private trail's
+    // metadata via the GET. Visibility model (matches /api/me/group-trails):
+    //   - the trail is public (`is_public = true`), OR
+    //   - the caller owns the trail (`owner_user_id = auth.userId`), OR
+    //   - the trail is shared into a group the caller is a member of
+    //     (`trail_shares` row joining `group_members`).
+    const { data: trailRows, error: trailErr } = await supa
+      .from("trails")
+      .select(PLANNER_TRAIL_COLUMNS)
+      .in("id", trailIds)
+      .is("deleted_at", null);
+
+    if (trailErr) {
+      req.log.error({ err: trailErr }, "planner-route trail hydrate failed");
+      res.json({
+        trailIds,
+        trails: [],
+        updatedAt: data?.updated_at ?? null,
+      });
+      return;
+    }
+
+    const fetched = (trailRows as unknown as Array<Record<string, unknown>>) ?? [];
+    const visibleIds = new Set<string>();
+    const needsGroupCheck: string[] = [];
+    for (const row of fetched) {
+      const id = typeof row.id === "string" ? row.id : null;
+      if (!id) continue;
+      if (row.is_public === true || row.owner_user_id === auth.userId) {
+        visibleIds.add(id);
+      } else {
+        needsGroupCheck.push(id);
+      }
+    }
+
+    if (needsGroupCheck.length > 0) {
+      const { data: memberships, error: mErr } = await supa
+        .from("group_members")
+        .select("group_id")
+        .eq("user_id", auth.userId);
+      if (mErr && !isMissingTableError(mErr)) {
+        req.log.warn({ err: mErr }, "planner-route group_members load failed");
+      }
+      const groupIds = ((memberships ?? []) as Array<{ group_id: string }>)
+        .map((m) => m.group_id);
+      if (groupIds.length > 0) {
+        const { data: shares, error: sErr } = await supa
+          .from("trail_shares")
+          .select("trail_id")
+          .in("trail_id", needsGroupCheck)
+          .in("group_id", groupIds);
+        if (sErr && !isMissingTableError(sErr)) {
+          req.log.warn({ err: sErr }, "planner-route trail_shares load failed");
+        }
+        for (const r of (shares ?? []) as Array<{ trail_id: string }>) {
+          visibleIds.add(r.trail_id);
+        }
+      }
+    }
+
+    // Preserve the saved order — Supabase doesn't guarantee `IN (...)` order.
+    // Trails the caller can't see are dropped from the hydrated `trails`
+    // array but their ids stay in `trailIds` so the client can render a
+    // placeholder ("unavailable trail") row in the planner.
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const row of fetched) {
+      const id = row?.id;
+      if (typeof id === "string" && visibleIds.has(id)) byId.set(id, row);
+    }
+    const ordered: Array<Record<string, unknown>> = [];
+    for (const id of trailIds) {
+      const row = byId.get(id);
+      if (row) ordered.push(row);
+    }
+
+    res.json({
+      trailIds,
+      trails: ordered,
+      updatedAt: data?.updated_at ?? null,
+    });
+  } catch (err) {
+    req.log.error({ err }, "planner-route GET failed");
+    res.status(500).json({ error: "Failed to fetch planner route" });
+  }
+});
+
+router.put("/me/planner-route", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const parsed = PutPlannerRouteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid trailIds payload" });
+    return;
+  }
+
+  // De-dupe while preserving order — the client's reducer does the same
+  // thing, but defend in depth so a buggy caller can't poison the row.
+  const seen = new Set<string>();
+  const trailIds: string[] = [];
+  for (const id of parsed.data.trailIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    trailIds.push(id);
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    const updatedAt = new Date().toISOString();
+    const row = {
+      user_id: auth.userId,
+      trail_ids: trailIds,
+      updated_at: updatedAt,
+    };
+
+    let { error } = await supa
+      .from("planner_routes")
+      .upsert(row, { onConflict: "user_id" });
+
+    // First-sign-in race recovery: ClerkUserSync runs `/me/sync` and the
+    // planner store's PUT from independent effects, so the planner upsert
+    // can land before the `users` row exists. Stub-insert the user row
+    // (id-only — `/me/sync` will backfill email/display_name/avatar in
+    // the same flow) and retry once. Without this the FK violation would
+    // only be retried on the user's next route edit.
+    if (error?.code === "23503") {
+      const { error: userErr } = await supa
+        .from("users")
+        .upsert(
+          { id: auth.userId, updated_at: updatedAt },
+          { onConflict: "id" },
+        );
+      if (!userErr) {
+        const retry = await supa
+          .from("planner_routes")
+          .upsert(row, { onConflict: "user_id" });
+        error = retry.error;
+      }
+    }
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        // Migration 0012 not yet applied — accept the write so the UI
+        // doesn't surface an error, but flag it in the logs so operators
+        // know to apply the migration to enable cross-device sync.
+        req.log.warn(
+          "planner_routes table missing — apply migration 0012_planner_routes.sql",
+        );
+        res.json({ updatedAt: null, persisted: false });
+        return;
+      }
+      req.log.error({ err: error }, "planner-route upsert failed");
+      res.status(500).json({ error: "Failed to save planner route" });
+      return;
+    }
+
+    res.json({ updatedAt, persisted: true });
+  } catch (err) {
+    req.log.error({ err }, "planner-route PUT failed");
+    res.status(500).json({ error: "Failed to save planner route" });
+  }
+});
 
 export default router;

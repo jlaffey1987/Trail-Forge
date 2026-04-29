@@ -26,6 +26,7 @@ import InviteAcceptPage from "@/components/groups/InviteAcceptPage";
 import AdminPage from "@/pages/AdminPage";
 import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
+import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
@@ -382,6 +383,14 @@ function ClerkUserSync() {
       // pending email-bound group invites for this user.
       await autoAcceptEmailInvites();
     })();
+  }, [isLoaded, isSignedIn, user]);
+
+  // Hand the planner-route store the current Clerk user id whenever it
+  // changes. The store hydrates from Supabase on sign-in (cross-device
+  // restore) and falls back to local-only mode on sign-out.
+  useEffect(() => {
+    if (!isLoaded) return;
+    setPlannerRouteUserId(isSignedIn && user ? user.id : null);
   }, [isLoaded, isSignedIn, user]);
 
   return null;
