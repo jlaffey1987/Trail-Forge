@@ -93,6 +93,56 @@ function generateInviteToken(): string {
 
 const INVITE_DEFAULT_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 
+// Minimal logger contract that matches `req.log` (pino) and avoids pulling in
+// the pino types directly. Used by the activity-event helpers below for
+// best-effort warn/error reporting.
+interface MinimalLogger {
+  warn: (obj: unknown, msg?: string) => void;
+  error: (obj: unknown, msg?: string) => void;
+}
+
+/**
+ * Best-effort: append one `trail_unshared` activity event per removed group
+ * so the in-app feed can surface "<actor> stopped sharing <trail> in <group>".
+ *
+ * Snapshots `trails.name` at event time so the row keeps rendering even if
+ * the trail is later soft- or hard-deleted. Failures are logged and
+ * swallowed — the calling route already succeeded in removing the share
+ * row, and a missing event is preferable to rolling back a destructive
+ * change the user explicitly asked for.
+ */
+async function logTrailUnsharedEvents(
+  trailId: string,
+  groupIds: string[],
+  actorUserId: string,
+  log: MinimalLogger,
+): Promise<void> {
+  if (groupIds.length === 0) return;
+  try {
+    const supa = getSupabaseAdmin();
+    const { data: trail } = await supa
+      .from("trails")
+      .select("name")
+      .eq("id", trailId)
+      .maybeSingle();
+    const trailName =
+      (trail as { name?: string | null } | null)?.name ?? null;
+    const rows = groupIds.map((gid) => ({
+      type: "trail_unshared",
+      group_id: gid,
+      actor_user_id: actorUserId,
+      trail_id: trailId,
+      trail_name_snapshot: trailName,
+    }));
+    const { error } = await supa.from("group_activity_events").insert(rows);
+    if (error && !isMissingTableError(error)) {
+      log.warn({ err: error }, "log trail_unshared events failed");
+    }
+  } catch (err) {
+    log.warn({ err }, "log trail_unshared events threw");
+  }
+}
+
 async function fetchMembership(groupId: string, userId: string) {
   const supa = getSupabaseAdmin();
   const { data, error } = await supa
@@ -786,6 +836,20 @@ router.post(
       res.status(500).json({ error: "Failed to leave group" });
       return;
     }
+    // Best-effort: log a member_left activity event so the in-app feed
+    // can surface the departure to the rest of the group. The leave
+    // itself already succeeded — failure here shouldn't roll it back.
+    {
+      const { error: evErr } = await supa.from("group_activity_events").insert({
+        type: "member_left",
+        group_id: idParse.data,
+        actor_user_id: userId,
+        subject_user_id: userId,
+      });
+      if (evErr && !isMissingTableError(evErr)) {
+        req.log.warn({ err: evErr }, "log member_left event failed");
+      }
+    }
     res.json({ ok: true });
   }),
 );
@@ -848,6 +912,20 @@ router.delete(
     if (error) {
       res.status(500).json({ error: "Failed to remove member" });
       return;
+    }
+    // Best-effort: log a member_left event so the activity feed can show
+    // "<actor> removed <subject>". `actor_user_id` is the admin who took
+    // the action; `subject_user_id` is the removed member.
+    {
+      const { error: evErr } = await supa.from("group_activity_events").insert({
+        type: "member_left",
+        group_id: idParse.data,
+        actor_user_id: callerId,
+        subject_user_id: targetUserId,
+      });
+      if (evErr && !isMissingTableError(evErr)) {
+        req.log.warn({ err: evErr }, "log member_left event failed");
+      }
     }
     res.json({ ok: true });
   }),
@@ -1451,19 +1529,26 @@ router.get(
       }
     }
 
-    // -- group memberships --
+    // -- group memberships (with role, so we can scope admin-only events
+    //    like declined invites to owners/admins) --
     const { data: memberships, error: mErr } = await supa
       .from("group_members")
-      .select("group_id")
+      .select("group_id, role")
       .eq("user_id", userId);
     if (mErr && !isMissingTableError(mErr)) {
       req.log.error({ err: mErr }, "notifications memberships load failed");
       res.status(500).json({ error: "Failed to load notifications" });
       return;
     }
-    const groupIds = ((memberships ?? []) as Array<{ group_id: string }>).map(
-      (m) => m.group_id,
-    );
+    interface MembershipLite {
+      group_id: string;
+      role: string;
+    }
+    const memberRows = (memberships ?? []) as MembershipLite[];
+    const groupIds = memberRows.map((m) => m.group_id);
+    const adminGroupIds = memberRows
+      .filter((m) => m.role === "owner" || m.role === "admin")
+      .map((m) => m.group_id);
 
     // -- last-read cursor (used both for unread badge + per-item flag) --
     let lastReadAt: string | null = null;
@@ -1515,7 +1600,51 @@ router.get(
       .limit(fetchLimit);
     if (beforeIso) joinsQ = joinsQ.lte("joined_at", beforeIso);
 
-    const [sharesRes, joinsRes] = await Promise.all([sharesQ, joinsQ]);
+    // member_left + trail_unshared events from the side-log table. Visible
+    // to every group member (same audience as joins / shares).
+    let eventsQ = supa
+      .from("group_activity_events")
+      .select(
+        "id, type, group_id, actor_user_id, trail_id, trail_name_snapshot, subject_user_id, occurred_at",
+      )
+      .in("group_id", groupIds)
+      .neq("actor_user_id", userId)
+      .order("occurred_at", { ascending: false })
+      .limit(fetchLimit);
+    if (beforeIso) eventsQ = eventsQ.lte("occurred_at", beforeIso);
+
+    // Declined invites — only owners/admins of the host group should see
+    // these (they're administrative signal, not general activity). When
+    // the caller has no admin'd groups we skip the query entirely and
+    // return an empty result so the union code below doesn't have to
+    // special-case it.
+    const declinesQ = (async () => {
+      if (adminGroupIds.length === 0) {
+        return {
+          data: [] as Array<Record<string, unknown>>,
+          error: null as { code?: string; message?: string } | null,
+        };
+      }
+      let q = supa
+        .from("group_invites")
+        .select(
+          "id, group_id, email, target_user_id, declined_at, declined_by_user_id, created_by_user_id",
+        )
+        .in("group_id", adminGroupIds)
+        .not("declined_at", "is", null)
+        .neq("declined_by_user_id", userId)
+        .order("declined_at", { ascending: false })
+        .limit(fetchLimit);
+      if (beforeIso) q = q.lte("declined_at", beforeIso);
+      return q;
+    })();
+
+    const [sharesRes, joinsRes, eventsRes, declinesRes] = await Promise.all([
+      sharesQ,
+      joinsQ,
+      eventsQ,
+      declinesQ,
+    ]);
 
     if (sharesRes.error && !isMissingTableError(sharesRes.error)) {
       req.log.error(
@@ -1533,6 +1662,18 @@ router.get(
       res.status(500).json({ error: "Failed to load notifications" });
       return;
     }
+    if (eventsRes.error && !isMissingTableError(eventsRes.error)) {
+      req.log.warn(
+        { err: eventsRes.error },
+        "notifications group_activity_events load failed",
+      );
+    }
+    if (declinesRes.error && !isMissingTableError(declinesRes.error)) {
+      req.log.warn(
+        { err: declinesRes.error },
+        "notifications declined invites load failed",
+      );
+    }
 
     interface ShareRow {
       trail_id: string;
@@ -1546,17 +1687,52 @@ router.get(
       joined_at: string;
       role: string;
     }
+    interface ActivityEventRow {
+      id: string;
+      type: "member_left" | "trail_unshared";
+      group_id: string;
+      actor_user_id: string;
+      trail_id: string | null;
+      trail_name_snapshot: string | null;
+      subject_user_id: string | null;
+      occurred_at: string;
+    }
+    interface DeclinedInviteRow {
+      id: string;
+      group_id: string;
+      email: string | null;
+      target_user_id: string | null;
+      declined_at: string;
+      declined_by_user_id: string;
+      created_by_user_id: string;
+    }
     const shareRows = (sharesRes.data ?? []) as ShareRow[];
     const joinRows = (joinsRes.data ?? []) as JoinRow[];
+    const eventRows = (eventsRes.data ?? []) as ActivityEventRow[];
+    const declineRows = (declinesRes.data ?? []) as DeclinedInviteRow[];
 
     // Hydrate referenced trails / groups / users in three parallel batches.
-    const trailIds = [...new Set(shareRows.map((r) => r.trail_id))];
+    const trailIds = [
+      ...new Set([
+        ...shareRows.map((r) => r.trail_id),
+        ...eventRows
+          .map((r) => r.trail_id)
+          .filter((id): id is string => id != null),
+      ]),
+    ];
     const groupSet = new Set<string>();
     shareRows.forEach((r) => groupSet.add(r.group_id));
     joinRows.forEach((r) => groupSet.add(r.group_id));
+    eventRows.forEach((r) => groupSet.add(r.group_id));
+    declineRows.forEach((r) => groupSet.add(r.group_id));
     const userIdSet = new Set<string>();
     shareRows.forEach((r) => userIdSet.add(r.shared_by_user_id));
     joinRows.forEach((r) => userIdSet.add(r.user_id));
+    eventRows.forEach((r) => {
+      userIdSet.add(r.actor_user_id);
+      if (r.subject_user_id) userIdSet.add(r.subject_user_id);
+    });
+    declineRows.forEach((r) => userIdSet.add(r.declined_by_user_id));
 
     const [trailsRes, groupsRes, usersRes] = await Promise.all([
       trailIds.length > 0
@@ -1619,12 +1795,42 @@ router.get(
       };
       unread: boolean;
     }
+    interface SubjectLite {
+      id: string | null;
+      display_name: string | null;
+      email: string | null;
+      avatar_url: string | null;
+    }
     type Notif =
       | (NotifBase & {
           type: "trail_shared";
           trail: { id: string; name: string };
         })
-      | (NotifBase & { type: "member_joined" });
+      | (NotifBase & { type: "member_joined" })
+      | (NotifBase & {
+          type: "member_left";
+          // The user that left or was removed. May equal `actor` when the
+          // member voluntarily left; differs when an owner/admin removed
+          // them. `id` may be null only if the underlying user row was
+          // hard-deleted (FK is ON DELETE SET NULL on subject_user_id).
+          subject: SubjectLite;
+          // True when actor !== subject (i.e. an owner/admin removed
+          // someone). Lets the client render "<actor> removed <subject>"
+          // vs "<actor> left".
+          removed_by_admin: boolean;
+        })
+      | (NotifBase & {
+          type: "trail_unshared";
+          // Trail metadata snapshot. `trail.id` may be null if the trail
+          // has been hard-deleted since the unshare.
+          trail: { id: string | null; name: string };
+        })
+      | (NotifBase & {
+          type: "invite_declined";
+          // Best-effort label for the invitee — falls back to the email the
+          // invite was bound to when no display_name is available.
+          decliner_label: string;
+        });
 
     const isUnread = (iso: string) =>
       !lastReadAt || new Date(iso).getTime() > new Date(lastReadAt).getTime();
@@ -1670,6 +1876,79 @@ router.get(
         unread: isUnread(r.joined_at),
       });
     }
+    for (const r of eventRows) {
+      const g = groups.get(r.group_id);
+      if (!g) continue;
+      const actor = users.get(r.actor_user_id);
+      const actorPayload = {
+        id: r.actor_user_id,
+        display_name: actor?.display_name ?? null,
+        email: actor?.email ?? null,
+        avatar_url: actor?.avatar_url ?? null,
+      };
+      if (r.type === "member_left") {
+        const subjectId = r.subject_user_id;
+        const subjectUser = subjectId ? users.get(subjectId) : null;
+        items.push({
+          id: `event:${r.id}`,
+          type: "member_left",
+          occurred_at: r.occurred_at,
+          group: { id: g.id, name: g.name },
+          actor: actorPayload,
+          subject: {
+            id: subjectId,
+            display_name: subjectUser?.display_name ?? null,
+            email: subjectUser?.email ?? null,
+            avatar_url: subjectUser?.avatar_url ?? null,
+          },
+          removed_by_admin:
+            subjectId != null && subjectId !== r.actor_user_id,
+          unread: isUnread(r.occurred_at),
+        });
+      } else if (r.type === "trail_unshared") {
+        // Prefer the live trail name (so renames propagate), but fall back
+        // to the snapshot we captured at unshare time when the trail row
+        // has since been hard-deleted.
+        const liveTrail = r.trail_id ? trails.get(r.trail_id) : null;
+        const trailName =
+          liveTrail?.name ?? r.trail_name_snapshot ?? "a trail";
+        items.push({
+          id: `event:${r.id}`,
+          type: "trail_unshared",
+          occurred_at: r.occurred_at,
+          group: { id: g.id, name: g.name },
+          actor: actorPayload,
+          trail: {
+            id: liveTrail?.deleted_at == null ? r.trail_id : null,
+            name: trailName,
+          },
+          unread: isUnread(r.occurred_at),
+        });
+      }
+    }
+    for (const r of declineRows) {
+      const g = groups.get(r.group_id);
+      if (!g) continue;
+      const decliner = users.get(r.declined_by_user_id);
+      const label =
+        (decliner?.display_name && decliner.display_name.trim()) ||
+        (r.email ? r.email.split("@")[0] : null) ||
+        "A rider";
+      items.push({
+        id: `decline:${r.id}`,
+        type: "invite_declined",
+        occurred_at: r.declined_at,
+        group: { id: g.id, name: g.name },
+        actor: {
+          id: r.declined_by_user_id,
+          display_name: decliner?.display_name ?? null,
+          email: decliner?.email ?? r.email ?? null,
+          avatar_url: decliner?.avatar_url ?? null,
+        },
+        decliner_label: label,
+        unread: isUnread(r.declined_at),
+      });
+    }
 
     // Sort by `(occurred_at desc, id desc)` — the composite key matches the
     // tuple comparison we do for the cursor below.
@@ -1701,9 +1980,16 @@ router.get(
     // Aligns with the visible feed: the share count uses an inner-join on
     // `trails` filtered by `deleted_at IS NULL` so soft-deleted trails don't
     // inflate the badge over what the panel actually displays. Run in
-    // parallel to keep the request snappy.
+    // parallel to keep the request snappy. Removal-style events (member_left,
+    // trail_unshared) come from the side-log table; declined invites are
+    // scoped to admin'd groups only.
     const cutoff = lastReadAt ?? "1970-01-01T00:00:00Z";
-    const [unreadSharesRes, unreadJoinsRes] = await Promise.all([
+    const [
+      unreadSharesRes,
+      unreadJoinsRes,
+      unreadEventsRes,
+      unreadDeclinesRes,
+    ] = await Promise.all([
       supa
         .from("trail_shares")
         .select("trail_id, trails!inner(deleted_at)", {
@@ -1720,9 +2006,27 @@ router.get(
         .in("group_id", groupIds)
         .neq("user_id", userId)
         .gt("joined_at", cutoff),
+      supa
+        .from("group_activity_events")
+        .select("id", { head: true, count: "exact" })
+        .in("group_id", groupIds)
+        .neq("actor_user_id", userId)
+        .gt("occurred_at", cutoff),
+      adminGroupIds.length > 0
+        ? supa
+            .from("group_invites")
+            .select("id", { head: true, count: "exact" })
+            .in("group_id", adminGroupIds)
+            .not("declined_at", "is", null)
+            .neq("declined_by_user_id", userId)
+            .gt("declined_at", cutoff)
+        : Promise.resolve({ count: 0 }),
     ]);
     const unreadCount =
-      (unreadSharesRes.count ?? 0) + (unreadJoinsRes.count ?? 0);
+      (unreadSharesRes.count ?? 0) +
+      (unreadJoinsRes.count ?? 0) +
+      (unreadEventsRes.count ?? 0) +
+      (unreadDeclinesRes.count ?? 0);
 
     res.json({ items: page, unreadCount, lastReadAt, nextBefore });
   }),
@@ -2232,6 +2536,11 @@ router.put(
         res.status(500).json({ error: "Failed to remove shares" });
         return;
       }
+      // Best-effort: log a trail_unshared event per removed group so the
+      // activity feed can show "<actor> stopped sharing <trail> in <group>".
+      // Snapshot the trail name so the feed still renders if the trail is
+      // later soft- or hard-deleted.
+      void logTrailUnsharedEvents(tParse.data, toRemove, userId, req.log);
     }
 
     res.json({ ok: true, added: toAdd.length, removed: toRemove.length });

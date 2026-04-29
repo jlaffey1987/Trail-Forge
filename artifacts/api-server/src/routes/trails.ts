@@ -543,6 +543,35 @@ router.patch(
             res.status(500).json({ error: "Failed to update trail shares" });
             return;
           }
+          // Best-effort: log a trail_unshared activity event per removed
+          // group so the in-app feed surfaces the unshare. The trail row
+          // is still present here, so we can snapshot the live name.
+          {
+            const { data: trailRow } = await supa
+              .from("trails")
+              .select("name")
+              .eq("id", trailId)
+              .maybeSingle();
+            const trailName =
+              (trailRow as { name?: string | null } | null)?.name ?? null;
+            const { error: evErr } = await supa
+              .from("group_activity_events")
+              .insert(
+                toRemove.map((gid) => ({
+                  type: "trail_unshared",
+                  group_id: gid,
+                  actor_user_id: userId,
+                  trail_id: trailId,
+                  trail_name_snapshot: trailName,
+                })),
+              );
+            if (evErr && !isMissingTableError(evErr)) {
+              req.log.warn(
+                { err: evErr },
+                "log trail_unshared events failed",
+              );
+            }
+          }
         }
       }
     }

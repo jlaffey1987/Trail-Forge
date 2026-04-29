@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useUser } from "@clerk/react";
 import {
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
@@ -33,6 +33,59 @@ function actorLabel(actor: GroupNotification["actor"]): string {
 
 function avatarInitial(actor: GroupNotification["actor"]): string {
   return (actorLabel(actor)[0] ?? "?").toUpperCase();
+}
+
+// Render the body half of an activity entry — everything that comes after
+// the bold actor name. Switching on `n.type` here (instead of inline in
+// the JSX) keeps the union narrowing readable and avoids a deeply nested
+// ternary.
+function renderNotificationBody(n: GroupNotification): ReactNode {
+  const groupBadge = (
+    <span className="text-stone-100 font-semibold">{n.group.name}</span>
+  );
+  switch (n.type) {
+    case "trail_shared":
+      return (
+        <>
+          shared <span className="text-amber-300">{n.trail.name}</span> into{" "}
+          {groupBadge}
+        </>
+      );
+    case "member_joined":
+      return <>joined {groupBadge}</>;
+    case "member_left":
+      // For voluntary leaves the actor and subject are the same person, so
+      // we render "X left Y". For admin removals the actor differs and we
+      // render "X removed Y from Z".
+      if (n.removed_by_admin) {
+        const subjectName =
+          (n.subject.display_name && n.subject.display_name.trim()) ||
+          (n.subject.email ? n.subject.email.split("@")[0] : null) ||
+          "a rider";
+        return (
+          <>
+            removed{" "}
+            <span className="text-stone-100 font-semibold">{subjectName}</span>{" "}
+            from {groupBadge}
+          </>
+        );
+      }
+      return <>left {groupBadge}</>;
+    case "trail_unshared":
+      return (
+        <>
+          removed <span className="text-amber-300">{n.trail.name}</span> from{" "}
+          {groupBadge}
+        </>
+      );
+    case "invite_declined":
+      return (
+        <>
+          declined an invite to {groupBadge}
+          <span className="text-stone-500"> ({n.decliner_label})</span>
+        </>
+      );
+  }
 }
 
 export default function NotificationsBell() {
@@ -189,7 +242,20 @@ function NotificationsPanel({ onClose, onUnreadChanged }: PanelProps) {
       onClose();
       return;
     }
-    // member_joined → open the group detail dialog inline.
+    if (n.type === "trail_unshared" && n.trail.id) {
+      // Trail still exists — let the rider revisit it. When trail.id is
+      // null (deleted) we fall through and just open the group dialog.
+      window.dispatchEvent(
+        new CustomEvent("trailforge:open-trail", {
+          detail: { trailId: n.trail.id },
+        }),
+      );
+      onClose();
+      return;
+    }
+    // member_joined / member_left / trail_unshared(deleted) /
+    // invite_declined → open the group detail dialog inline so the rider
+    // lands on the relevant group.
     setOpenGroupId(n.group.id);
   };
 
@@ -288,25 +354,7 @@ function NotificationsPanel({ onClose, onUnreadChanged }: PanelProps) {
                           <span className="font-semibold">
                             {actorLabel(n.actor)}
                           </span>{" "}
-                          {n.type === "trail_shared" ? (
-                            <>
-                              shared{" "}
-                              <span className="text-amber-300">
-                                {n.trail.name}
-                              </span>{" "}
-                              into{" "}
-                              <span className="text-stone-100 font-semibold">
-                                {n.group.name}
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              joined{" "}
-                              <span className="text-stone-100 font-semibold">
-                                {n.group.name}
-                              </span>
-                            </>
-                          )}
+                          {renderNotificationBody(n)}
                         </p>
                         <p className="text-[10px] text-stone-500 mt-0.5 uppercase tracking-wider">
                           {relativeTime(n.occurred_at)}

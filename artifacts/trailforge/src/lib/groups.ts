@@ -130,6 +130,47 @@ export type GroupNotification =
       group: { id: string; name: string };
       actor: NotificationActor;
       unread: boolean;
+    }
+  | {
+      type: "member_left";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      // Actor = the person who triggered the event. For voluntary leaves
+      // this is the same user as `subject`; for admin removals it's the
+      // owner/admin who did the kick.
+      actor: NotificationActor;
+      // Subject = the member that left or was removed. `id` may be null
+      // if the underlying user has been hard-deleted.
+      subject: NotificationActor & { id: string | null };
+      // True when actor !== subject (an owner/admin removed someone).
+      removed_by_admin: boolean;
+      unread: boolean;
+    }
+  | {
+      type: "trail_unshared";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      // `trail.id` may be null if the underlying trail has been hard- or
+      // soft-deleted; the UI should suppress the trail link in that case
+      // and just render the snapshot name.
+      trail: { id: string | null; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
+      type: "invite_declined";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      // Actor here is the user that declined the invite. `email` falls
+      // back to the address the invite was bound to.
+      actor: NotificationActor;
+      // Pre-computed display label (display name → email local-part →
+      // generic) so the UI doesn't have to re-do the fallback logic.
+      decliner_label: string;
+      unread: boolean;
     };
 
 export interface NotificationActor {
