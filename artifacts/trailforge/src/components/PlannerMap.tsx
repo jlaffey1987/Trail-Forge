@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Trail } from "@/lib/supabase";
 import { type GeoPoint } from "@/lib/routing";
-import { renderTrailLayer, type TrailLayerHandle } from "@/lib/trailLayer";
+import {
+  renderTrailLayer,
+  type TrailLayerHandle,
+  renderTrailClusters,
+  clusterTrails,
+  CLUSTER_ZOOM_THRESHOLD,
+  type ClusterLayerHandle,
+  type TrailCluster,
+  getTrailBbox,
+} from "@/lib/trailLayer";
 
 // Escape user-controlled text before injecting into Leaflet divIcon HTML
 function esc(s: string | null | undefined): string {
@@ -42,8 +51,13 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
   const [map, setMap] = useState<import("leaflet").Map | null>(null);
   const markerLayersRef = useRef<import("leaflet").Layer[]>([]);
   const trailLayerRef = useRef<TrailLayerHandle | null>(null);
+  const clusterLayerRef = useRef<ClusterLayerHandle | null>(null);
   const [leafletLoaded, setLeafletLoaded] = useState(false);
   const [expanded, setExpanded] = useState(true);
+  // Tracks the live map zoom so the trail layer can switch between cluster
+  // markers (low zoom) and full polylines (high zoom) the same way MapTab
+  // does. Initialized to the map's starting zoom in the init effect.
+  const [currentZoom, setCurrentZoom] = useState<number>(6);
 
   // Load Leaflet
   useEffect(() => {
@@ -78,11 +92,17 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
       { attribution: "Tiles © Esri", maxZoom: 19 }
     ).addTo(instance);
     setMap(instance);
+    setCurrentZoom(instance.getZoom());
+    const onZoom = () => setCurrentZoom(instance.getZoom());
+    instance.on("zoomend", onZoom);
     return () => {
+      try { instance.off("zoomend", onZoom); } catch { /* ignore */ }
       try { instance.remove(); } catch { /* ignore */ }
       markerLayersRef.current = [];
       trailLayerRef.current?.clear();
       trailLayerRef.current = null;
+      clusterLayerRef.current?.clear();
+      clusterLayerRef.current = null;
       setMap(null);
     };
   }, [leafletLoaded, containerEl]);
@@ -96,20 +116,18 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
-  // Render markers + trails
+  // Start/end markers + initial fit-to-content. Intentionally NOT dependent
+  // on `currentZoom` so user-driven zooming (e.g. drilling into a cluster)
+  // doesn't immediately refit and snap back out.
   useEffect(() => {
     if (!map || !window.L) return;
     const L = window.L;
 
-    // Clear previous start/end markers + connection
     markerLayersRef.current.forEach((l) => l.remove());
     markerLayersRef.current = [];
-    trailLayerRef.current?.clear();
-    trailLayerRef.current = null;
 
     const allBounds: [number, number][] = [];
 
-    // Start marker
     if (start) {
       const m = L.marker([start.lat, start.lng], {
         icon: L.divIcon({
@@ -121,7 +139,6 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
       allBounds.push([start.lat, start.lng]);
     }
 
-    // End marker
     if (end) {
       const m = L.marker([end.lat, end.lng], {
         icon: L.divIcon({
@@ -133,7 +150,6 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
       allBounds.push([end.lat, end.lng]);
     }
 
-    // Connection line start->end (faint)
     if (start && end) {
       const conn = L.polyline(
         [[start.lat, start.lng], [end.lat, end.lng]],
@@ -142,16 +158,15 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
       markerLayersRef.current.push(conn);
     }
 
-    // Trails — uses the shared renderer (parse cache is shared with MapTab)
-    const handle = renderTrailLayer(map, trails, {
-      selectedIds: selectedIdSet,
-      selectedColor: "#f0a832",
-      showLabels: true,
-      shadow: true,
-      onTrailClick: onToggle,
-    });
-    trailLayerRef.current = handle;
-    for (const c of handle.bounds) allBounds.push(c);
+    // Include each trail's bbox corners so fitBounds frames the discovered
+    // trails too — same outcome as the previous renderer's polyline bounds
+    // but without depending on whether we render polylines or clusters.
+    for (const t of trails) {
+      const bbox = getTrailBbox(t);
+      if (!bbox) continue;
+      allBounds.push([bbox.minLat, bbox.minLng]);
+      allBounds.push([bbox.maxLat, bbox.maxLng]);
+    }
 
     if (allBounds.length > 1) {
       try {
@@ -160,7 +175,87 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
     } else if (allBounds.length === 1) {
       map.setView(allBounds[0], 12);
     }
-  }, [start, end, trails, selectedIdSet, onToggle, map]);
+  }, [start, end, trails, map]);
+
+  // Render trail layer — clusters at low zoom, polylines higher up. Selected
+  // route trails always render as polylines on top so the user can see the
+  // route they've already built even when other trails are clustered.
+  useEffect(() => {
+    if (!map || !window.L) return;
+    const L = window.L;
+
+    trailLayerRef.current?.clear();
+    trailLayerRef.current = null;
+    clusterLayerRef.current?.clear();
+    clusterLayerRef.current = null;
+
+    if (trails.length === 0) return;
+
+    if (currentZoom < CLUSTER_ZOOM_THRESHOLD) {
+      // Cluster only the trails the user hasn't picked yet — selected route
+      // trails stay drawn as polylines so the in-progress route is always
+      // visible at any zoom.
+      const unselected = selectedIdSet.size > 0
+        ? trails.filter((t) => !selectedIdSet.has(t.id))
+        : trails;
+      const selectedTrails = selectedIdSet.size > 0
+        ? trails.filter((t) => selectedIdSet.has(t.id))
+        : [];
+
+      const clusters = clusterTrails(unselected, currentZoom);
+      const cHandle = renderTrailClusters(map, clusters, {
+        onClusterClick: (cluster: TrailCluster) => {
+          // Drill into the cluster's bbox. Single-trail clusters zoom
+          // straight to the trail; multi-trail clusters cap at one level
+          // past the threshold so the user can keep drilling further.
+          try {
+            const bounds = L.latLngBounds(
+              [cluster.bbox.minLat, cluster.bbox.minLng],
+              [cluster.bbox.maxLat, cluster.bbox.maxLng],
+            );
+            if (cluster.count === 1) {
+              map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+              return;
+            }
+            const z = map.getZoom();
+            const targetMax = Math.max(
+              CLUSTER_ZOOM_THRESHOLD,
+              Math.min(CLUSTER_ZOOM_THRESHOLD + 2, z + 3),
+            );
+            map.fitBounds(bounds, { padding: [40, 40], maxZoom: targetMax });
+          } catch {
+            map.setView(
+              [cluster.lat, cluster.lng],
+              Math.min(CLUSTER_ZOOM_THRESHOLD + 1, map.getZoom() + 3),
+            );
+          }
+        },
+      });
+      clusterLayerRef.current = cHandle;
+
+      if (selectedTrails.length > 0) {
+        const tHandle = renderTrailLayer(map, selectedTrails, {
+          selectedIds: selectedIdSet,
+          selectedColor: "#f0a832",
+          showLabels: true,
+          shadow: true,
+          onTrailClick: onToggle,
+        });
+        trailLayerRef.current = tHandle;
+      }
+      return;
+    }
+
+    // Higher zoom: original polyline rendering for every trail.
+    const handle = renderTrailLayer(map, trails, {
+      selectedIds: selectedIdSet,
+      selectedColor: "#f0a832",
+      showLabels: true,
+      shadow: true,
+      onTrailClick: onToggle,
+    });
+    trailLayerRef.current = handle;
+  }, [trails, selectedIdSet, onToggle, map, currentZoom]);
 
   if (!start && !end && trails.length === 0) return null;
 
@@ -205,6 +300,13 @@ export default function PlannerMap({ start, end, trails, selectedIds, onToggle }
               <p className="text-[10px] text-amber-200 font-medium">
                 {!start && !end ? "Add start & destination above to pin them on the map" :
                  !start ? "Add start address to pin point A" : "Add destination to pin point B"}
+              </p>
+            </div>
+          )}
+          {leafletLoaded && currentZoom < CLUSTER_ZOOM_THRESHOLD && trails.length > 0 && (
+            <div className="absolute bottom-2 left-2 z-[500] bg-stone-900/80 border border-stone-700/60 rounded-md px-2 py-1 backdrop-blur">
+              <p className="text-[10px] text-stone-300 font-medium">
+                Zoom in or tap a cluster to see individual trails
               </p>
             </div>
           )}
