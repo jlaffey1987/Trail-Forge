@@ -29,17 +29,6 @@ function pickInitialMode(): SplashMode {
     : window.location.pathname;
   if (EXCLUDED_PATH_PATTERNS.some((re) => re.test(path))) return "off";
 
-  // Lightweight escape hatch for screenshot tooling / e2e tests so they
-  // don't have to wait out the 6s intro on every navigation. Production
-  // users never hit this — they don't use ?ci=1 in normal usage.
-  try {
-    if (new URLSearchParams(window.location.search).get("ci") === "1") {
-      return "off";
-    }
-  } catch {
-    // ignore — old browsers without URLSearchParams
-  }
-
   if (typeof navigator !== "undefined") {
     if (navigator.onLine === false) return "poster";
     const conn = (navigator as Navigator & {

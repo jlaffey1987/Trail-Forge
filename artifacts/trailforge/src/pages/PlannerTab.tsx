@@ -355,22 +355,6 @@ export default function PlannerTab() {
             }}
           />
           <div className="absolute inset-0 flex flex-col justify-end px-4 pb-4">
-            <span
-              className="inline-flex items-center gap-1.5 self-start text-[10px] font-bold uppercase tracking-[0.18em] text-amber-300/95 mb-1.5"
-              style={{
-                background: "rgba(15,10,5,0.55)",
-                border: "1px solid rgba(240,168,50,0.35)",
-                padding: "3px 8px",
-                borderRadius: "999px",
-                backdropFilter: "blur(4px)",
-              }}
-            >
-              <span
-                className="w-1.5 h-1.5 rounded-full"
-                style={{ background: "#f0a832", boxShadow: "0 0 6px #f0a832" }}
-              />
-              Plan your ride
-            </span>
             <h1
               className="text-3xl font-black tracking-tight text-white uppercase leading-none"
               style={{
@@ -464,7 +448,7 @@ export default function PlannerTab() {
           </div>
 
           {/* Difficulty Scale */}
-          <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg p-3">
+          <div className="bg-[hsl(22,15%,11%)] border border-[hsl(34,18%,24%)] rounded-xl p-3.5">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-stone-300 uppercase tracking-wider">Difficulty</span>
               {difficulty.length > 0 && (
@@ -498,7 +482,7 @@ export default function PlannerTab() {
           </div>
 
           {/* Overlay Toggles */}
-          <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg p-3">
+          <div className="bg-[hsl(22,15%,11%)] border border-[hsl(34,18%,24%)] rounded-xl p-3.5">
             <span className="text-xs font-semibold text-stone-300 uppercase tracking-wider block mb-2">Trail Types</span>
             <div className="flex gap-2">
               <button
@@ -521,7 +505,7 @@ export default function PlannerTab() {
           </div>
 
           {/* Bike Type Chips */}
-          <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg p-3">
+          <div className="bg-[hsl(22,15%,11%)] border border-[hsl(34,18%,24%)] rounded-xl p-3.5">
             <span className="text-xs font-semibold text-stone-300 uppercase tracking-wider block mb-2">Bike Type</span>
             <div className="flex flex-wrap gap-2">
               {BIKE_TYPES.map((bike) => (
