@@ -22,6 +22,11 @@ function toNum(v: unknown): number | null {
   return null;
 }
 
+function formatElevationGain(m: number | null | undefined): string | null {
+  if (m == null || !Number.isFinite(m)) return null;
+  return `${Math.round(m).toLocaleString()} m`;
+}
+
 function difficultyLabel(d: number | null | undefined): string {
   if (d == null) return "Unrated";
   const rounded = Math.max(1, Math.min(10, Math.round(d)));
@@ -79,6 +84,8 @@ export default function ClusterTrailListSheet({
               {sorted.map((trail) => {
                 const diffColor = getDifficultyColor(trail.difficulty ?? undefined);
                 const km = toNum(trail.distance_km);
+                const gain = formatElevationGain(trail.elevation_gain_m);
+                const loss = formatElevationGain(trail.elevation_loss_m);
                 return (
                   <li key={trail.id}>
                     <button
@@ -91,8 +98,26 @@ export default function ClusterTrailListSheet({
                         <div className="text-sm font-semibold text-stone-100 truncate">
                           {trail.name}
                         </div>
-                        <div className="text-[10px] text-stone-500 mt-0.5 flex items-center gap-2">
+                        <div className="text-[10px] text-stone-500 mt-0.5 flex items-center gap-2 flex-wrap">
                           {km != null && <span>{km.toFixed(1)} km</span>}
+                          {gain && (
+                            <span
+                              className="text-emerald-400"
+                              title="Total ascent"
+                              data-testid={`cluster-trail-elevation-gain-${trail.id}`}
+                            >
+                              ↑ {gain}
+                            </span>
+                          )}
+                          {loss && (
+                            <span
+                              className="text-sky-400"
+                              title="Total descent"
+                              data-testid={`cluster-trail-elevation-loss-${trail.id}`}
+                            >
+                              ↓ {loss}
+                            </span>
+                          )}
                           {trail.legal_status && (
                             <span className="uppercase tracking-wider">{trail.legal_status}</span>
                           )}

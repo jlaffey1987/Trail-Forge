@@ -43,6 +43,11 @@ function formatElevation(terrain: string | null) {
   return terrain || "Mixed";
 }
 
+function formatElevationGain(m: number | null | undefined): string | null {
+  if (m == null || !Number.isFinite(m)) return null;
+  return `${Math.round(m).toLocaleString()} m`;
+}
+
 function getPostedTime(created_at: string) {
   const diff = Date.now() - new Date(created_at).getTime();
   const h = Math.floor(diff / 3600000);
@@ -418,6 +423,30 @@ export default function DiscoverTab() {
                       <span className="text-xs text-stone-400 bg-stone-800/80 px-2 py-0.5 rounded">
                         {formatDistance(trail.distance_km)}
                       </span>
+                      {(() => {
+                        const gain = formatElevationGain(trail.elevation_gain_m);
+                        return gain ? (
+                          <span
+                            className="text-xs text-emerald-300 bg-emerald-900/30 px-2 py-0.5 rounded"
+                            title="Total ascent"
+                            data-testid={`discover-card-elevation-gain-${trail.id}`}
+                          >
+                            ↑ {gain}
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const loss = formatElevationGain(trail.elevation_loss_m);
+                        return loss ? (
+                          <span
+                            className="text-xs text-sky-300 bg-sky-900/30 px-2 py-0.5 rounded"
+                            title="Total descent"
+                            data-testid={`discover-card-elevation-loss-${trail.id}`}
+                          >
+                            ↓ {loss}
+                          </span>
+                        ) : null;
+                      })()}
                       <span className="text-xs text-stone-500 bg-stone-800/40 px-2 py-0.5 rounded">
                         {trail.terrain || "Mixed"}
                       </span>

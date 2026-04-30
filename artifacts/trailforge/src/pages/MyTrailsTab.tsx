@@ -36,6 +36,11 @@ function formatDistance(km: number | null) {
   return km != null ? `${km.toFixed(1)} km` : "—";
 }
 
+function formatElevationGain(m: number | null | undefined): string | null {
+  if (m == null || !Number.isFinite(m)) return null;
+  return `${Math.round(m).toLocaleString()} m`;
+}
+
 function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
@@ -270,6 +275,36 @@ export default function MyTrailsTab() {
                       <p className="text-xs text-stone-500">{formatDate(trail.created_at)}</p>
                       <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-xs">
                         <span className="text-stone-400">{formatDistance(trail.distance_km)}</span>
+                        {(() => {
+                          const gain = formatElevationGain(trail.elevation_gain_m);
+                          return gain ? (
+                            <>
+                              <span className="text-stone-600">·</span>
+                              <span
+                                className="text-emerald-400"
+                                title="Total ascent"
+                                data-testid={`owned-trail-elevation-gain-${trail.id}`}
+                              >
+                                ↑ {gain}
+                              </span>
+                            </>
+                          ) : null;
+                        })()}
+                        {(() => {
+                          const loss = formatElevationGain(trail.elevation_loss_m);
+                          return loss ? (
+                            <>
+                              <span className="text-stone-600">·</span>
+                              <span
+                                className="text-sky-400"
+                                title="Total descent"
+                                data-testid={`owned-trail-elevation-loss-${trail.id}`}
+                              >
+                                ↓ {loss}
+                              </span>
+                            </>
+                          ) : null;
+                        })()}
                         <span className="text-stone-600">·</span>
                         <span className="text-stone-400">{trail.terrain || "Mixed"}</span>
                         <span className="text-stone-600">·</span>
@@ -396,8 +431,38 @@ export default function MyTrailsTab() {
                     </div>
                     <p className="text-xs text-stone-500">{formatDate(trail.created_at)}</p>
 
-                    <div className="flex gap-3 mt-2">
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
                       <span className="text-xs text-stone-400">{formatDistance(trail.distance_km)}</span>
+                      {(() => {
+                        const gain = formatElevationGain(trail.elevation_gain_m);
+                        return gain ? (
+                          <>
+                            <span className="text-xs text-stone-600">·</span>
+                            <span
+                              className="text-xs text-emerald-400"
+                              title="Total ascent"
+                              data-testid={`saved-trail-elevation-gain-${trail.id}`}
+                            >
+                              ↑ {gain}
+                            </span>
+                          </>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const loss = formatElevationGain(trail.elevation_loss_m);
+                        return loss ? (
+                          <>
+                            <span className="text-xs text-stone-600">·</span>
+                            <span
+                              className="text-xs text-sky-400"
+                              title="Total descent"
+                              data-testid={`saved-trail-elevation-loss-${trail.id}`}
+                            >
+                              ↓ {loss}
+                            </span>
+                          </>
+                        ) : null;
+                      })()}
                       <span className="text-xs text-stone-600">·</span>
                       <span className="text-xs text-stone-400">{trail.terrain || "Off-road"}</span>
                       <span className="text-xs text-stone-600">·</span>
