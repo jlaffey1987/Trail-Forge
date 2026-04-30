@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { type Trail } from "@/lib/supabase";
 import { getDifficultyColor } from "@/lib/trailLayer";
 import {
@@ -12,6 +12,36 @@ const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
   6: "Hard", 7: "Expert", 8: "Extreme", 9: "Pro", 10: "Elite",
 };
+
+type SortKey = "difficulty" | "distance" | "name";
+
+const SORT_STORAGE_KEY = "trailforge:clusterTrailListSort";
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "difficulty", label: "Difficulty" },
+  { value: "distance", label: "Distance" },
+  { value: "name", label: "Name" },
+];
+
+function readStoredSort(): SortKey {
+  if (typeof window === "undefined") return "difficulty";
+  try {
+    const v = window.sessionStorage.getItem(SORT_STORAGE_KEY);
+    if (v === "difficulty" || v === "distance" || v === "name") return v;
+  } catch {
+    // sessionStorage may be unavailable (e.g. private mode); fall through.
+  }
+  return "difficulty";
+}
+
+function writeStoredSort(sort: SortKey): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(SORT_STORAGE_KEY, sort);
+  } catch {
+    // Ignore storage failures — the in-memory state still works.
+  }
+}
 
 interface Props {
   trails: Trail[];
@@ -27,6 +57,42 @@ function toNum(v: unknown): number | null {
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+// Comparator helper: nulls always sort to the END regardless of direction,
+// so unrated / missing-distance trails don't crowd the top of the list.
+function compareNullable(
+  a: number | null,
+  b: number | null,
+): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return a - b;
+}
+
+function sortTrails(trails: Trail[], sort: SortKey): Trail[] {
+  const copy = [...trails];
+  switch (sort) {
+    case "difficulty":
+      copy.sort((a, b) => {
+        const cmp = compareNullable(a.difficulty, b.difficulty);
+        if (cmp !== 0) return cmp;
+        return a.name.localeCompare(b.name);
+      });
+      return copy;
+    case "distance":
+      copy.sort((a, b) => {
+        const cmp = compareNullable(toNum(a.distance_km), toNum(b.distance_km));
+        if (cmp !== 0) return cmp;
+        return a.name.localeCompare(b.name);
+      });
+      return copy;
+    case "name":
+    default:
+      copy.sort((a, b) => a.name.localeCompare(b.name));
+      return copy;
+  }
 }
 
 function formatElevationGain(m: number | null | undefined): string | null {
@@ -46,7 +112,13 @@ export default function ClusterTrailListSheet({
   onZoomToArea,
   onClose,
 }: Props) {
-  const sorted = [...trails].sort((a, b) => a.name.localeCompare(b.name));
+  const [sortKey, setSortKey] = useState<SortKey>(() => readStoredSort());
+  const sorted = useMemo(() => sortTrails(trails, sortKey), [trails, sortKey]);
+
+  const handleSortChange = (next: SortKey) => {
+    setSortKey(next);
+    writeStoredSort(next);
+  };
 
   // Subscribe to the planner route store so the per-row toggles reflect
   // adds/removes happening anywhere else in the app (e.g. the trail
@@ -107,6 +179,40 @@ export default function ClusterTrailListSheet({
           >
             ×
           </button>
+        </div>
+
+        <div
+          className="flex items-center gap-2 px-4 py-2 border-b border-stone-800"
+          data-testid="cluster-trail-list-sort"
+          role="radiogroup"
+          aria-label="Sort trails"
+        >
+          <span className="text-[10px] font-bold uppercase tracking-widest text-stone-500">
+            Sort
+          </span>
+          <div className="flex items-center gap-1">
+            {SORT_OPTIONS.map((opt) => {
+              const active = sortKey === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => handleSortChange(opt.value)}
+                  data-testid={`cluster-trail-list-sort-${opt.value}`}
+                  className={
+                    "px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors " +
+                    (active
+                      ? "border-amber-500 bg-amber-500/15 text-amber-300"
+                      : "border-stone-700 text-stone-400 hover:border-stone-500 hover:text-stone-200")
+                  }
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="overflow-y-auto flex-1" data-testid="cluster-trail-list-rows">
