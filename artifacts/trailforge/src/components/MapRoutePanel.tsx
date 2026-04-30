@@ -1,7 +1,7 @@
 import { Component, useState, type ReactNode } from "react";
 import { type Trail } from "@/lib/supabase";
 import { getDifficultyColor } from "@/lib/trailLayer";
-import type { RouteWaypoint } from "@/lib/routing";
+import type { RouteEntry, RouteWaypoint } from "@/lib/routing";
 
 interface Props {
   trails: Trail[];
@@ -17,6 +17,21 @@ interface Props {
   /** Custom POI/waypoint stops the rider has added to the planner route. */
   waypoints?: RouteWaypoint[];
   onRemoveWaypoint?: (waypointId: string) => void;
+  /**
+   * Interleaved trail+waypoint list in the rider's chosen order. When
+   * provided, the panel renders rows inline (mirrors `RouteBuilder`) so a
+   * fuel stop can sit between trail 1 and trail 2 instead of in a fixed
+   * "Stops" group at the top. Falls back to the legacy split layout when
+   * absent — keeps existing tests and any caller that hasn't migrated yet
+   * working unchanged.
+   */
+  entries?: RouteEntry[];
+  /**
+   * Replace the full ordered list — used when the rider taps a row's
+   * up/down arrow to swap with an adjacent stop. Required to enable the
+   * reorder buttons on waypoint rows in interleaved mode.
+   */
+  onReorderEntries?: (entries: RouteEntry[]) => void;
 }
 
 const WAYPOINT_KIND_COLOR: Record<RouteWaypoint["kind"], string> = {
@@ -71,6 +86,8 @@ function MapRoutePanelInner({
   onSelectTrail,
   waypoints,
   onRemoveWaypoint,
+  entries,
+  onReorderEntries,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   const wps = waypoints ?? [];
@@ -79,6 +96,11 @@ function MapRoutePanelInner({
   if (trails.length === 0 && wps.length === 0) return null;
 
   const totalKm = trails.reduce((s, t) => s + toNum(t.distance_km), 0);
+
+  // Interleaved render is the canonical mode now — both PlannerTab and
+  // MapTab pass `entries`. The legacy split-section render below is kept
+  // as a fallback so callers (or tests) that haven't migrated still work.
+  const interleaved = entries != null && entries.length > 0;
 
   const moveUp = (idx: number) => {
     if (idx === 0) return;
@@ -93,6 +115,23 @@ function MapRoutePanelInner({
     [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
     onReorder(next);
   };
+
+  // Swap two adjacent rows in the interleaved entries list. We bounds-check
+  // here so the callers (the up/down buttons) can stay declarative and
+  // avoid re-deriving "is this the first/last row" themselves.
+  const swapEntries = (a: number, b: number) => {
+    if (!entries || !onReorderEntries) return;
+    if (a < 0 || b < 0 || a >= entries.length || b >= entries.length) return;
+    const next = entries.slice();
+    [next[a], next[b]] = [next[b], next[a]];
+    onReorderEntries(next);
+  };
+
+  // Map trail.id → its 1-based position in the original trail list so the
+  // interleaved render can keep showing the same numbered badge ("Trail #2")
+  // riders are used to. Waypoints don't get a number — they're glue rows.
+  const trailIdxById = new Map<string, number>();
+  trails.forEach((t, i) => trailIdxById.set(t.id, i));
 
   return (
     <div
@@ -164,180 +203,351 @@ function MapRoutePanelInner({
               className="max-h-56 overflow-y-auto px-2 py-2 space-y-1"
               data-testid="map-route-panel-list"
             >
-              {wps.length > 0 && (
-                <div className="space-y-1 pb-1.5 border-b border-[hsl(30,12%,18%)] mb-1.5">
-                  <p className="text-[9px] uppercase tracking-wider text-stone-500 font-bold px-1">
-                    Stops ({wps.length})
-                  </p>
-                  {wps.map((wp) => (
-                    <div
-                      key={wp.id}
-                      data-testid={`map-route-panel-waypoint-${wp.id}`}
-                      className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
-                    >
-                      <div
-                        className="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
-                        style={{
-                          background: WAYPOINT_KIND_COLOR[wp.kind],
-                          border: "1.5px solid #f0a832",
-                        }}
-                      >
-                        <svg
-                          viewBox="0 0 24 24"
-                          width="9"
-                          height="9"
-                          fill="none"
-                          stroke="#fff"
-                          strokeWidth="2.4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
+              {interleaved
+                ? entries!.map((entry, idx) => {
+                    const isFirst = idx === 0;
+                    const isLast = idx === entries!.length - 1;
+                    if (entry.kind === "waypoint") {
+                      const wp = entry.waypoint;
+                      return (
+                        <div
+                          key={`wp-${wp.id}`}
+                          data-testid={`map-route-panel-waypoint-${wp.id}`}
+                          className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
                         >
-                          {wp.kind === "fuel" ? (
-                            <path d="M3 12V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14H3v-7zM13 8h2a2 2 0 0 1 2 2v6a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-6l-3-3" />
-                          ) : wp.kind === "campsite" ? (
-                            <path d="M3 20 12 4l9 16H3z M12 4v16" />
-                          ) : (
-                            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                          <div
+                            className="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
+                            style={{
+                              background: WAYPOINT_KIND_COLOR[wp.kind],
+                              border: "1.5px solid #f0a832",
+                            }}
+                          >
+                            <svg
+                              viewBox="0 0 24 24"
+                              width="9"
+                              height="9"
+                              fill="none"
+                              stroke="#fff"
+                              strokeWidth="2.4"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              {wp.kind === "fuel" ? (
+                                <path d="M3 12V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14H3v-7zM13 8h2a2 2 0 0 1 2 2v6a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-6l-3-3" />
+                              ) : wp.kind === "campsite" ? (
+                                <path d="M3 20 12 4l9 16H3z M12 4v16" />
+                              ) : (
+                                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                              )}
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-bold text-stone-100 truncate">
+                              {wp.name}
+                            </div>
+                            <div className="text-[9px] text-stone-500 capitalize">
+                              {wp.kind} stop
+                            </div>
+                          </div>
+                          {onReorderEntries && (
+                            <div className="flex flex-col gap-0">
+                              <button
+                                type="button"
+                                onClick={() => swapEntries(idx, idx - 1)}
+                                disabled={isFirst}
+                                aria-label={`Move stop ${wp.name} up`}
+                                data-testid={`map-route-panel-waypoint-up-${wp.id}`}
+                                className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <polyline points="18 15 12 9 6 15" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => swapEntries(idx, idx + 1)}
+                                disabled={isLast}
+                                aria-label={`Move stop ${wp.name} down`}
+                                data-testid={`map-route-panel-waypoint-down-${wp.id}`}
+                                className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <polyline points="6 9 12 15 18 9" />
+                                </svg>
+                              </button>
+                            </div>
                           )}
-                        </svg>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] font-bold text-stone-100 truncate">
-                          {wp.name}
+                          {onRemoveWaypoint && (
+                            <button
+                              type="button"
+                              onClick={() => onRemoveWaypoint(wp.id)}
+                              aria-label={`Remove stop ${wp.name}`}
+                              data-testid={`map-route-panel-waypoint-remove-${wp.id}`}
+                              className="w-6 h-6 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
+                            >
+                              <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <line x1="18" y1="6" x2="6" y2="18" />
+                                <line x1="6" y1="6" x2="18" y2="18" />
+                              </svg>
+                            </button>
+                          )}
                         </div>
-                        <div className="text-[9px] text-stone-500 capitalize">
-                          {wp.kind} stop
+                      );
+                    }
+                    // Trail row — same chrome as the legacy render. The
+                    // up/down arrows route through the entries swap so the
+                    // trail can swap with an adjacent waypoint as well as
+                    // another trail (the whole point of this task).
+                    const trail = entry.trail;
+                    const tIdx = trailIdxById.get(trail.id) ?? 0;
+                    const diff = trail.difficulty ?? 5;
+                    const diffColor = getDifficultyColor(diff);
+                    return (
+                      <div
+                        key={`trail-${trail.id}`}
+                        className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
+                        data-testid={`map-route-panel-item-${tIdx}`}
+                      >
+                        <div
+                          className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black text-stone-900 shrink-0"
+                          style={{ backgroundColor: diffColor }}
+                        >
+                          {tIdx + 1}
                         </div>
-                      </div>
-                      {onRemoveWaypoint && (
+                        {onSelectTrail ? (
+                          <button
+                            type="button"
+                            onClick={() => onSelectTrail(trail)}
+                            className="flex-1 min-w-0 text-left hover:text-amber-300 transition-colors"
+                            aria-label={`View details for ${trail.name}`}
+                            data-testid={`map-route-panel-open-${tIdx}`}
+                          >
+                            <div className="text-[11px] font-bold text-stone-100 truncate">
+                              {trail.name}
+                            </div>
+                            <div className="text-[9px] text-stone-500">
+                              {trail.distance_km != null
+                                ? `${toNum(trail.distance_km).toFixed(1)} km`
+                                : "—"}
+                              {trail.legal_status ? ` · ${trail.legal_status}` : ""}
+                            </div>
+                          </button>
+                        ) : (
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-bold text-stone-100 truncate">
+                              {trail.name}
+                            </div>
+                            <div className="text-[9px] text-stone-500">
+                              {trail.distance_km != null
+                                ? `${toNum(trail.distance_km).toFixed(1)} km`
+                                : "—"}
+                              {trail.legal_status ? ` · ${trail.legal_status}` : ""}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex flex-col gap-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onReorderEntries
+                                ? swapEntries(idx, idx - 1)
+                                : moveUp(tIdx)
+                            }
+                            disabled={isFirst}
+                            aria-label={`Move ${trail.name} up`}
+                            data-testid={`map-route-panel-up-${tIdx}`}
+                            className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <polyline points="18 15 12 9 6 15" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onReorderEntries
+                                ? swapEntries(idx, idx + 1)
+                                : moveDown(tIdx)
+                            }
+                            disabled={isLast}
+                            aria-label={`Move ${trail.name} down`}
+                            data-testid={`map-route-panel-down-${tIdx}`}
+                            className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <polyline points="6 9 12 15 18 9" />
+                            </svg>
+                          </button>
+                        </div>
                         <button
                           type="button"
-                          onClick={() => onRemoveWaypoint(wp.id)}
-                          aria-label={`Remove stop ${wp.name}`}
-                          data-testid={`map-route-panel-waypoint-remove-${wp.id}`}
+                          onClick={() => onRemove(trail.id)}
+                          aria-label={`Remove ${trail.name}`}
+                          data-testid={`map-route-panel-remove-${tIdx}`}
                           className="w-6 h-6 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
                         >
-                          <svg
-                            viewBox="0 0 24 24"
-                            className="w-3 h-3"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2.5"
-                          >
+                          <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
                             <line x1="18" y1="6" x2="6" y2="18" />
                             <line x1="6" y1="6" x2="18" y2="18" />
                           </svg>
                         </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {trails.map((trail, idx) => {
-                const diff = trail.difficulty ?? 5;
-                const diffColor = getDifficultyColor(diff);
-                return (
-                  <div
-                    key={trail.id}
-                    className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
-                    data-testid={`map-route-panel-item-${idx}`}
-                  >
-                    <div
-                      className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black text-stone-900 shrink-0"
-                      style={{ backgroundColor: diffColor }}
-                    >
-                      {idx + 1}
-                    </div>
-                    {onSelectTrail ? (
-                      <button
-                        type="button"
-                        onClick={() => onSelectTrail(trail)}
-                        className="flex-1 min-w-0 text-left hover:text-amber-300 transition-colors"
-                        aria-label={`View details for ${trail.name}`}
-                        data-testid={`map-route-panel-open-${idx}`}
-                      >
-                        <div className="text-[11px] font-bold text-stone-100 truncate">
-                          {trail.name}
-                        </div>
-                        <div className="text-[9px] text-stone-500">
-                          {trail.distance_km != null
-                            ? `${toNum(trail.distance_km).toFixed(1)} km`
-                            : "—"}
-                          {trail.legal_status ? ` · ${trail.legal_status}` : ""}
-                        </div>
-                      </button>
-                    ) : (
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] font-bold text-stone-100 truncate">
-                          {trail.name}
-                        </div>
-                        <div className="text-[9px] text-stone-500">
-                          {trail.distance_km != null
-                            ? `${toNum(trail.distance_km).toFixed(1)} km`
-                            : "—"}
-                          {trail.legal_status ? ` · ${trail.legal_status}` : ""}
-                        </div>
                       </div>
-                    )}
-                    <div className="flex flex-col gap-0">
-                      <button
-                        type="button"
-                        onClick={() => moveUp(idx)}
-                        disabled={idx === 0}
-                        aria-label={`Move ${trail.name} up`}
-                        data-testid={`map-route-panel-up-${idx}`}
-                        className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
-                      >
-                        <svg
-                          viewBox="0 0 24 24"
-                          className="w-3 h-3"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
+                    );
+                  })
+                : (
+                <>
+                  {wps.length > 0 && (
+                    <div className="space-y-1 pb-1.5 border-b border-[hsl(30,12%,18%)] mb-1.5">
+                      <p className="text-[9px] uppercase tracking-wider text-stone-500 font-bold px-1">
+                        Stops ({wps.length})
+                      </p>
+                      {wps.map((wp) => (
+                        <div
+                          key={wp.id}
+                          data-testid={`map-route-panel-waypoint-${wp.id}`}
+                          className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
                         >
-                          <polyline points="18 15 12 9 6 15" />
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveDown(idx)}
-                        disabled={idx === trails.length - 1}
-                        aria-label={`Move ${trail.name} down`}
-                        data-testid={`map-route-panel-down-${idx}`}
-                        className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
-                      >
-                        <svg
-                          viewBox="0 0 24 24"
-                          className="w-3 h-3"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                        >
-                          <polyline points="6 9 12 15 18 9" />
-                        </svg>
-                      </button>
+                          <div
+                            className="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
+                            style={{
+                              background: WAYPOINT_KIND_COLOR[wp.kind],
+                              border: "1.5px solid #f0a832",
+                            }}
+                          >
+                            <svg
+                              viewBox="0 0 24 24"
+                              width="9"
+                              height="9"
+                              fill="none"
+                              stroke="#fff"
+                              strokeWidth="2.4"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              {wp.kind === "fuel" ? (
+                                <path d="M3 12V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v14H3v-7zM13 8h2a2 2 0 0 1 2 2v6a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-6l-3-3" />
+                              ) : wp.kind === "campsite" ? (
+                                <path d="M3 20 12 4l9 16H3z M12 4v16" />
+                              ) : (
+                                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                              )}
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-bold text-stone-100 truncate">
+                              {wp.name}
+                            </div>
+                            <div className="text-[9px] text-stone-500 capitalize">
+                              {wp.kind} stop
+                            </div>
+                          </div>
+                          {onRemoveWaypoint && (
+                            <button
+                              type="button"
+                              onClick={() => onRemoveWaypoint(wp.id)}
+                              aria-label={`Remove stop ${wp.name}`}
+                              data-testid={`map-route-panel-waypoint-remove-${wp.id}`}
+                              className="w-6 h-6 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
+                            >
+                              <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                <line x1="18" y1="6" x2="6" y2="18" />
+                                <line x1="6" y1="6" x2="18" y2="18" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onRemove(trail.id)}
-                      aria-label={`Remove ${trail.name}`}
-                      data-testid={`map-route-panel-remove-${idx}`}
-                      className="w-6 h-6 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        className="w-3 h-3"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.5"
+                  )}
+                  {trails.map((trail, idx) => {
+                    const diff = trail.difficulty ?? 5;
+                    const diffColor = getDifficultyColor(diff);
+                    return (
+                      <div
+                        key={trail.id}
+                        className="flex items-center gap-1.5 bg-[hsl(22,15%,13%)] rounded-lg px-2 py-1.5 border border-[hsl(30,12%,18%)]"
+                        data-testid={`map-route-panel-item-${idx}`}
                       >
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                        <line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
-                  </div>
-                );
-              })}
+                        <div
+                          className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-black text-stone-900 shrink-0"
+                          style={{ backgroundColor: diffColor }}
+                        >
+                          {idx + 1}
+                        </div>
+                        {onSelectTrail ? (
+                          <button
+                            type="button"
+                            onClick={() => onSelectTrail(trail)}
+                            className="flex-1 min-w-0 text-left hover:text-amber-300 transition-colors"
+                            aria-label={`View details for ${trail.name}`}
+                            data-testid={`map-route-panel-open-${idx}`}
+                          >
+                            <div className="text-[11px] font-bold text-stone-100 truncate">
+                              {trail.name}
+                            </div>
+                            <div className="text-[9px] text-stone-500">
+                              {trail.distance_km != null
+                                ? `${toNum(trail.distance_km).toFixed(1)} km`
+                                : "—"}
+                              {trail.legal_status ? ` · ${trail.legal_status}` : ""}
+                            </div>
+                          </button>
+                        ) : (
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-bold text-stone-100 truncate">
+                              {trail.name}
+                            </div>
+                            <div className="text-[9px] text-stone-500">
+                              {trail.distance_km != null
+                                ? `${toNum(trail.distance_km).toFixed(1)} km`
+                                : "—"}
+                              {trail.legal_status ? ` · ${trail.legal_status}` : ""}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex flex-col gap-0">
+                          <button
+                            type="button"
+                            onClick={() => moveUp(idx)}
+                            disabled={idx === 0}
+                            aria-label={`Move ${trail.name} up`}
+                            data-testid={`map-route-panel-up-${idx}`}
+                            className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <polyline points="18 15 12 9 6 15" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveDown(idx)}
+                            disabled={idx === trails.length - 1}
+                            aria-label={`Move ${trail.name} down`}
+                            data-testid={`map-route-panel-down-${idx}`}
+                            className="w-5 h-4 rounded flex items-center justify-center text-stone-500 hover:text-stone-200 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <polyline points="6 9 12 15 18 9" />
+                            </svg>
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => onRemove(trail.id)}
+                          aria-label={`Remove ${trail.name}`}
+                          data-testid={`map-route-panel-remove-${idx}`}
+                          className="w-6 h-6 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
+                        >
+                          <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
 
             {/* Action row */}

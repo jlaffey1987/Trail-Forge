@@ -36,6 +36,7 @@ import {
   removeRouteTrail,
   useRouteEntries,
   removeRouteWaypoint,
+  setRouteEntries,
 } from "@/lib/plannerRouteStore";
 import {
   HYBRID_LABEL_TILE_URL,
@@ -921,6 +922,8 @@ ${trkpts}
           }}
           waypoints={routeWaypointsForMap}
           onRemoveWaypoint={(id) => removeRouteWaypoint(id)}
+          entries={routeEntriesForMap}
+          onReorderEntries={setRouteEntries}
         />
       )}
 
