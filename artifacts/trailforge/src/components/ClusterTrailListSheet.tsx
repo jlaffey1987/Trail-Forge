@@ -1,5 +1,12 @@
+import { useEffect, useState } from "react";
 import { type Trail } from "@/lib/supabase";
 import { getDifficultyColor } from "@/lib/trailLayer";
+import {
+  addRouteTrail,
+  removeRouteTrail,
+  getRouteTrails,
+  subscribeRouteTrails,
+} from "@/lib/plannerRouteStore";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
@@ -40,6 +47,34 @@ export default function ClusterTrailListSheet({
   onClose,
 }: Props) {
   const sorted = [...trails].sort((a, b) => a.name.localeCompare(b.name));
+
+  // Subscribe to the planner route store so the per-row toggles reflect
+  // adds/removes happening anywhere else in the app (e.g. the trail
+  // detail sheet) without the user having to close and re-open this list.
+  // We track the FULL set of trail ids in the route — not just the
+  // intersection with the current `trails` prop — so that if the cluster's
+  // trail list changes while the sheet stays mounted, newly-shown trails
+  // already display the correct in-route state without waiting for the
+  // next store emit.
+  const [routeIds, setRouteIds] = useState<Set<string>>(
+    () => new Set(getRouteTrails().map((t) => t.id)),
+  );
+  useEffect(() => {
+    return subscribeRouteTrails((trailsInRoute) => {
+      setRouteIds(new Set(trailsInRoute.map((t) => t.id)));
+    });
+  }, []);
+
+  const handleToggleRoute = (trail: Trail) => {
+    // Approximated trails are reference-only — never used in navigation.
+    // Mirrors the guard in TrailDetailSheet.handleAddToPlanner.
+    if (trail.verification_status === "ai-approximated") return;
+    if (routeIds.has(trail.id)) {
+      removeRouteTrail(trail.id);
+    } else {
+      addRouteTrail(trail);
+    }
+  };
 
   return (
     <div
@@ -86,12 +121,18 @@ export default function ClusterTrailListSheet({
                 const km = toNum(trail.distance_km);
                 const gain = formatElevationGain(trail.elevation_gain_m);
                 const loss = formatElevationGain(trail.elevation_loss_m);
+                const inRoute = routeIds.has(trail.id);
+                const isApproximated =
+                  trail.verification_status === "ai-approximated";
                 return (
-                  <li key={trail.id}>
+                  <li
+                    key={trail.id}
+                    className="flex items-stretch hover:bg-stone-800/60 active:bg-stone-800 transition-colors"
+                  >
                     <button
                       type="button"
                       onClick={() => onSelectTrail(trail)}
-                      className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left hover:bg-stone-800/60 active:bg-stone-800 transition-colors"
+                      className="flex-1 min-w-0 flex items-center justify-between gap-3 px-4 py-2.5 text-left"
                       data-testid={`cluster-trail-row-${trail.id}`}
                     >
                       <div className="flex-1 min-w-0">
@@ -130,6 +171,33 @@ export default function ClusterTrailListSheet({
                       >
                         {difficultyLabel(trail.difficulty)}
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleRoute(trail);
+                      }}
+                      disabled={isApproximated}
+                      aria-pressed={inRoute}
+                      title={
+                        isApproximated
+                          ? "AI-approximated trails can't be added to a route"
+                          : inRoute
+                            ? "Remove from planner route"
+                            : "Add to planner route"
+                      }
+                      data-testid={`cluster-trail-route-toggle-${trail.id}`}
+                      className={
+                        "shrink-0 self-center mr-2 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors " +
+                        (isApproximated
+                          ? "border-stone-800 text-stone-600 cursor-not-allowed"
+                          : inRoute
+                            ? "border-amber-500 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
+                            : "border-stone-700 text-stone-300 hover:border-amber-500 hover:text-amber-300")
+                      }
+                    >
+                      {inRoute ? "✓ In route" : "+ Route"}
                     </button>
                   </li>
                 );
