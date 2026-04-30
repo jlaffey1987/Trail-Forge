@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { type Trail } from "@/lib/supabase";
+import ClusterTrailListSheet from "@/components/ClusterTrailListSheet";
 import {
   HYBRID_LABEL_TILE_ATTRIBUTION,
   HYBRID_LABEL_TILE_URL,
@@ -158,6 +160,15 @@ export default function PlannerMap({
   // markers (low zoom) and full polylines (high zoom) the same way MapTab
   // does. Initialized to the map's starting zoom in the init effect.
   const [currentZoom, setCurrentZoom] = useState<number>(6);
+  // When the user taps a multi-trail cluster we open a bottom sheet listing
+  // its member trails (mirrors the Map tab UX) instead of just zooming. A
+  // single-trail cluster still zooms straight in.
+  const [activeCluster, setActiveCluster] = useState<TrailCluster | null>(null);
+  // Stash onToggle in a ref so the cluster click handler effect doesn't
+  // need to list it as a dep (avoids tearing down the trail layer on every
+  // parent re-render that creates a new toggle closure).
+  const onToggleRef = useRef(onToggle);
+  onToggleRef.current = onToggle;
 
   // Load Leaflet
   useEffect(() => {
@@ -226,6 +237,62 @@ export default function PlannerMap({
   }, [expanded, map]);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  // Resolve the trails belonging to the currently-open cluster sheet against
+  // the live `trails` prop. Recomputed on every render so filter / fetch
+  // updates flow through without needing the user to re-open the sheet.
+  // If no trails match (e.g. results changed under the user) the sheet
+  // closes itself via the effect below — fall back to an empty list.
+  const clusterTrailsForSheet = useMemo<Trail[]>(() => {
+    if (!activeCluster) return [];
+    const ids = new Set(activeCluster.trailIds);
+    const byId = new Map<string, Trail>();
+    for (const t of trails) byId.set(t.id, t);
+    const out: Trail[] = [];
+    for (const id of ids) {
+      const t = byId.get(id);
+      if (t) out.push(t);
+    }
+    return out;
+  }, [activeCluster, trails]);
+
+  // Auto-close the sheet if its underlying cluster no longer matches any
+  // visible trails (e.g. the rider toggled a difficulty filter that hides
+  // every member trail). Avoids a stuck empty sheet.
+  useEffect(() => {
+    if (activeCluster && clusterTrailsForSheet.length === 0) {
+      setActiveCluster(null);
+    }
+  }, [activeCluster, clusterTrailsForSheet]);
+
+  // Drill into a cluster's bounding box — the original "tap = zoom" UX,
+  // now triggered by the sheet's "Zoom to area" affordance instead of a
+  // bare cluster tap. Capped at one level past the cluster threshold so
+  // the rider can keep drilling further if needed.
+  const zoomToCluster = useCallback(
+    (cluster: TrailCluster) => {
+      if (!map || !window.L) return;
+      const L = window.L;
+      try {
+        const bounds = L.latLngBounds(
+          [cluster.bbox.minLat, cluster.bbox.minLng],
+          [cluster.bbox.maxLat, cluster.bbox.maxLng],
+        );
+        const z = map.getZoom();
+        const targetMax = Math.max(
+          CLUSTER_ZOOM_THRESHOLD,
+          Math.min(CLUSTER_ZOOM_THRESHOLD + 2, z + 3),
+        );
+        map.fitBounds(bounds, { padding: [40, 40], maxZoom: targetMax });
+      } catch {
+        map.setView(
+          [cluster.lat, cluster.lng],
+          Math.min(CLUSTER_ZOOM_THRESHOLD + 1, map.getZoom() + 3),
+        );
+      }
+    },
+    [map],
+  );
 
   // Start/end markers + initial fit-to-content. Intentionally NOT dependent
   // on `currentZoom` so user-driven zooming (e.g. drilling into a cluster)
@@ -613,30 +680,26 @@ export default function PlannerMap({
       const clusters = clusterTrails(unselected, currentZoom);
       const cHandle = renderTrailClusters(map, clusters, {
         onClusterClick: (cluster: TrailCluster) => {
-          // Drill into the cluster's bbox. Single-trail clusters zoom
-          // straight to the trail; multi-trail clusters cap at one level
-          // past the threshold so the user can keep drilling further.
-          try {
-            const bounds = L.latLngBounds(
-              [cluster.bbox.minLat, cluster.bbox.minLng],
-              [cluster.bbox.maxLat, cluster.bbox.maxLng],
-            );
-            if (cluster.count === 1) {
+          // Single-trail clusters drill straight in (no point opening a
+          // one-row sheet). Multi-trail clusters open a bottom sheet so
+          // the rider can pick a specific trail to add to the route, or
+          // fall back to the original drill-in via "Zoom to area".
+          if (cluster.count === 1) {
+            try {
+              const bounds = L.latLngBounds(
+                [cluster.bbox.minLat, cluster.bbox.minLng],
+                [cluster.bbox.maxLat, cluster.bbox.maxLng],
+              );
               map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
-              return;
+            } catch {
+              map.setView(
+                [cluster.lat, cluster.lng],
+                Math.min(CLUSTER_ZOOM_THRESHOLD + 1, map.getZoom() + 3),
+              );
             }
-            const z = map.getZoom();
-            const targetMax = Math.max(
-              CLUSTER_ZOOM_THRESHOLD,
-              Math.min(CLUSTER_ZOOM_THRESHOLD + 2, z + 3),
-            );
-            map.fitBounds(bounds, { padding: [40, 40], maxZoom: targetMax });
-          } catch {
-            map.setView(
-              [cluster.lat, cluster.lng],
-              Math.min(CLUSTER_ZOOM_THRESHOLD + 1, map.getZoom() + 3),
-            );
+            return;
           }
+          setActiveCluster(cluster);
         },
       });
       clusterLayerRef.current = cHandle;
@@ -819,6 +882,36 @@ export default function PlannerMap({
           </div>
         </div>
       </div>
+
+      {/* Multi-trail cluster sheet. Portalled to <body> so the parent
+          `overflow-hidden` panel (the collapsible map card) doesn't clip
+          the bottom sheet to the 320px map area. The sheet is the same
+          component the Map tab uses; we drive it controlled-mode via
+          `selectedIds` + `onToggleTrail` so taps call PlannerTab's
+          `onToggle` (which carries planner-specific guards).
+
+          Row-tap semantics differ from MapTab on purpose: the Planner has
+          no trail-detail sheet to open, so we map both the row body and
+          the per-row "+ Route" button to `onToggle` — the primary action
+          here is "add to route", not "view details". The sheet stays
+          open so the rider can add several trails from the cluster in
+          one go without re-opening it. */}
+      {activeCluster && typeof document !== "undefined" &&
+        createPortal(
+          <ClusterTrailListSheet
+            trails={clusterTrailsForSheet}
+            selectedIds={selectedIdSet}
+            onToggleTrail={(trail) => onToggleRef.current(trail)}
+            onSelectTrail={(trail) => onToggleRef.current(trail)}
+            onZoomToArea={() => {
+              const c = activeCluster;
+              setActiveCluster(null);
+              if (c) zoomToCluster(c);
+            }}
+            onClose={() => setActiveCluster(null)}
+          />,
+          document.body,
+        )}
     </div>
   );
 }

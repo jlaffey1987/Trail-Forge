@@ -48,6 +48,21 @@ interface Props {
   onSelectTrail: (trail: Trail) => void;
   onZoomToArea: () => void;
   onClose: () => void;
+  /**
+   * Optional override for the per-row "Add to route" / "Remove from route"
+   * toggle. When provided alongside `selectedIds`, the sheet does NOT
+   * subscribe to the global planner route store and instead drives both
+   * the visual state and the toggle via these props. Used by PlannerMap so
+   * the cluster sheet calls the planner's own `onToggle` (which carries
+   * extra side effects like surfacing approximated-trail errors).
+   */
+  onToggleTrail?: (trail: Trail) => void;
+  /**
+   * Optional ids of trails currently in the route. When provided alongside
+   * `onToggleTrail`, the per-row toggle reflects this set instead of the
+   * global planner route store.
+   */
+  selectedIds?: Set<string>;
 }
 
 function toNum(v: unknown): number | null {
@@ -111,6 +126,8 @@ export default function ClusterTrailListSheet({
   onSelectTrail,
   onZoomToArea,
   onClose,
+  onToggleTrail,
+  selectedIds,
 }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>(() => readStoredSort());
   const sorted = useMemo(() => sortTrails(trails, sortKey), [trails, sortKey]);
@@ -120,26 +137,43 @@ export default function ClusterTrailListSheet({
     writeStoredSort(next);
   };
 
-  // Subscribe to the planner route store so the per-row toggles reflect
-  // adds/removes happening anywhere else in the app (e.g. the trail
-  // detail sheet) without the user having to close and re-open this list.
-  // We track the FULL set of trail ids in the route — not just the
-  // intersection with the current `trails` prop — so that if the cluster's
-  // trail list changes while the sheet stays mounted, newly-shown trails
-  // already display the correct in-route state without waiting for the
-  // next store emit.
-  const [routeIds, setRouteIds] = useState<Set<string>>(
-    () => new Set(getRouteTrails().map((t) => t.id)),
+  // Two ways to drive the per-row "in route" state:
+  //
+  // 1. Default (MapTab): subscribe to the global planner route store so
+  //    the toggles reflect adds/removes happening anywhere else in the
+  //    app (e.g. the trail detail sheet) without the user having to
+  //    close and re-open this list. We track the FULL set of trail ids
+  //    in the route — not just the intersection with the current
+  //    `trails` prop — so that if the cluster's trail list changes while
+  //    the sheet stays mounted, newly-shown trails already display the
+  //    correct in-route state without waiting for the next store emit.
+  //
+  // 2. Controlled (PlannerMap): the parent owns route state and passes
+  //    `selectedIds` + `onToggleTrail` directly. We skip the store
+  //    subscription so the sheet can be used in places that don't share
+  //    the global store and so the parent's toggle (which may have
+  //    extra side effects like approximated-trail warnings) runs.
+  const controlled = onToggleTrail != null && selectedIds != null;
+  const [storeIds, setStoreIds] = useState<Set<string>>(
+    () => (controlled ? new Set() : new Set(getRouteTrails().map((t) => t.id))),
   );
   useEffect(() => {
+    if (controlled) return undefined;
     return subscribeRouteTrails((trailsInRoute) => {
-      setRouteIds(new Set(trailsInRoute.map((t) => t.id)));
+      setStoreIds(new Set(trailsInRoute.map((t) => t.id)));
     });
-  }, []);
+  }, [controlled]);
+  const routeIds = controlled ? selectedIds : storeIds;
 
   const handleToggleRoute = (trail: Trail) => {
     // Approximated trails are reference-only — never used in navigation.
-    // Mirrors the guard in TrailDetailSheet.handleAddToPlanner.
+    // Mirrors the guard in TrailDetailSheet.handleAddToPlanner. The
+    // controlled path delegates the guard to the parent's onToggleTrail
+    // so it can decide how to surface the rejection (e.g. inline error).
+    if (controlled) {
+      onToggleTrail(trail);
+      return;
+    }
     if (trail.verification_status === "ai-approximated") return;
     if (routeIds.has(trail.id)) {
       removeRouteTrail(trail.id);
