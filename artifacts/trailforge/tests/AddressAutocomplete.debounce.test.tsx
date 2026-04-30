@@ -55,10 +55,22 @@ function Harness({ initial = "" }: { initial?: string }) {
   );
 }
 
+// Helper that wraps a list of suggestion objects in the new tagged
+// `SuggestionsResult` shape that AddressAutocomplete now expects.
+type Suggestion = {
+  id: string;
+  label: string;
+  shortLabel: string;
+  lat: number;
+  lng: number;
+};
+const ok = (suggestions: Suggestion[]) =>
+  ({ status: "ok" as const, suggestions });
+
 describe("AddressAutocomplete — debounce + sequence guard", () => {
   it("ignores a stale earlier response when a newer query lands first", async () => {
-    const slow = deferred<unknown[]>();
-    const fast = deferred<unknown[]>();
+    const slow = deferred<ReturnType<typeof ok>>();
+    const fast = deferred<ReturnType<typeof ok>>();
     mockSearch.mockImplementationOnce(() => slow.promise);
     mockSearch.mockImplementationOnce(() => fast.promise);
 
@@ -75,36 +87,40 @@ describe("AddressAutocomplete — debounce + sequence guard", () => {
 
     // Newer (second) request resolves first.
     await act(async () => {
-      fast.resolve([
-        {
-          id: "n2",
-          label: "Manchester, UK",
-          shortLabel: "Manchester",
-          lat: 53.48,
-          lng: -2.24,
-        },
-      ]);
+      fast.resolve(
+        ok([
+          {
+            id: "n2",
+            label: "Manchester, UK",
+            shortLabel: "Manchester",
+            lat: 53.48,
+            lng: -2.24,
+          },
+        ]),
+      );
     });
     expect(screen.getByText("Manchester")).toBeTruthy();
 
     // Older (first) request resolves AFTER — must NOT replace the dropdown.
     await act(async () => {
-      slow.resolve([
-        {
-          id: "n1",
-          label: "Aberdeen, UK",
-          shortLabel: "Aberdeen",
-          lat: 57.15,
-          lng: -2.09,
-        },
-      ]);
+      slow.resolve(
+        ok([
+          {
+            id: "n1",
+            label: "Aberdeen, UK",
+            shortLabel: "Aberdeen",
+            lat: 57.15,
+            lng: -2.09,
+          },
+        ]),
+      );
     });
     expect(screen.queryByText("Aberdeen")).toBeNull();
     expect(screen.getByText("Manchester")).toBeTruthy();
   });
 
   it("treats an in-flight request as stale when the input shrinks below the threshold", async () => {
-    const inflight = deferred<unknown[]>();
+    const inflight = deferred<ReturnType<typeof ok>>();
     mockSearch.mockImplementationOnce(() => inflight.promise);
 
     render(<Harness />);
@@ -120,17 +136,41 @@ describe("AddressAutocomplete — debounce + sequence guard", () => {
     fireEvent.change(input, { target: { value: "a" } });
 
     await act(async () => {
-      inflight.resolve([
-        {
-          id: "n3",
-          label: "Aberystwyth, Wales, UK",
-          shortLabel: "Aberystwyth",
-          lat: 52.41,
-          lng: -4.08,
-        },
-      ]);
+      inflight.resolve(
+        ok([
+          {
+            id: "n3",
+            label: "Aberystwyth, Wales, UK",
+            shortLabel: "Aberystwyth",
+            lat: 52.41,
+            lng: -4.08,
+          },
+        ]),
+      );
     });
 
     expect(screen.queryByText("Aberystwyth")).toBeNull();
+  });
+
+  it("renders a retry-affordance error panel when the address service is down", async () => {
+    const fail = deferred<{ status: "error"; error: string }>();
+    mockSearch.mockImplementationOnce(() => fail.promise);
+
+    render(<Harness />);
+    const input = screen.getByTestId("ac") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "Glasgow" } });
+    await wait(320);
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      fail.resolve({ status: "error", error: "offline" });
+    });
+
+    // The error panel and Retry button should be in the DOM, NOT a
+    // misleading empty suggestions list.
+    expect(screen.getByTestId("ac-error")).toBeTruthy();
+    expect(screen.getByTestId("ac-retry")).toBeTruthy();
+    expect(screen.queryByTestId("ac-suggestions")).toBeNull();
   });
 });

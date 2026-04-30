@@ -11,6 +11,7 @@ import {
   searchPoisAlongRoute,
   type Poi,
   type PoiKind,
+  type PoiSearchResult,
 } from "@/lib/poi";
 import {
   renderTrailLayer,
@@ -142,6 +143,11 @@ export default function PlannerMap({
   const [pois, setPois] = useState<Poi[]>([]);
   const [poiLoading, setPoiLoading] = useState(false);
   const [poiError, setPoiError] = useState<string | null>(null);
+  // Distinct from `poiError`: this flag is only set when the upstream
+  // service (Overpass) was unreachable, so the banner can offer a Retry
+  // affordance. A "no fuel within bounds" hit sets `poiError` text but
+  // leaves this flag false — there's nothing to retry, the area is empty.
+  const [poiServiceDown, setPoiServiceDown] = useState(false);
   // Stash callbacks in a ref so the marker effect can reach them without
   // listing them as deps and re-rendering every render.
   const onAddWaypointRef = useRef(onAddWaypoint);
@@ -418,16 +424,17 @@ export default function PlannerMap({
       setPoiKindShown(kind);
       setPois([]);
       setPoiError(null);
+      setPoiServiceDown(false);
       setPoiLoading(true);
       try {
-        let results: Poi[] = [];
+        let res: PoiSearchResult;
         let isCorridorMode = false;
         if (routeCorridorPoints && routeCorridorPoints.length >= 2) {
           isCorridorMode = true;
-          results = await searchPoisAlongRoute(kind, routeCorridorPoints, 8);
+          res = await searchPoisAlongRoute(kind, routeCorridorPoints, 8);
         } else {
           const b = map.getBounds();
-          results = await searchPoisInBbox(kind, {
+          res = await searchPoisInBbox(kind, {
             minLat: b.getSouth(),
             minLng: b.getWest(),
             maxLat: b.getNorth(),
@@ -437,6 +444,20 @@ export default function PlannerMap({
         // A newer toggle fired while we were awaiting Overpass — drop
         // this stale response so it can't overwrite the newer state.
         if (mySeq !== poiReqSeqRef.current) return;
+        if (res.status !== "ok") {
+          // Service-level failure (timeout, 5xx, network). Surface a
+          // retry button instead of an empty layer so the rider knows
+          // it isn't a "no fuel out here" answer.
+          setPois([]);
+          setPoiServiceDown(true);
+          setPoiError(
+            kind === "fuel"
+              ? "Couldn't reach the fuel station service. Tap retry."
+              : "Couldn't reach the campsite service. Tap retry.",
+          );
+          return;
+        }
+        const results = res.pois;
         setPois(results);
         // In corridor mode the rider has a planned route, so auto-frame
         // the relevant POIs on top of it. We pad lightly so the markers
@@ -478,15 +499,91 @@ export default function PlannerMap({
               : "No campsites found nearby",
           );
         }
-      } catch {
+      } catch (err) {
         if (mySeq !== poiReqSeqRef.current) return;
-        setPoiError("Couldn't load POIs — try again in a moment");
+        // Belt-and-braces: searchPois* now return a tagged error result
+        // rather than throwing, but if a future change starts throwing
+        // again (or `map.getBounds` blows up) we still want a retry path
+        // rather than a stuck spinner.
+        setPoiServiceDown(true);
+        setPoiError(
+          err instanceof Error && err.message
+            ? `Couldn't load POIs: ${err.message}. Tap retry.`
+            : "Couldn't load POIs — tap retry.",
+        );
       } finally {
         if (mySeq === poiReqSeqRef.current) setPoiLoading(false);
       }
     },
     [map, poiKindShown, routeCorridorPoints],
   );
+
+  // Re-run the most recent POI search when the rider taps the retry
+  // affordance. We re-enter `togglePoi` by first flipping the kind off
+  // (so togglePoi treats the next call as a fresh open, not a hide) and
+  // then immediately re-toggling. Done in a ref-free way via setState
+  // so we don't invalidate `togglePoi`'s dependency array.
+  const retryPoi = useCallback(() => {
+    const kind = poiKindShown;
+    if (!kind) return;
+    setPoiServiceDown(false);
+    setPoiError(null);
+    // Bump the seq so the previous failed in-flight (if any) is
+    // ignored; then call the underlying search directly with the same
+    // kind, bypassing the "tap-active = hide" branch in togglePoi.
+    const mySeq = ++poiReqSeqRef.current;
+    setPoiLoading(true);
+    void (async () => {
+      try {
+        let res: PoiSearchResult;
+        if (routeCorridorPoints && routeCorridorPoints.length >= 2) {
+          res = await searchPoisAlongRoute(kind, routeCorridorPoints, 8);
+        } else if (map) {
+          const b = map.getBounds();
+          res = await searchPoisInBbox(kind, {
+            minLat: b.getSouth(),
+            minLng: b.getWest(),
+            maxLat: b.getNorth(),
+            maxLng: b.getEast(),
+          });
+        } else {
+          return;
+        }
+        if (mySeq !== poiReqSeqRef.current) return;
+        if (res.status !== "ok") {
+          setPoiServiceDown(true);
+          setPoiError(
+            kind === "fuel"
+              ? "Couldn't reach the fuel station service. Tap retry."
+              : "Couldn't reach the campsite service. Tap retry.",
+          );
+          return;
+        }
+        setPois(res.pois);
+        if (res.pois.length === 0) {
+          setPoiError(
+            kind === "fuel"
+              ? "No fuel stations found nearby"
+              : "No campsites found nearby",
+          );
+        }
+      } catch (err) {
+        // Belt-and-braces (mirrors togglePoi's catch): the search lib
+        // now returns tagged errors instead of throwing, but a future
+        // regression or a failure in `map.getBounds()` would otherwise
+        // leave the rider with a stuck spinner and no recovery path.
+        if (mySeq !== poiReqSeqRef.current) return;
+        setPoiServiceDown(true);
+        setPoiError(
+          err instanceof Error && err.message
+            ? `Couldn't load POIs: ${err.message}. Tap retry.`
+            : "Couldn't load POIs — tap retry.",
+        );
+      } finally {
+        if (mySeq === poiReqSeqRef.current) setPoiLoading(false);
+      }
+    })();
+  }, [poiKindShown, routeCorridorPoints, map]);
 
   // Render trail layer — clusters at low zoom, polylines higher up. Selected
   // route trails always render as polylines on top so the user can see the
@@ -638,14 +735,37 @@ export default function PlannerMap({
               </button>
             </div>
           )}
-          {/* POI loading / error indicator (small banner top-center). */}
+          {/* POI loading / error indicator (small banner top-center).
+              Adds an inline Retry button when the upstream service was
+              unreachable so the rider can recover without re-toggling. */}
           {leafletLoaded && poiKindShown != null && (poiLoading || poiError) && (
-            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[600] bg-stone-900/85 border border-stone-700 rounded-md px-2.5 py-1 backdrop-blur">
-              <p className="text-[10px] text-stone-200 font-medium">
+            <div
+              className={`absolute top-2 left-1/2 -translate-x-1/2 z-[600] rounded-md px-2.5 py-1 backdrop-blur flex items-center gap-2 ${
+                poiServiceDown
+                  ? "bg-amber-950/85 border border-amber-700/60"
+                  : "bg-stone-900/85 border border-stone-700"
+              }`}
+              data-testid="poi-status-banner"
+            >
+              <p
+                className={`text-[10px] font-medium ${
+                  poiServiceDown ? "text-amber-200" : "text-stone-200"
+                }`}
+              >
                 {poiLoading
                   ? `Loading ${poiKindShown === "fuel" ? "fuel stations" : "campsites"}…`
                   : poiError}
               </p>
+              {!poiLoading && poiServiceDown && (
+                <button
+                  type="button"
+                  onClick={retryPoi}
+                  className="text-[10px] px-2 py-0.5 rounded border border-amber-500/60 text-amber-100 hover:bg-amber-600/20 active:bg-amber-600/30"
+                  data-testid="poi-retry-button"
+                >
+                  Retry
+                </button>
+              )}
             </div>
           )}
           {!leafletLoaded && (
@@ -689,6 +809,13 @@ export default function PlannerMap({
           </div>
           <div className="flex items-center gap-1.5 ml-auto">
             <span className="text-[10px] text-stone-500 italic">Tap any trail to add</span>
+          </div>
+          {/* OSM attribution: address search (Nominatim) and POIs
+              (Overpass / OpenStreetMap data) both require visible credit
+              wherever their results are shown. The Esri imagery has its
+              own attribution baked into the tile layer. */}
+          <div className="basis-full text-[9px] text-stone-600 leading-tight pt-0.5">
+            Address search & POIs © OpenStreetMap contributors
           </div>
         </div>
       </div>

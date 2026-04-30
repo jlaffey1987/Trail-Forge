@@ -62,10 +62,92 @@ const OVERPASS_ENDPOINTS = [
 ];
 
 const OVERPASS_TIMEOUT_S = 25;
+/** Per-request network ceiling. Slightly above OVERPASS_TIMEOUT_S to give
+ * the server's own timeout a chance to respond cleanly first. */
+const OVERPASS_NETWORK_TIMEOUT_MS = 30_000;
+/** Honour Overpass usage policy by spacing client requests. */
+const OVERPASS_MIN_INTERVAL_MS = 2000;
+/** Cache POI lookups so a rider toggling Fuel → Campsites → Fuel doesn't
+ * re-hit Overpass each time, and so flipping panels keeps results warm. */
+const POI_CACHE_TTL_MS = 5 * 60_000;
+const POI_CACHE_MAX = 40;
+
+export interface PoiBbox {
+  minLat: number;
+  minLng: number;
+  maxLat: number;
+  maxLng: number;
+}
+
+/**
+ * Tagged result from the Overpass-backed POI helpers. Lets callers
+ * distinguish a genuinely empty area ("no fuel stations within these
+ * bounds") from a service outage so the planner can show a retry
+ * affordance instead of a misleading empty map.
+ */
+export type PoiSearchResult =
+  | { status: "ok"; pois: Poi[] }
+  | { status: "error"; error: string };
+
+const poiCache = new Map<
+  string,
+  { at: number; result: PoiSearchResult }
+>();
+let lastOverpassAt = 0;
+const inflightPoi = new Map<string, Promise<PoiSearchResult>>();
+
+function rememberPoi(key: string, result: PoiSearchResult): void {
+  if (result.status !== "ok") return;
+  poiCache.set(key, { at: Date.now(), result });
+  if (poiCache.size > POI_CACHE_MAX) {
+    const firstKey = poiCache.keys().next().value;
+    if (firstKey !== undefined) poiCache.delete(firstKey);
+  }
+}
+
+function recallPoi(key: string): PoiSearchResult | null {
+  const hit = poiCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > POI_CACHE_TTL_MS) {
+    poiCache.delete(key);
+    return null;
+  }
+  return hit.result;
+}
+
+// Serialized throttle: chain every caller onto a single promise so that
+// concurrent invocations are guaranteed to be spaced by at least
+// `OVERPASS_MIN_INTERVAL_MS`. Without serialization, two concurrent
+// callers (e.g. fuel + campsite buttons tapped quickly) could both pass
+// the elapsed check together and fire side-by-side.
+let throttleOverpassChain: Promise<void> = Promise.resolve();
+function throttleOverpass(): Promise<void> {
+  const next = throttleOverpassChain.then(async () => {
+    const elapsed = Date.now() - lastOverpassAt;
+    if (elapsed < OVERPASS_MIN_INTERVAL_MS) {
+      await new Promise((r) =>
+        setTimeout(r, OVERPASS_MIN_INTERVAL_MS - elapsed),
+      );
+    }
+    lastOverpassAt = Date.now();
+  });
+  // See routing.ts/throttleNominatim — swallow chain-level rejections so
+  // a single bad caller can't permanently break throttling for everyone
+  // queued behind it.
+  throttleOverpassChain = next.catch(() => undefined);
+  return next;
+}
 
 function tagSelector(kind: PoiKind): string {
   if (kind === "fuel") return 'amenity=fuel';
   return 'tourism=camp_site';
+}
+
+/** Round bbox coordinates to ~3 decimal places (~110m) for cache keying.
+ * Riders panning the map by a few pixels shouldn't bust the cache. */
+function bboxCacheKey(kind: PoiKind, bbox: PoiBbox): string {
+  const r = (n: number) => Math.round(n * 1000) / 1000;
+  return `bbox:${kind}:${r(bbox.minLat)},${r(bbox.minLng)},${r(bbox.maxLat)},${r(bbox.maxLng)}`;
 }
 
 function buildBboxQuery(kind: PoiKind, bbox: PoiBbox): string {
@@ -80,28 +162,48 @@ function buildBboxQuery(kind: PoiKind, bbox: PoiBbox): string {
 out center tags 200;`;
 }
 
-export interface PoiBbox {
-  minLat: number;
-  minLng: number;
-  maxLat: number;
-  maxLng: number;
-}
-
-async function postOverpass(query: string): Promise<OverpassResponse | null> {
+async function postOverpass(
+  query: string,
+): Promise<{ ok: true; data: OverpassResponse } | { ok: false; error: string }> {
+  let lastError = "Couldn't reach Overpass";
   for (const url of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      OVERPASS_NETWORK_TIMEOUT_MS,
+    );
     try {
+      await throttleOverpass();
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal,
       });
-      if (!res.ok) continue;
-      return (await res.json()) as OverpassResponse;
-    } catch {
+      if (!res.ok) {
+        // 429 / 504 are common Overpass rate-limit / overload responses;
+        // try the next mirror but remember the most recent reason for the
+        // caller-facing error message if every mirror fails.
+        lastError =
+          res.status === 429
+            ? "Overpass is rate-limiting our requests"
+            : `Overpass returned ${res.status}`;
+        continue;
+      }
+      const data = (await res.json()) as OverpassResponse;
+      return { ok: true, data };
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        lastError = "Overpass request timed out";
+      } else if (err instanceof Error) {
+        lastError = err.message;
+      }
       continue;
+    } finally {
+      clearTimeout(timer);
     }
   }
-  return null;
+  return { ok: false, error: lastError };
 }
 
 function elementToPoi(el: OverpassNode, kind: PoiKind): Poi | null {
@@ -132,22 +234,46 @@ function elementToPoi(el: OverpassNode, kind: PoiKind): Poi | null {
   };
 }
 
+/**
+ * Run a bbox POI search, returning a tagged result. Successful lookups
+ * (including genuinely-empty ones) are cached for `POI_CACHE_TTL_MS`,
+ * keyed by kind + rounded bbox so a small map nudge doesn't bust it.
+ * Concurrent identical lookups are deduped via a single-flight map.
+ */
 export async function searchPoisInBbox(
   kind: PoiKind,
   bbox: PoiBbox,
-): Promise<Poi[]> {
-  const data = await postOverpass(buildBboxQuery(kind, bbox));
-  if (!data) return [];
-  const out: Poi[] = [];
-  const seen = new Set<string>();
-  for (const el of data.elements) {
-    const p = elementToPoi(el, kind);
-    if (!p) continue;
-    if (seen.has(p.id)) continue;
-    seen.add(p.id);
-    out.push(p);
+): Promise<PoiSearchResult> {
+  const key = bboxCacheKey(kind, bbox);
+  const cached = recallPoi(key);
+  if (cached) return cached;
+
+  const existing = inflightPoi.get(key);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<PoiSearchResult> => {
+    const res = await postOverpass(buildBboxQuery(kind, bbox));
+    if (!res.ok) return { status: "error", error: res.error };
+    const out: Poi[] = [];
+    const seen = new Set<string>();
+    for (const el of res.data.elements) {
+      const p = elementToPoi(el, kind);
+      if (!p) continue;
+      if (seen.has(p.id)) continue;
+      seen.add(p.id);
+      out.push(p);
+    }
+    const result: PoiSearchResult = { status: "ok", pois: out };
+    rememberPoi(key, result);
+    return result;
+  })();
+
+  inflightPoi.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightPoi.delete(key);
   }
-  return out;
 }
 
 const EARTH_RADIUS_M = 6_371_000;
@@ -217,13 +343,17 @@ export function distancePointToPolylineM(
  * Find POIs near a route polyline. Concatenate every section polyline
  * the caller hands us into one big point list and search the padded
  * bbox; then filter to those within `corridorKm` of any segment.
+ *
+ * Returns the same tagged shape as `searchPoisInBbox` so a service
+ * outage propagates through the corridor filter unchanged and the
+ * caller can show a retry hint instead of a silent empty list.
  */
 export async function searchPoisAlongRoute(
   kind: PoiKind,
   polyline: Array<{ lat: number; lng: number }>,
   corridorKm: number,
-): Promise<Poi[]> {
-  if (polyline.length < 2) return [];
+): Promise<PoiSearchResult> {
+  if (polyline.length < 2) return { status: "ok", pois: [] };
   let minLat = Infinity;
   let maxLat = -Infinity;
   let minLng = Infinity;
@@ -241,10 +371,11 @@ export async function searchPoisAlongRoute(
     minLng: minLng - padDeg / Math.max(0.2, Math.cos((minLat * Math.PI) / 180)),
     maxLng: maxLng + padDeg / Math.max(0.2, Math.cos((maxLat * Math.PI) / 180)),
   };
-  const candidates = await searchPoisInBbox(kind, bbox);
+  const res = await searchPoisInBbox(kind, bbox);
+  if (res.status !== "ok") return res;
   const corridorM = corridorKm * 1000;
   const out: Poi[] = [];
-  for (const p of candidates) {
+  for (const p of res.pois) {
     const d = distancePointToPolylineM(
       { lat: p.lat, lng: p.lng },
       polyline,
@@ -259,7 +390,7 @@ export async function searchPoisAlongRoute(
   out.sort(
     (a, b) => (a.routeDistanceM ?? Infinity) - (b.routeDistanceM ?? Infinity),
   );
-  return out;
+  return { status: "ok", pois: out };
 }
 
 /**

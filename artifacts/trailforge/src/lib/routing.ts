@@ -118,51 +118,215 @@ export interface AddressSuggestion {
 }
 
 /**
+ * Tagged result from `searchSuggestions`. Callers can distinguish
+ * "Nominatim returned nothing for this query" (`status: "ok"` with an
+ * empty array) from "we couldn't reach Nominatim" (`status: "error"`)
+ * so the UI can show a retry hint instead of a misleading empty list.
+ */
+export type SuggestionsResult =
+  | { status: "ok"; suggestions: AddressSuggestion[] }
+  | { status: "error"; error: string };
+
+/**
+ * Public Nominatim has a 1 request-per-second usage policy. We enforce a
+ * client-side minimum spacing well above that to stay friendly.
+ */
+const NOMINATIM_MIN_INTERVAL_MS = 1100;
+/** Hard ceiling so a hung request can't hold the dropdown spinner forever. */
+const NOMINATIM_TIMEOUT_MS = 8000;
+/** Cache successful suggestion lookups for a short window so repeat
+ * queries (rider deletes a character then retypes it) don't re-hit
+ * Nominatim. We cap the cache to keep memory bounded. */
+const SUGGESTIONS_CACHE_TTL_MS = 60_000;
+const SUGGESTIONS_CACHE_MAX = 100;
+
+const suggestionsCache = new Map<
+  string,
+  { at: number; result: SuggestionsResult }
+>();
+let lastNominatimAt = 0;
+/** Single-flight: if the same query is already in flight, share the
+ * promise instead of issuing a parallel request. */
+const inflightSuggestions = new Map<string, Promise<SuggestionsResult>>();
+
+function rememberSuggestions(key: string, result: SuggestionsResult): void {
+  if (result.status !== "ok") return;
+  suggestionsCache.set(key, { at: Date.now(), result });
+  if (suggestionsCache.size > SUGGESTIONS_CACHE_MAX) {
+    // Evict the oldest entry by insertion order. Map iteration is
+    // insertion-ordered so the first key is the oldest.
+    const firstKey = suggestionsCache.keys().next().value;
+    if (firstKey !== undefined) suggestionsCache.delete(firstKey);
+  }
+}
+
+function recallSuggestions(key: string): SuggestionsResult | null {
+  const hit = suggestionsCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > SUGGESTIONS_CACHE_TTL_MS) {
+    suggestionsCache.delete(key);
+    return null;
+  }
+  return hit.result;
+}
+
+// Serialized throttle: chain every caller onto a single promise so that
+// concurrent invocations are guaranteed to be spaced by at least
+// `NOMINATIM_MIN_INTERVAL_MS`. A naive `lastAt + setTimeout` check would
+// let two parallel callers (e.g. start- and end-address fields both
+// looking up at the same time) pass the elapsed check together and
+// fire at the same instant.
+let throttleNominatimChain: Promise<void> = Promise.resolve();
+function throttleNominatim(): Promise<void> {
+  const next = throttleNominatimChain.then(async () => {
+    const elapsed = Date.now() - lastNominatimAt;
+    if (elapsed < NOMINATIM_MIN_INTERVAL_MS) {
+      await new Promise((r) =>
+        setTimeout(r, NOMINATIM_MIN_INTERVAL_MS - elapsed),
+      );
+    }
+    lastNominatimAt = Date.now();
+  });
+  // Swallow rejections in the chain itself so one bad caller can't
+  // permanently break throttling for everyone after it. The caller still
+  // sees the original rejection via its own `await`.
+  throttleNominatimChain = next.catch(() => undefined);
+  return next;
+}
+
+/**
  * Free-text address suggestions for the planner's start/end inputs. We hit
  * Nominatim's `/search` with a GB country bias first (matches our
  * UK-focussed user base) and fall back to a global query when nothing
  * British matches. Capped at 5 results to keep the dropdown tidy.
  *
- * Callers MUST pair this with a request-sequence guard — Nominatim is
- * fast on average but can spike, so an older request can land after a
- * newer one and overwrite the user's currently-typed query.
+ * Returns a tagged `SuggestionsResult`:
+ *  - `status: "ok"` carries the (possibly empty) suggestion array. An
+ *    empty array means Nominatim genuinely had no match for the query.
+ *  - `status: "error"` means the request failed (network, timeout,
+ *    rate-limit, 5xx). The UI should surface this to the rider with a
+ *    retry affordance instead of an empty dropdown.
+ *
+ * Behaviour:
+ *  - In-memory cache (60s, 100 entries) so repeated identical queries do
+ *    not re-hit Nominatim — both faster for the rider and friendlier to
+ *    the public service.
+ *  - Single-flight: identical concurrent queries share one promise.
+ *  - Throttled to 1.1s between outbound requests to honour Nominatim's
+ *    1 req/sec usage policy.
+ *  - Per-request 8s timeout via `AbortController` — never leaves the
+ *    dropdown spinning indefinitely on a flaky link.
+ *
+ * Callers MUST still pair this with a request-sequence guard so an
+ * older still-pending request can't overwrite a newer one's results.
  */
-export async function searchSuggestions(query: string): Promise<AddressSuggestion[]> {
+export async function searchSuggestions(
+  query: string,
+): Promise<SuggestionsResult> {
   const q = query.trim();
-  if (q.length < 2) return [];
+  if (q.length < 2) return { status: "ok", suggestions: [] };
 
-  const tryFetch = async (url: string): Promise<AddressSuggestion[]> => {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!res.ok) return [];
-    const data = (await res.json()) as Array<Record<string, unknown>>;
-    if (!Array.isArray(data)) return [];
-    const out: AddressSuggestion[] = [];
-    for (const row of data) {
-      const lat = parseFloat(String(row.lat));
-      const lng = parseFloat(String(row.lon));
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      const label = typeof row.display_name === "string" ? row.display_name : "";
-      if (!label) continue;
-      const id =
-        row.place_id != null
-          ? String(row.place_id)
-          : `${lat.toFixed(5)},${lng.toFixed(5)}`;
-      const shortLabel = label.split(",").slice(0, 3).join(",").trim();
-      out.push({ id, label, shortLabel, lat, lng });
+  const cached = recallSuggestions(q);
+  if (cached) return cached;
+
+  const existing = inflightSuggestions.get(q);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<SuggestionsResult> => {
+    const tryFetch = async (
+      url: string,
+    ): Promise<{ ok: true; rows: AddressSuggestion[] } | { ok: false; error: string }> => {
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        NOMINATIM_TIMEOUT_MS,
+      );
+      try {
+        const res = await fetch(url, {
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          return {
+            ok: false,
+            error: `Nominatim returned ${res.status}`,
+          };
+        }
+        const data = (await res.json()) as Array<Record<string, unknown>>;
+        if (!Array.isArray(data)) return { ok: true, rows: [] };
+        const rows: AddressSuggestion[] = [];
+        for (const row of data) {
+          const lat = parseFloat(String(row.lat));
+          const lng = parseFloat(String(row.lon));
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+          const label =
+            typeof row.display_name === "string" ? row.display_name : "";
+          if (!label) continue;
+          const id =
+            row.place_id != null
+              ? String(row.place_id)
+              : `${lat.toFixed(5)},${lng.toFixed(5)}`;
+          const shortLabel = label.split(",").slice(0, 3).join(",").trim();
+          rows.push({ id, label, shortLabel, lat, lng });
+        }
+        return { ok: true, rows };
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return { ok: false, error: "Nominatim request timed out" };
+        }
+        return {
+          ok: false,
+          error:
+            err instanceof Error ? err.message : "Nominatim request failed",
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    try {
+      await throttleNominatim();
+      const gb = await tryFetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb&addressdetails=0`,
+      );
+      if (!gb.ok) {
+        return { status: "error", error: gb.error };
+      }
+      if (gb.rows.length > 0) {
+        const result: SuggestionsResult = {
+          status: "ok",
+          suggestions: gb.rows,
+        };
+        rememberSuggestions(q, result);
+        return result;
+      }
+      await throttleNominatim();
+      const global = await tryFetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&addressdetails=0`,
+      );
+      if (!global.ok) {
+        return { status: "error", error: global.error };
+      }
+      const result: SuggestionsResult = {
+        status: "ok",
+        suggestions: global.rows,
+      };
+      rememberSuggestions(q, result);
+      return result;
+    } catch (err) {
+      return {
+        status: "error",
+        error:
+          err instanceof Error ? err.message : "Couldn't reach Nominatim",
+      };
     }
-    return out;
-  };
+  })();
 
+  inflightSuggestions.set(q, promise);
   try {
-    const gb = await tryFetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb&addressdetails=0`,
-    );
-    if (gb.length > 0) return gb;
-    return await tryFetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&addressdetails=0`,
-    );
-  } catch {
-    return [];
+    return await promise;
+  } finally {
+    inflightSuggestions.delete(q);
   }
 }
 

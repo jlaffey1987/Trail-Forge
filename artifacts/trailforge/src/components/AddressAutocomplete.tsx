@@ -73,6 +73,10 @@ const AddressAutocomplete = forwardRef<
   const [open, setOpen] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(0);
   const [loading, setLoading] = useState(false);
+  // When the address service is unreachable we hold the failure here so
+  // the dropdown can render a "couldn't reach search service" panel with
+  // a Retry button instead of looking like Nominatim returned 0 hits.
+  const [serviceError, setServiceError] = useState<string | null>(null);
   const seqRef = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The exact query string the dropdown was last populated for. We use
@@ -99,6 +103,29 @@ const AddressAutocomplete = forwardRef<
     }
   }, [confirmed, trimmed]);
 
+  // Issues the actual search request for `q`. Lifted out of
+  // `handleInputChange` so the "Retry" button in the error state can
+  // re-fire the same query without making the rider re-type anything.
+  const runSearch = useCallback((q: string, mySeq: number) => {
+    setOpen(true);
+    setLoading(true);
+    setServiceError(null);
+    void (async () => {
+      const result = await searchSuggestions(q);
+      if (mySeq !== seqRef.current) return; // stale
+      populatedForRef.current = q;
+      if (result.status === "ok") {
+        setSuggestions(result.suggestions);
+        setServiceError(null);
+      } else {
+        setSuggestions([]);
+        setServiceError(result.error);
+      }
+      setHighlightIdx(0);
+      setLoading(false);
+    })();
+  }, []);
+
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const next = e.target.value;
@@ -113,25 +140,26 @@ const AddressAutocomplete = forwardRef<
       const mySeq = ++seqRef.current;
       if (q.length < 2) {
         setSuggestions([]);
+        setServiceError(null);
         setOpen(false);
         setLoading(false);
         return;
       }
+      debounceRef.current = setTimeout(() => runSearch(q, mySeq), DEBOUNCE_MS);
+      // Open immediately so the spinner shows during the debounce window
+      // (cleared above if the rider keeps typing past the threshold).
       setOpen(true);
       setLoading(true);
-      debounceRef.current = setTimeout(() => {
-        void (async () => {
-          const results = await searchSuggestions(q);
-          if (mySeq !== seqRef.current) return; // stale
-          populatedForRef.current = q;
-          setSuggestions(results);
-          setHighlightIdx(0);
-          setLoading(false);
-        })();
-      }, DEBOUNCE_MS);
+      setServiceError(null);
     },
-    [onChange],
+    [onChange, runSearch],
   );
+
+  const handleRetry = useCallback(() => {
+    if (trimmed.length < 2) return;
+    const mySeq = ++seqRef.current;
+    runSearch(trimmed, mySeq);
+  }, [trimmed, runSearch]);
 
   const acceptSuggestion = useCallback(
     (s: AddressSuggestion) => {
@@ -235,41 +263,80 @@ const AddressAutocomplete = forwardRef<
           </svg>
         </div>
       )}
-      {open && suggestions.length > 0 && (
-        <ul
-          role="listbox"
-          data-testid={testId ? `${testId}-suggestions` : undefined}
-          className="absolute z-30 mt-1 left-0 right-0 max-h-60 overflow-auto rounded-lg border border-[hsl(34,18%,24%)] bg-[hsl(22,15%,9%)] shadow-xl"
+      {open && serviceError && !loading && (
+        <div
+          role="status"
+          data-testid={testId ? `${testId}-error` : undefined}
+          className="absolute z-30 mt-1 left-0 right-0 rounded-lg border border-amber-700/40 bg-[hsl(22,15%,9%)] shadow-xl px-3 py-2.5"
         >
-          {suggestions.map((s, idx) => {
-            const active = idx === highlightIdx;
-            return (
-              <li
-                key={s.id}
-                role="option"
-                aria-selected={active}
-                onMouseEnter={() => setHighlightIdx(idx)}
-                onMouseDown={(e) => {
-                  // Keep focus on the input; we'll close via state.
-                  e.preventDefault();
-                  acceptSuggestion(s);
-                }}
-                className={`px-3 py-2 cursor-pointer text-sm border-b border-[hsl(34,18%,18%)] last:border-b-0 ${
-                  active
-                    ? "bg-amber-600/20 text-amber-100"
-                    : "text-stone-300 hover:bg-stone-800/50"
-                }`}
-              >
-                <div className="font-medium leading-tight">{s.shortLabel}</div>
-                {s.label !== s.shortLabel && (
-                  <div className="text-[11px] text-stone-500 leading-tight truncate mt-0.5">
-                    {s.label.replace(s.shortLabel, "").replace(/^,\s*/, "")}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+          <div className="text-xs text-amber-200/90 leading-snug">
+            Couldn't reach the address search service.
+          </div>
+          <div className="text-[11px] text-stone-500 leading-snug mt-0.5">
+            Check your connection and try again.
+          </div>
+          <div className="mt-2 flex items-center justify-between">
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleRetry();
+              }}
+              className="text-xs px-2.5 py-1 rounded-md border border-amber-600/50 text-amber-200 hover:bg-amber-600/15 active:bg-amber-600/25"
+              data-testid={testId ? `${testId}-retry` : undefined}
+            >
+              Retry
+            </button>
+            <span className="text-[10px] text-stone-600">
+              Search by OpenStreetMap
+            </span>
+          </div>
+        </div>
+      )}
+      {open && !serviceError && suggestions.length > 0 && (
+        <div
+          className="absolute z-30 mt-1 left-0 right-0 rounded-lg border border-[hsl(34,18%,24%)] bg-[hsl(22,15%,9%)] shadow-xl overflow-hidden"
+        >
+          <ul
+            role="listbox"
+            data-testid={testId ? `${testId}-suggestions` : undefined}
+            className="max-h-60 overflow-auto"
+          >
+            {suggestions.map((s, idx) => {
+              const active = idx === highlightIdx;
+              return (
+                <li
+                  key={s.id}
+                  role="option"
+                  aria-selected={active}
+                  onMouseEnter={() => setHighlightIdx(idx)}
+                  onMouseDown={(e) => {
+                    // Keep focus on the input; we'll close via state.
+                    e.preventDefault();
+                    acceptSuggestion(s);
+                  }}
+                  className={`px-3 py-2 cursor-pointer text-sm border-b border-[hsl(34,18%,18%)] last:border-b-0 ${
+                    active
+                      ? "bg-amber-600/20 text-amber-100"
+                      : "text-stone-300 hover:bg-stone-800/50"
+                  }`}
+                >
+                  <div className="font-medium leading-tight">{s.shortLabel}</div>
+                  {s.label !== s.shortLabel && (
+                    <div className="text-[11px] text-stone-500 leading-tight truncate mt-0.5">
+                      {s.label.replace(s.shortLabel, "").replace(/^,\s*/, "")}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          {/* Nominatim's usage policy requires visible attribution wherever
+              we display its results. Keep it small but always present. */}
+          <div className="px-3 py-1.5 text-[10px] text-stone-600 border-t border-[hsl(34,18%,18%)] bg-[hsl(22,15%,7%)]">
+            Search by OpenStreetMap
+          </div>
+        </div>
       )}
     </div>
   );
