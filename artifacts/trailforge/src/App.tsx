@@ -53,7 +53,7 @@ const clerkAppearance = {
     logoLinkUrl: basePath || "/",
     logoImageUrl:
       typeof window !== "undefined"
-        ? `${window.location.origin}${basePath}/logo.svg`
+        ? `${window.location.origin}${basePath}/brand-cover.jpg`
         : undefined,
   },
   variables: {
@@ -74,6 +74,8 @@ const clerkAppearance = {
       "bg-[hsl(22,15%,11%)] border border-amber-500/20 rounded-2xl w-[400px] max-w-full overflow-hidden shadow-2xl",
     card: "!shadow-none !border-0 !bg-transparent !rounded-none",
     footer: "!shadow-none !border-0 !bg-transparent !rounded-none",
+    logoBox: "flex justify-center",
+    logoImage: "max-h-16 w-auto rounded-md",
   },
 };
 
@@ -242,29 +244,12 @@ function MainShell() {
       <header
         className="tf-header shrink-0 flex items-center justify-between px-4 py-3.5 border-b border-[hsl(30,12%,14%)]"
       >
-        <div className="flex items-center gap-2.5">
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center"
-            style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4 text-stone-900" fill="currentColor">
-              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" />
-            </svg>
-          </div>
-          <div>
-            <h1
-              className="text-sm font-black tracking-widest uppercase text-stone-100"
-              style={{ letterSpacing: "0.18em" }}
-            >
-              TrailForge
-            </h1>
-            <p
-              className="text-[9px] text-stone-500 uppercase tracking-widest"
-              style={{ letterSpacing: "0.15em" }}
-            >
-              Off-Road Navigator
-            </p>
-          </div>
+        <div className="flex items-center">
+          <img
+            src={`${basePath}/brand-cover.jpg`}
+            alt="TrailForge"
+            className="h-9 w-auto rounded-md"
+          />
         </div>
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1 bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,20%)] rounded-full px-2 py-1">
