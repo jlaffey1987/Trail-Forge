@@ -93,8 +93,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(payload.title, {
       body: payload.body,
-      icon: `${SCOPE_PATH}icon.svg`,
-      badge: `${SCOPE_PATH}icon.svg`,
+      icon: `${SCOPE_PATH}icon-192.png`,
+      badge: `${SCOPE_PATH}icon-192.png`,
       // Tag groups duplicate notifications (same trail share, etc.) so a
       // burst of activity doesn't blast the user with five identical pushes.
       tag: payload.tag,
