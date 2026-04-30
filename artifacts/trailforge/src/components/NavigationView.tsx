@@ -59,12 +59,33 @@ const ROAD_COLOR = "#3b82f6";
 const TRAIL_COLOR = "#f97316";
 const ROAD_DEEP = "#1d4ed8";
 
+/** Result returned by the removal callback the parent supplies. */
+export type RemoveTrailSectionResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 interface Props {
   route: AssembledRoute;
   onClose: () => void;
+  /**
+   * Drop the given trail from the planner selection and rebuild the
+   * assembled route in place. The implementation MUST recompute the
+   * route off `route.start` / `route.end` with the trail removed and,
+   * on success, push the new `AssembledRoute` back via the same channel
+   * NavigationView's `route` prop is fed from. Progress callbacks
+   * mirror the planner's initial-plan progress contract.
+   *
+   * Returning `{ ok: false }` signals re-routing failed end-to-end —
+   * the previous route stays on screen and the trail is NOT removed
+   * from the planner store.
+   */
+  onRemoveTrailSection?: (
+    trailId: string,
+    onProgress: (step: number, total: number, label: string) => void,
+  ) => Promise<RemoveTrailSectionResult>;
 }
 
-export default function NavigationView({ route, onClose }: Props) {
+export default function NavigationView({ route, onClose, onRemoveTrailSection }: Props) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const sectionLayersRef = useRef<Map<number, import("leaflet").Polyline | import("leaflet").Marker>>(new Map());
@@ -79,6 +100,21 @@ export default function NavigationView({ route, onClose }: Props) {
   const [riding, setRiding] = useState(false);
   const [userPos, setUserPos] = useState<(GeoPoint & { accuracyM: number; speedMs: number | null; headingDeg: number | null }) | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
+
+  // Trail-section removal state. `pendingRemoval` shows the inline
+  // "Drop this trail?" confirm prompt; `removing` shows the in-place
+  // re-routing progress. We snapshot whether the rider was using live
+  // GPS before re-routing so we can resume on the new route afterwards
+  // (per the task's "pause during re-route, resume against new route"
+  // requirement).
+  const [pendingRemoval, setPendingRemoval] = useState<{ trailId: string; trailName: string } | null>(null);
+  const [removing, setRemoving] = useState<{
+    trailId: string;
+    trailName: string;
+    progress: { pct: number; label: string };
+    wasRiding: boolean;
+  } | null>(null);
+  const [removalError, setRemovalError] = useState<string | null>(null);
 
   // Computed nav state from current user position
   const nearestInfo = userPos ? findNearestSection(route, userPos) : null;
@@ -345,6 +381,12 @@ export default function NavigationView({ route, onClose }: Props) {
           opacity: 1,
           dashArray: "12 6",
         }).addTo(map);
+        // Tapping the trail polyline opens the active-section overlay
+        // for it — same gesture the rider already uses on the Sections
+        // list, so removal is one tap away from the map view too.
+        const openOverlay = () => setActiveSection(sec.index);
+        main.on("click", openOverlay);
+        shadow.on("click", openOverlay);
         sectionLayersRef.current.set(sec.index * 10, shadow);
         sectionLayersRef.current.set(sec.index * 10 + 1, main);
         // Trail entry marker (numbered)
@@ -355,6 +397,7 @@ export default function NavigationView({ route, onClose }: Props) {
             iconSize: [22, 22], iconAnchor: [11, 11], className: "",
           }),
         }).addTo(map);
+        entryMarker.on("click", openOverlay);
         sectionLayersRef.current.set(sec.index * 10 + 2, entryMarker);
         latlngs.forEach((c) => allBounds.push(c));
       }
@@ -381,6 +424,54 @@ export default function NavigationView({ route, onClose }: Props) {
       }
     }
   }, [route, leafletLoaded, activeSection]);
+
+  // Kick off in-place removal of a trail section. Pauses live GPS while
+  // the route is recomputed and resumes it against the new route on
+  // success. On failure the previous route stays on screen and a
+  // dismissible error banner explains why so the rider can retry.
+  const handleConfirmRemove = async (trailId: string, trailName: string) => {
+    if (!onRemoveTrailSection) return;
+    if (removing) return;
+    setPendingRemoval(null);
+    setRemovalError(null);
+    const wasRiding = riding;
+    if (wasRiding) setRiding(false);
+    setRemoving({
+      trailId,
+      trailName,
+      progress: { pct: 0, label: "Re-routing your trip..." },
+      wasRiding,
+    });
+    try {
+      const result = await onRemoveTrailSection(trailId, (step, total, label) => {
+        const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+        setRemoving((prev) =>
+          prev && prev.trailId === trailId
+            ? { ...prev, progress: { pct, label } }
+            : prev,
+        );
+      });
+      setRemoving(null);
+      if (result.ok) {
+        // The new route arrives via the `route` prop on the next
+        // render; clear the overlay (the section index is gone) and
+        // resume riding if the rider had GPS on.
+        setActiveSection(null);
+        if (wasRiding) setRiding(true);
+      } else {
+        setRemovalError(result.error);
+        if (wasRiding) setRiding(true);
+      }
+    } catch (err) {
+      setRemoving(null);
+      setRemovalError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while re-routing. Please try again.",
+      );
+      if (wasRiding) setRiding(true);
+    }
+  };
 
   const handleDownloadFullGPX = () => {
     // Build a single GPX with all sections (road tracks + trail tracks).
@@ -662,24 +753,132 @@ export default function NavigationView({ route, onClose }: Props) {
             title = sec.waypoint.name;
             subtitle = `Stop · ${sec.waypoint.kind}`;
           }
+          // Removal action only applies to trail sections — road and
+          // waypoint sections are deliberately not removable from the
+          // navigation view (per the task scope).
+          const isTrailSec = sec.kind === "trail";
+          const trailId = isTrailSec ? sec.trail.id : null;
+          const trailName = isTrailSec ? sec.trail.name : "";
+          const canRemove = isTrailSec && !!onRemoveTrailSection && !removing;
+          const isPendingThis = isTrailSec && pendingRemoval?.trailId === trailId;
+          const isRemovingThis = isTrailSec && removing?.trailId === trailId;
           return (
             <div className="absolute top-2 left-2 right-2 z-[500]">
               <div
-                className="rounded-lg p-2 backdrop-blur shadow-lg flex items-center gap-2"
+                className="rounded-lg backdrop-blur shadow-lg overflow-hidden"
                 style={{ background: bg, color: "#fff" }}
               >
-                <div className="w-7 h-7 rounded-md bg-white/20 flex items-center justify-center text-[11px] font-black">
-                  {badge}
+                <div className="p-2 flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-md bg-white/20 flex items-center justify-center text-[11px] font-black">
+                    {badge}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold truncate">{title}</div>
+                    <div className="text-[10px] opacity-80 capitalize">{subtitle}</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (removing) return;
+                      setPendingRemoval(null);
+                      setActiveSection(null);
+                    }}
+                    disabled={!!removing}
+                    className="text-white/80 hover:text-white text-lg leading-none disabled:opacity-40"
+                    aria-label="Close section overlay"
+                  >×</button>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold truncate">{title}</div>
-                  <div className="text-[10px] opacity-80 capitalize">{subtitle}</div>
-                </div>
-                <button onClick={() => setActiveSection(null)} className="text-white/80 hover:text-white text-lg leading-none">×</button>
+
+                {/* Trail-only: Remove from trip + inline confirm + progress */}
+                {isTrailSec && canRemove && !isPendingThis && !isRemovingThis && (
+                  <div className="px-2 pb-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPendingRemoval({ trailId: trailId!, trailName })
+                      }
+                      data-testid="nav-remove-trail-button"
+                      className="w-full py-1.5 rounded-md bg-stone-900/45 hover:bg-stone-900/65 border border-white/30 text-[11px] font-bold uppercase tracking-wider text-white flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6"/>
+                        <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5 6"/>
+                        <path d="M10 11v6M14 11v6"/>
+                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                      </svg>
+                      Remove from trip
+                    </button>
+                  </div>
+                )}
+                {isTrailSec && isPendingThis && !isRemovingThis && (
+                  <div
+                    className="px-2 pb-2 flex items-center gap-2"
+                    data-testid="nav-remove-trail-confirm"
+                  >
+                    <span className="text-[11px] font-medium flex-1 truncate">
+                      Drop this trail and re-route?
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPendingRemoval(null)}
+                      data-testid="nav-remove-trail-cancel"
+                      className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/15 hover:bg-white/25 text-white border border-white/20"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmRemove(trailId!, trailName)}
+                      data-testid="nav-remove-trail-confirm-yes"
+                      className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-stone-900 hover:bg-black text-amber-300 border border-amber-400/60"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+                {isTrailSec && isRemovingThis && (
+                  <div
+                    className="px-2 pb-2"
+                    data-testid="nav-remove-trail-progress"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                      <span className="text-[11px] font-bold truncate">
+                        {removing!.progress.label}
+                      </span>
+                    </div>
+                    <div className="h-1 bg-black/30 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-white/85 transition-all duration-300"
+                        style={{ width: `${removing!.progress.pct}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           );
         })()}
+
+        {/* Removal error banner — sits over the map so it's visible
+            no matter which tab is active in the bottom panel. */}
+        {removalError && (
+          <div
+            className="absolute bottom-2 left-2 right-2 z-[500]"
+            data-testid="nav-remove-trail-error"
+          >
+            <div className="rounded-lg bg-red-900/90 border border-red-500/60 backdrop-blur shadow-lg px-3 py-2 flex items-start gap-2">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-300 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <p className="flex-1 text-[11px] text-red-100 leading-tight">{removalError}</p>
+              <button
+                onClick={() => setRemovalError(null)}
+                aria-label="Dismiss error"
+                className="text-red-300 hover:text-white text-base leading-none -mt-0.5"
+              >×</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tab switcher */}
@@ -705,7 +904,24 @@ export default function NavigationView({ route, onClose }: Props) {
       {/* Bottom panel */}
       <div className="flex-1 overflow-y-auto bg-[hsl(22,15%,8%)]">
         {bottomTab === "sections" ? (
-          <SectionsList route={route} activeSection={activeSection} onSelect={setActiveSection} />
+          <SectionsList
+            route={route}
+            activeSection={activeSection}
+            onSelect={setActiveSection}
+            canRemoveTrails={!!onRemoveTrailSection && !removing}
+            removingTrailId={removing?.trailId ?? null}
+            onRequestRemoveTrail={(trailId, trailName) => {
+              if (removing) return;
+              // Open the section in the overlay so the rider sees the
+              // confirm prompt in the same place whether they tapped
+              // the row's remove button or the polyline.
+              const trailSec = route.sections.find(
+                (s) => s.kind === "trail" && s.trail.id === trailId,
+              );
+              if (trailSec) setActiveSection(trailSec.index);
+              setPendingRemoval({ trailId, trailName });
+            }}
+          />
         ) : (
           <TurnByTurnList route={route} onSelectSection={setActiveSection} />
         )}
@@ -721,10 +937,16 @@ function SectionsList({
   route,
   activeSection,
   onSelect,
+  canRemoveTrails,
+  removingTrailId,
+  onRequestRemoveTrail,
 }: {
   route: AssembledRoute;
   activeSection: number | null;
   onSelect: (idx: number | null) => void;
+  canRemoveTrails: boolean;
+  removingTrailId: string | null;
+  onRequestRemoveTrail: (trailId: string, trailName: string) => void;
 }) {
   const trailSections = route.sections.filter((s) => s.kind === "trail");
   return (
@@ -794,27 +1016,55 @@ function SectionsList({
           );
         }
         const tNum = trailSections.findIndex((t) => t.index === sec.index) + 1;
+        const isRemoving = removingTrailId === sec.trail.id;
         return (
-          <button
+          <div
             key={sec.index}
-            onClick={() => onSelect(isActive ? null : sec.index)}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all ${
+            data-testid={`nav-section-trail-${sec.trail.id}`}
+            className={`flex items-center gap-2 pr-2 rounded-lg border transition-all ${
               isActive ? "border-orange-500/60 bg-orange-500/10" : "border-orange-500/20 bg-orange-900/10 hover:border-orange-500/40"
-            }`}
+            } ${isRemoving ? "opacity-60" : ""}`}
           >
-            <div className="w-7 h-7 rounded-md bg-orange-500 text-stone-900 flex items-center justify-center text-xs font-black shrink-0">
-              {tNum}
-            </div>
-            <div className="flex-1 min-w-0 text-left">
-              <div className="text-xs font-bold text-orange-300 truncate">{sec.trail.name}</div>
-              <div className="text-[10px] text-stone-400">
-                Trail · {formatKm(sec.distanceKm)} · Difficulty {sec.trail.difficulty} · {sec.trail.legal_status}
+            <button
+              onClick={() => onSelect(isActive ? null : sec.index)}
+              className="flex-1 flex items-center gap-3 px-3 py-2.5 text-left min-w-0"
+              disabled={isRemoving}
+            >
+              <div className="w-7 h-7 rounded-md bg-orange-500 text-stone-900 flex items-center justify-center text-xs font-black shrink-0">
+                {tNum}
               </div>
-            </div>
-            <svg viewBox="0 0 24 24" className={`w-4 h-4 transition-transform ${isActive ? "rotate-90" : ""} text-stone-500`} fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="9 18 15 12 9 6"/>
-            </svg>
-          </button>
+              <div className="flex-1 min-w-0 text-left">
+                <div className="text-xs font-bold text-orange-300 truncate">{sec.trail.name}</div>
+                <div className="text-[10px] text-stone-400">
+                  Trail · {formatKm(sec.distanceKm)} · Difficulty {sec.trail.difficulty} · {sec.trail.legal_status}
+                </div>
+              </div>
+              <svg viewBox="0 0 24 24" className={`w-4 h-4 transition-transform ${isActive ? "rotate-90" : ""} text-stone-500`} fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+            {canRemoveTrails && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRequestRemoveTrail(sec.trail.id, sec.trail.name);
+                }}
+                disabled={isRemoving}
+                aria-label={`Remove ${sec.trail.name} from trip`}
+                title="Remove from trip"
+                data-testid={`nav-section-trail-remove-${sec.trail.id}`}
+                className="shrink-0 w-7 h-7 rounded-md flex items-center justify-center border border-stone-700 bg-stone-900/60 text-stone-400 hover:border-red-500/60 hover:text-red-400 hover:bg-red-900/20 transition-all disabled:opacity-50"
+              >
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5 6"/>
+                  <path d="M10 11v6M14 11v6"/>
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                </svg>
+              </button>
+            )}
+          </div>
         );
       })}
 

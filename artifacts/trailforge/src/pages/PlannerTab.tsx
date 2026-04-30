@@ -21,6 +21,7 @@ import {
   setRouteEntries,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
+import type { RemoveTrailSectionResult } from "@/components/NavigationView";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import { distancePointToPolylineM } from "@/lib/poi";
 
@@ -260,6 +261,65 @@ export default function PlannerTab() {
   const removeFromRoute = (id: string) => {
     setRouteTrails((prev) => prev.filter((t) => t.id !== id));
   };
+
+  // Drop a trail section directly from the navigation view and rebuild
+  // the assembled route in place. We re-run `assembleMultiModalRoute`
+  // BEFORE mutating the planner store — that way a re-routing failure
+  // leaves the rider with their original route on screen and the trail
+  // still in the planner, matching the task's "restore on failure"
+  // contract.
+  const handleRemoveTrailSection = useCallback(
+    async (
+      trailId: string,
+      onProgress: (step: number, total: number, label: string) => void,
+    ): Promise<RemoveTrailSectionResult> => {
+      if (!assembledRoute) {
+        return { ok: false, error: "No active route to update." };
+      }
+      if (!routeTrails.some((t) => t.id === trailId)) {
+        // Trail isn't in the planner anymore (race with a sync). Nothing
+        // to do — surface a soft error so the overlay clears its state.
+        return { ok: false, error: "That trail is no longer in your route." };
+      }
+      // Build the new entry list with the trail filtered out, preserving
+      // the ordering and waypoint placement of every surviving stop.
+      const newEntries = routeEntries
+        .filter((e) => !(e.kind === "trail" && e.trail.id === trailId))
+        .map((e) =>
+          e.kind === "trail"
+            ? { kind: "trail" as const, trail: e.trail }
+            : { kind: "waypoint" as const, waypoint: e.waypoint },
+        );
+      try {
+        const newRoute = await assembleMultiModalRoute(
+          assembledRoute.start,
+          assembledRoute.end,
+          newEntries,
+          onProgress,
+        );
+        if (newRoute.sections.length === 0) {
+          // Either OSRM failed entirely or the only stop also failed —
+          // either way we can't show a usable route.
+          return {
+            ok: false,
+            error:
+              "Couldn't rebuild the route. Check your connection and try again.",
+          };
+        }
+        // Commit the removal: setRouteEntries keeps surviving waypoints
+        // in their existing positions relative to the remaining trails.
+        setRouteEntries(newEntries);
+        setAssembledRoute(newRoute);
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while re-routing. Please try again.",
+        };
+      }
+    },
+    [assembledRoute, routeTrails, routeEntries],
+  );
 
   // Drop a custom waypoint from the route. Same store as trails so the
   // builder reorders correctly.
@@ -942,6 +1002,7 @@ export default function PlannerTab() {
         <NavigationView
           route={assembledRoute}
           onClose={() => setShowNav(false)}
+          onRemoveTrailSection={handleRemoveTrailSection}
         />
       )}
 
