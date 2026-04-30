@@ -100,7 +100,10 @@ function MapRoutePanelInner({
   // Interleaved render is the canonical mode now — both PlannerTab and
   // MapTab pass `entries`. The legacy split-section render below is kept
   // as a fallback so callers (or tests) that haven't migrated still work.
-  const interleaved = entries != null && entries.length > 0;
+  // Gate on presence of the prop, not its length: an empty array from a
+  // migrated caller (e.g. mid-clear flicker) should still hit the
+  // interleaved branch so we don't bounce between layouts.
+  const interleaved = entries != null;
 
   const moveUp = (idx: number) => {
     if (idx === 0) return;
