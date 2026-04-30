@@ -1,6 +1,9 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { type Trail } from "@/lib/supabase";
 import { type RouteEntry, type RouteWaypoint } from "@/lib/routing";
+import { PLANNER_MAX_TRAILS } from "@workspace/planner-shared";
+
+export { PLANNER_MAX_TRAILS } from "@workspace/planner-shared";
 
 const STORAGE_KEY = "trailforge_planner_route";
 
@@ -389,6 +392,18 @@ export function setRouteTrails(next: Trail[]) {
     return;
   }
 
+  // Defense in depth — UI call sites guard against growing the route past
+  // the cap, but if a buggy caller hands us more than the server will
+  // accept we truncate (preserving the head) rather than letting the
+  // PUT silently 400 and lose the tail.
+  if (next.length > PLANNER_MAX_TRAILS) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[plannerRouteStore] truncating ${next.length} → ${PLANNER_MAX_TRAILS} trails (server cap)`,
+    );
+    next = next.slice(0, PLANNER_MAX_TRAILS);
+  }
+
   // Preserve waypoint placement relative to surviving trails. Strategy:
   //   1. Walk the OLD entryOrder. For each trail entry, if it survives in
   //      `next`, emit it; collect any subsequent waypoints "owned" by this
@@ -444,14 +459,39 @@ export function setRouteTrails(next: Trail[]) {
   scheduleCloudSync();
 }
 
-export function addRouteTrail(trail: Trail) {
-  if (routeTrails.some((t) => t.id === trail.id)) return;
+/**
+ * Append a trail to the route. Returns:
+ *   - "added"      — trail was inserted.
+ *   - "duplicate"  — trail was already in the route (no-op).
+ *   - "atLimit"    — refused: route already has PLANNER_MAX_TRAILS distinct
+ *                    trails, so adding another would exceed the cap that
+ *                    PUT /api/me/planner-route enforces server-side.
+ *
+ * Callers that present an "Add to route" affordance should surface the
+ * `"atLimit"` case as a user-facing warning so the rider isn't left
+ * wondering why their tap didn't take.
+ */
+export type AddRouteTrailResult = "added" | "duplicate" | "atLimit";
+
+export function addRouteTrail(trail: Trail): AddRouteTrailResult {
+  if (routeTrails.some((t) => t.id === trail.id)) return "duplicate";
+  if (routeTrails.length >= PLANNER_MAX_TRAILS) return "atLimit";
   routeTrails = [...routeTrails, trail];
   entryOrder = [...entryOrder, { kind: "trail", id: trail.id }];
   noteWrite();
   persist();
   emit();
   scheduleCloudSync();
+  return "added";
+}
+
+/**
+ * True when the route is full and a subsequent `addRouteTrail` would
+ * be rejected with `"atLimit"`. Useful for disabling "Add to route"
+ * UI affordances ahead of time.
+ */
+export function isRouteAtTrailLimit(): boolean {
+  return routeTrails.length >= PLANNER_MAX_TRAILS;
 }
 
 export function removeRouteTrail(trailId: string) {

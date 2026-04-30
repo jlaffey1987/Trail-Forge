@@ -8,6 +8,8 @@ import {
   removeRouteTrail,
   isInRoute,
   subscribeRouteTrails,
+  getRouteTrails,
+  PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
 import {
   fetchTrailActivityCounts,
@@ -64,7 +66,12 @@ export default function TrailDetailSheet({
   const { isSignedIn, userId } = useCurrentUser();
   const [, setLocation] = useLocation();
   const [inPlannerRoute, setInPlannerRoute] = useState(() => isInRoute(trail.id));
+  // Tracks the live planner-route trail count so we can disable the
+  // "Add to planner" CTA (and surface a friendly explanation) once the
+  // user has hit the PLANNER_MAX_TRAILS server-side cap.
+  const [routeTrailCount, setRouteTrailCount] = useState(() => getRouteTrails().length);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error" | "needsAuth">("idle");
+  const [addError, setAddError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const [counts, setCounts] = useState<TrailActivityCounts>({ notes: 0, photos: 0, pending: 0 });
   const [perms, setPerms] = useState<TrailPermissions>({ isOwner: false, isModerator: false, canModerate: false });
@@ -83,10 +90,14 @@ export default function TrailDetailSheet({
   useEffect(() => {
     setInPlannerRoute(isInRoute(trail.id));
     setSaveStatus("idle");
+    setAddError(null);
   }, [trail.id]);
 
   useEffect(() => {
-    return subscribeRouteTrails(() => setInPlannerRoute(isInRoute(trail.id)));
+    return subscribeRouteTrails((trails) => {
+      setInPlannerRoute(isInRoute(trail.id));
+      setRouteTrailCount(trails.length);
+    });
   }, [trail.id]);
 
   // Lazy-load gpx_data for trails that arrived via the slim Map-tab fetch.
@@ -159,10 +170,21 @@ export default function TrailDetailSheet({
     }
     if (inPlannerRoute) {
       removeRouteTrail(trail.id);
+      setAddError(null);
       return;
     }
-    addRouteTrail(trail);
-    onAddedToPlanner?.(trail);
+    const result = addRouteTrail(trail);
+    if (result === "atLimit") {
+      // Mirrors the server-side PUT /api/me/planner-route cap. Surface
+      // a clear inline message rather than letting the tap silently
+      // no-op or letting the cloud sync 400 later.
+      setAddError(
+        `Route is full — you can plan up to ${PLANNER_MAX_TRAILS} trails per route. Remove one before adding "${trail.name}".`,
+      );
+      return;
+    }
+    setAddError(null);
+    if (result === "added") onAddedToPlanner?.(trail);
   };
 
   const handleSave = async () => {
@@ -377,6 +399,10 @@ export default function TrailDetailSheet({
               diffLabel={diffLabel}
               inPlannerRoute={inPlannerRoute}
               saveStatus={saveStatus}
+              addError={addError}
+              routeAtLimit={
+                !inPlannerRoute && routeTrailCount >= PLANNER_MAX_TRAILS
+              }
               handleAddToPlanner={handleAddToPlanner}
               handleSave={handleSave}
               setLocation={setLocation}
@@ -413,6 +439,8 @@ interface OverviewProps {
   diffLabel: string;
   inPlannerRoute: boolean;
   saveStatus: "idle" | "saving" | "saved" | "error" | "needsAuth";
+  addError: string | null;
+  routeAtLimit: boolean;
   handleAddToPlanner: () => void;
   handleSave: () => void;
   setLocation: (path: string) => void;
@@ -430,6 +458,8 @@ function OverviewPanel({
   diffLabel,
   inPlannerRoute,
   saveStatus,
+  addError,
+  routeAtLimit,
   handleAddToPlanner,
   handleSave,
   setLocation,
@@ -600,6 +630,24 @@ function OverviewPanel({
         </div>
       ) : null}
 
+      {/* Inline cap warning — surfaced when the user tries to add this
+          trail but the planner already holds PLANNER_MAX_TRAILS trails.
+          Sits above the action buttons so the rider sees it without
+          having to scroll. */}
+      {addError ? (
+        <div
+          className="mx-4 mt-1 mb-2 bg-red-900/30 border border-red-600/50 rounded-lg px-3 py-2 flex items-start gap-2"
+          data-testid="trail-detail-add-error"
+        >
+          <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <p className="text-[11px] text-red-200 leading-tight">{addError}</p>
+        </div>
+      ) : null}
+
       <div className="px-4 pb-5 pt-1 grid grid-cols-2 gap-2">
         {isApproximated ? (
           <div
@@ -609,6 +657,20 @@ function OverviewPanel({
           >
             Reference only — cannot navigate
           </div>
+        ) : routeAtLimit ? (
+          // Route is full — render a disabled stand-in so the rider can
+          // see WHY the affordance is unavailable instead of clicking a
+          // button that silently no-ops. Mirrors the visual weight of
+          // the active button so the layout doesn't shift.
+          <button
+            type="button"
+            disabled
+            className="py-3 px-2 rounded-xl text-[11px] font-bold uppercase tracking-wider text-stone-500 border border-dashed border-stone-700 bg-stone-900/40 flex items-center justify-center text-center leading-tight cursor-not-allowed"
+            data-testid="trail-detail-add-planner-full"
+            title={`Route is full — limit is ${PLANNER_MAX_TRAILS} trails. Remove one before adding more.`}
+          >
+            Route full ({PLANNER_MAX_TRAILS} max)
+          </button>
         ) : (
         <button
           onClick={handleAddToPlanner}

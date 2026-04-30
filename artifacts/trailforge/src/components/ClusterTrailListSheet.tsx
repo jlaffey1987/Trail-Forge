@@ -6,6 +6,7 @@ import {
   removeRouteTrail,
   getRouteTrails,
   subscribeRouteTrails,
+  PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
@@ -164,6 +165,12 @@ export default function ClusterTrailListSheet({
     });
   }, [controlled]);
   const routeIds = controlled ? selectedIds : storeIds;
+  // Inline cap warning shown above the rows so a user who taps "+ Route"
+  // when the planner is already full sees an explanation rather than a
+  // silent no-op (the server PUT enforces PLANNER_MAX_TRAILS too).
+  // Only used in the uncontrolled path; in the controlled path the
+  // parent owns route state and surfaces its own warning.
+  const [capError, setCapError] = useState<string | null>(null);
 
   const handleToggleRoute = (trail: Trail) => {
     // Approximated trails are reference-only — never used in navigation.
@@ -177,10 +184,22 @@ export default function ClusterTrailListSheet({
     if (trail.verification_status === "ai-approximated") return;
     if (routeIds.has(trail.id)) {
       removeRouteTrail(trail.id);
-    } else {
-      addRouteTrail(trail);
+      setCapError(null);
+      return;
     }
+    const result = addRouteTrail(trail);
+    if (result === "atLimit") {
+      setCapError(
+        `Route is full — limit is ${PLANNER_MAX_TRAILS} trails. Remove one before adding "${trail.name}".`,
+      );
+      return;
+    }
+    setCapError(null);
   };
+  // The "+ Route" button is disabled when the planner is full AND the
+  // trail isn't already in the route — disable up-front so the rider
+  // can't tap a button that would silently no-op.
+  const routeFull = !controlled && storeIds.size >= PLANNER_MAX_TRAILS;
 
   return (
     <div
@@ -248,6 +267,21 @@ export default function ClusterTrailListSheet({
             })}
           </div>
         </div>
+
+        {capError ? (
+          <div
+            className="mx-3 mt-2 mb-1 bg-red-900/30 border border-red-600/50 rounded-lg px-3 py-2 flex items-start gap-2"
+            data-testid="cluster-trail-list-cap-error"
+            role="alert"
+          >
+            <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <p className="text-[11px] text-red-200 leading-tight">{capError}</p>
+          </div>
+        ) : null}
 
         <div className="overflow-y-auto flex-1" data-testid="cluster-trail-list-rows">
           {sorted.length === 0 ? (
@@ -318,26 +352,32 @@ export default function ClusterTrailListSheet({
                         e.stopPropagation();
                         handleToggleRoute(trail);
                       }}
-                      disabled={isApproximated}
+                      disabled={isApproximated || (routeFull && !inRoute)}
                       aria-pressed={inRoute}
                       title={
                         isApproximated
                           ? "AI-approximated trails can't be added to a route"
-                          : inRoute
-                            ? "Remove from planner route"
-                            : "Add to planner route"
+                          : routeFull && !inRoute
+                            ? `Route is full — limit is ${PLANNER_MAX_TRAILS} trails. Remove one before adding more.`
+                            : inRoute
+                              ? "Remove from planner route"
+                              : "Add to planner route"
                       }
                       data-testid={`cluster-trail-route-toggle-${trail.id}`}
                       className={
                         "shrink-0 self-center mr-2 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors " +
-                        (isApproximated
+                        (isApproximated || (routeFull && !inRoute)
                           ? "border-stone-800 text-stone-600 cursor-not-allowed"
                           : inRoute
                             ? "border-amber-500 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
                             : "border-stone-700 text-stone-300 hover:border-amber-500 hover:text-amber-300")
                       }
                     >
-                      {inRoute ? "✓ In route" : "+ Route"}
+                      {inRoute
+                        ? "✓ In route"
+                        : routeFull
+                          ? "Route full"
+                          : "+ Route"}
                     </button>
                   </li>
                 );

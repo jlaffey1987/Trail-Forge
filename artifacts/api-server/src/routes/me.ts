@@ -10,13 +10,19 @@ import {
   MigrateSessionSavedTrailsResponse,
 } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import {
+  PLANNER_MAX_TRAILS,
+  PLANNER_MAX_WAYPOINTS,
+  PLANNER_MAX_ENTRIES,
+} from "@workspace/planner-shared";
 
 /**
  * Body schema for `PUT /me/planner-route`. The trail order matters — we
  * persist the array exactly as sent so the user's chosen route reads back
- * identically from another device. `trailIds` is capped at 50 because the
- * planner UI can't usefully chain more than that and the cap keeps the
- * jsonb payload bounded.
+ * identically from another device. `trailIds` is capped at PLANNER_MAX_TRAILS
+ * (defined in `@workspace/planner-shared` so the client mirrors the cap)
+ * because the planner UI can't usefully chain more than that and the cap
+ * keeps the jsonb payload bounded.
  *
  * `waypoints` (custom stops — fuel/campsite/custom pins picked off the
  * POI overlay) and `entryOrder` (the interleaved order of trails and
@@ -37,9 +43,9 @@ const PlannerEntryRef = z.object({
   id: z.string().min(1),
 });
 const PutPlannerRouteBody = z.object({
-  trailIds: z.array(z.string().min(1)).max(50),
-  waypoints: z.array(PlannerWaypoint).max(50).optional(),
-  entryOrder: z.array(PlannerEntryRef).max(100).optional(),
+  trailIds: z.array(z.string().min(1)).max(PLANNER_MAX_TRAILS),
+  waypoints: z.array(PlannerWaypoint).max(PLANNER_MAX_WAYPOINTS).optional(),
+  entryOrder: z.array(PlannerEntryRef).max(PLANNER_MAX_ENTRIES).optional(),
 });
 
 /**

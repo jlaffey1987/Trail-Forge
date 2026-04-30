@@ -19,6 +19,7 @@ import {
   addRouteWaypoint,
   removeRouteWaypoint,
   setRouteEntries,
+  PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import { distancePointToPolylineM } from "@/lib/poi";
@@ -229,7 +230,19 @@ export default function PlannerTab() {
       return;
     }
     setRouteTrails((prev) => {
-      if (prev.some((t) => t.id === trail.id)) return prev.filter((t) => t.id !== trail.id);
+      if (prev.some((t) => t.id === trail.id)) {
+        return prev.filter((t) => t.id !== trail.id);
+      }
+      // Hard cap mirrors the server-side PUT /api/me/planner-route limit.
+      // Without this guard the user could keep tapping "Add to Route" past
+      // the cap; the local state would grow but the cloud sync would 400
+      // and silently drop the tail trails on the next device.
+      if (prev.length >= PLANNER_MAX_TRAILS) {
+        setPlanError(
+          `Route is full — you can plan up to ${PLANNER_MAX_TRAILS} trails per route. Remove one before adding "${trail.name}".`,
+        );
+        return prev;
+      }
       return [...prev, trail];
     });
   }, []);

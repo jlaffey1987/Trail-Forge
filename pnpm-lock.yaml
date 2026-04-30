@@ -188,6 +188,9 @@ importers:
       '@workspace/integrations-anthropic-ai':
         specifier: workspace:*
         version: link:../../lib/integrations-anthropic-ai
+      '@workspace/planner-shared':
+        specifier: workspace:*
+        version: link:../../lib/planner-shared
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7
@@ -592,6 +595,9 @@ importers:
       '@workspace/api-client-react':
         specifier: workspace:*
         version: link:../../lib/api-client-react
+      '@workspace/planner-shared':
+        specifier: workspace:*
+        version: link:../../lib/planner-shared
       class-variance-authority:
         specifier: 'catalog:'
         version: 0.7.1
@@ -731,6 +737,8 @@ importers:
       p-retry:
         specifier: ^7.1.1
         version: 7.1.1
+
+  lib/planner-shared: {}
 
   scripts:
     dependencies:
