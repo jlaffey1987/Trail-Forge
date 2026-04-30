@@ -3,7 +3,7 @@ import { getAuth } from "@clerk/express";
 import { z } from "zod";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
-import { isSystemAdmin } from "../lib/admin";
+import { explainAdminAccess, getAdminAccessState } from "../lib/admin";
 import {
   computeRouteStats,
   fetchOsmTagSummary,
@@ -59,8 +59,14 @@ function requireAuth(handler: AuthedHandler) {
 
 function requireAdmin(handler: AuthedHandler) {
   return requireAuth(async (req, res, userId) => {
-    if (!(await isSystemAdmin(userId))) {
-      res.status(403).json({ error: "Admin access required" });
+    const state = await getAdminAccessState(userId);
+    if (state.kind !== "admin") {
+      const explainer = explainAdminAccess(state);
+      res.status(explainer.status).json({
+        error: explainer.message,
+        code: explainer.code,
+        state: state.kind,
+      });
       return;
     }
     await handler(req, res, userId);
@@ -108,11 +114,25 @@ function gpxJsonToPoints(gpxData: unknown): GpxPoint[] {
 router.get("/admin/whoami", async (req, res) => {
   const auth = getAuth(req);
   if (!auth.userId) {
-    res.json({ isAdmin: false, signedIn: false });
+    res.json({
+      isAdmin: false,
+      signedIn: false,
+      state: "signed-out",
+      code: "ADMIN_FORBIDDEN",
+      message: "Sign in to check admin access.",
+    });
     return;
   }
-  const isAdmin = await isSystemAdmin(auth.userId);
-  res.json({ isAdmin, signedIn: true, userId: auth.userId });
+  const state = await getAdminAccessState(auth.userId);
+  const explainer = explainAdminAccess(state);
+  res.json({
+    isAdmin: state.kind === "admin",
+    signedIn: true,
+    userId: auth.userId,
+    state: state.kind,
+    code: explainer.code,
+    message: explainer.message,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -446,9 +466,23 @@ router.post(
       return;
     }
     const isOwner = trail.owner_user_id === userId;
-    const isAdmin = await isSystemAdmin(userId);
+    const adminState = await getAdminAccessState(userId);
+    const isAdmin = adminState.kind === "admin";
     if (!isOwner && !isAdmin) {
-      res.status(403).json({ error: "Only the trail owner or an admin can re-grade this trail" });
+      const explainer = explainAdminAccess(adminState);
+      // Owner-or-admin endpoint: prefer the admin-explainer when admin
+      // bootstrap is what's missing (so the message reads "apply migration"
+      // / "set SYSTEM_ADMIN_USER_IDS" instead of a generic 403). For a
+      // plain "not-admin" caller fall back to the owner-or-admin wording.
+      const message =
+        adminState.kind === "not-admin"
+          ? "Only the trail owner or an admin can re-grade this trail"
+          : explainer.message;
+      res.status(explainer.status).json({
+        error: message,
+        code: explainer.code,
+        state: adminState.kind,
+      });
       return;
     }
     const result = await gradeOneTrail(trail);

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 
@@ -46,10 +46,26 @@ interface AdminEntry {
 
 type StatusFilter = "pending" | "approved" | "rejected" | "merged";
 
+type AdminAccessState =
+  | "admin"
+  | "not-admin"
+  | "no-admins"
+  | "migration-missing"
+  | "signed-out";
+
+interface WhoamiResponse {
+  isAdmin: boolean;
+  signedIn: boolean;
+  state: AdminAccessState;
+  userId?: string;
+  message?: string;
+  code?: string;
+}
+
 export default function AdminPage() {
   const { isSignedIn } = useCurrentUser();
   const [, setLocation] = useLocation();
-  const [adminCheck, setAdminCheck] = useState<"loading" | "yes" | "no">("loading");
+  const [whoami, setWhoami] = useState<WhoamiResponse | "loading" | "error">("loading");
   const [callerUserId, setCallerUserId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("pending");
   const [items, setItems] = useState<Discovery[]>([]);
@@ -68,17 +84,26 @@ export default function AdminPage() {
   useEffect(() => {
     let cancelled = false;
     fetch("/api/admin/whoami", { credentials: "include" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { isAdmin: boolean; userId?: string } | null) => {
+      .then((r) => (r.ok ? (r.json() as Promise<WhoamiResponse>) : null))
+      .then((j) => {
         if (cancelled) return;
-        setAdminCheck(j?.isAdmin ? "yes" : "no");
+        setWhoami(j ?? "error");
         setCallerUserId(j?.userId ?? null);
       })
-      .catch(() => !cancelled && setAdminCheck("no"));
+      .catch(() => !cancelled && setWhoami("error"));
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const adminCheck: "loading" | "yes" | "no" =
+    whoami === "loading"
+      ? "loading"
+      : whoami === "error"
+      ? "no"
+      : whoami.isAdmin
+      ? "yes"
+      : "no";
 
   const loadDiscoveries = useCallback(async () => {
     const r = await fetch(
@@ -129,14 +154,58 @@ export default function AdminPage() {
   }
 
   if (adminCheck === "no") {
-    return (
-      <div className="min-h-screen bg-stone-950 text-stone-300 flex flex-col items-center justify-center p-6">
-        <h1 className="text-xl font-bold text-amber-400 mb-2">Admin only</h1>
-        <p className="text-sm text-stone-400 mb-4 text-center max-w-md">
+    const state: AdminAccessState =
+      whoami !== "loading" && whoami !== "error" ? whoami.state : "not-admin";
+    const titles: Record<AdminAccessState, string> = {
+      "admin": "Admin",
+      "not-admin": "Admin only",
+      "no-admins": "Admin features waiting to be turned on",
+      "migration-missing": "Admin features waiting to be turned on",
+      "signed-out": "Sign in required",
+    };
+    const explanations: Record<AdminAccessState, ReactNode> = {
+      "admin": null,
+      "not-admin": (
+        <>
           You don't have admin access. If you should, ask the team to add your user id to{" "}
           <code className="text-amber-300">system_admins</code> (or set{" "}
           <code className="text-amber-300">SYSTEM_ADMIN_USER_IDS</code> on the API server).
-        </p>
+        </>
+      ),
+      "no-admins": (
+        <>
+          The <code className="text-amber-300">system_admins</code> table is empty and{" "}
+          <code className="text-amber-300">SYSTEM_ADMIN_USER_IDS</code> isn't set, so nobody is an
+          admin yet. Set <code className="text-amber-300">SYSTEM_ADMIN_USER_IDS</code> on the API
+          server, or insert a row into <code className="text-amber-300">system_admins</code>, to
+          unlock admin features.
+        </>
+      ),
+      "migration-missing": (
+        <>
+          The <code className="text-amber-300">system_admins</code> table doesn't exist yet — apply
+          database migration <code className="text-amber-300">0007</code> on the Supabase project,
+          or set <code className="text-amber-300">SYSTEM_ADMIN_USER_IDS</code> on the API server,
+          to unlock admin features.
+        </>
+      ),
+      "signed-out": <>You need to sign in before we can check admin access.</>,
+    };
+    const isBootstrapState = state === "no-admins" || state === "migration-missing";
+    return (
+      <div
+        className="min-h-screen bg-stone-950 text-stone-300 flex flex-col items-center justify-center p-6"
+        data-testid="admin-gate"
+        data-admin-state={state}
+      >
+        <h1 className="text-xl font-bold text-amber-400 mb-2">{titles[state]}</h1>
+        <p className="text-sm text-stone-400 mb-4 text-center max-w-md">{explanations[state]}</p>
+        {isBootstrapState ? (
+          <p className="text-[11px] text-stone-500 mb-4 text-center max-w-md">
+            Once one admin is configured, that admin can grant access to others from inside the
+            app.
+          </p>
+        ) : null}
         <button
           onClick={() => setLocation(isSignedIn ? "/" : "/sign-in")}
           className="px-4 py-2 rounded-lg border border-amber-500/40 text-amber-400 text-sm"

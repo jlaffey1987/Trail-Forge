@@ -443,6 +443,7 @@ function OverviewPanel({
   // mirrors the backend permission check at POST /api/trails/:id/grade-ai.
   const canRegrade = isOwner || isSystemAdmin;
   const [regradeStatus, setRegradeStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [regradeError, setRegradeError] = useState<string | null>(null);
   const [regradeResult, setRegradeResult] = useState<{ grade: number; rationale: string } | null>(
     trail.ai_grade != null
       ? { grade: trail.ai_grade, rationale: trail.ai_grade_rationale ?? "" }
@@ -451,12 +452,22 @@ function OverviewPanel({
 
   const handleRegrade = async () => {
     setRegradeStatus("loading");
+    setRegradeError(null);
     try {
       const res = await fetch(`/api/trails/${trail.id}/grade-ai`, {
         method: "POST",
         credentials: "include",
       });
       if (!res.ok) {
+        // Surface the structured admin / migration explainer when the
+        // backend returns one, so a fresh deploy or missing-table state
+        // shows a useful hint instead of "Retry grading" with no detail.
+        const json = (await res.json().catch(() => null)) as
+          | { error?: string; message?: string; code?: string; state?: string }
+          | null;
+        const friendly =
+          json?.error ?? json?.message ?? "Could not grade this trail right now.";
+        setRegradeError(friendly);
         setRegradeStatus("error");
         return;
       }
@@ -464,6 +475,7 @@ function OverviewPanel({
       setRegradeResult(json);
       setRegradeStatus("done");
     } catch {
+      setRegradeError("Network error — please try again.");
       setRegradeStatus("error");
     }
   };
@@ -576,6 +588,14 @@ function OverviewPanel({
                   : "No AI grade yet."}
               </div>
             )}
+            {regradeStatus === "error" && regradeError ? (
+              <div
+                className="mt-1 text-[11px] text-amber-300 leading-snug"
+                data-testid="trail-detail-regrade-error"
+              >
+                {regradeError}
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
