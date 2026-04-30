@@ -12,6 +12,7 @@ import trailContentRouter from "../../src/routes/trailContent";
 import groupsRouter from "../../src/routes/groups";
 import pushRouter from "../../src/routes/push";
 import aiRouter from "../../src/routes/ai";
+import meRouter from "../../src/routes/me";
 
 export function makeApp(authUserId: string | null = null): Express {
   const app = express();
@@ -33,5 +34,6 @@ export function makeApp(authUserId: string | null = null): Express {
   app.use("/api", groupsRouter);
   app.use("/api", pushRouter);
   app.use("/api", aiRouter);
+  app.use("/api", meRouter);
   return app;
 }
