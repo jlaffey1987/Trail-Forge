@@ -980,39 +980,54 @@ ${trkpts}
         )}
       </div>
 
-      {/* Draw mode stats bar */}
+      {/* Draw mode stats bar — pinned to the bottom of the map area, with
+          safe-area padding so the Save button stays clear of the device's
+          home indicator / gesture bar on real phones. The Save button is
+          rendered prominently so it's always easy to find. */}
       {mapMode === "draw" && (
-        <div className="absolute bottom-0 left-0 right-0 z-[1000] bg-gradient-to-t from-black/80 to-transparent pt-6">
-          <div className="flex items-center justify-between px-4 pb-2">
-            <div className="flex items-center gap-4">
-              <div>
-                <div className="text-xs text-stone-500 uppercase tracking-wider">Distance</div>
-                <div className="text-base font-bold text-amber-400">{totalKm > 0 ? `${totalKm.toFixed(1)} km` : "0.0 km"}</div>
+        <div
+          className="absolute bottom-0 left-0 right-0 z-[1000] bg-gradient-to-t from-black/85 via-black/70 to-transparent pt-6"
+          style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.5rem)" }}
+        >
+          <div className="flex items-center justify-between gap-2 px-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="min-w-0">
+                <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Distance</div>
+                <div className="text-sm font-bold text-amber-400 leading-tight">{totalKm > 0 ? `${totalKm.toFixed(1)} km` : "0.0 km"}</div>
               </div>
-              <div className="w-px h-8 bg-stone-700"></div>
-              <div>
-                <div className="text-xs text-stone-500 uppercase tracking-wider">Waypoints</div>
-                <div className="text-base font-bold text-amber-400">{waypoints.length}</div>
+              <div className="w-px h-7 bg-stone-700 shrink-0"></div>
+              <div className="min-w-0">
+                <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Points</div>
+                <div className="text-sm font-bold text-amber-400 leading-tight">{waypoints.length}</div>
               </div>
               {totalKm > 0 && (
                 <>
-                  <div className="w-px h-8 bg-stone-700"></div>
-                  <div>
-                    <div className="text-xs text-stone-500 uppercase tracking-wider">Est. Time</div>
-                    <div className="text-base font-bold text-amber-400">{Math.round((totalKm / 15) * 60)}m</div>
+                  <div className="w-px h-7 bg-stone-700 shrink-0"></div>
+                  <div className="min-w-0">
+                    <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Time</div>
+                    <div className="text-sm font-bold text-amber-400 leading-tight">{Math.round((totalKm / 15) * 60)}m</div>
                   </div>
                 </>
               )}
             </div>
-            {waypoints.length >= 2 && (
+            {waypoints.length >= 2 ? (
               <button
                 onClick={() => setShowDrawSave(true)}
-                className="px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900"
+                className="shrink-0 flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-bold uppercase tracking-wider text-stone-900 shadow-lg shadow-amber-900/40 ring-2 ring-amber-300/40"
                 style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
                 data-testid="map-save-drawn-trail"
               >
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17 21 17 13 7 13 7 21"/>
+                  <polyline points="7 3 7 8 15 8"/>
+                </svg>
                 Save Trail
               </button>
+            ) : (
+              <span className="shrink-0 text-[10px] text-stone-500 uppercase tracking-wider px-2 text-right leading-tight">
+                Tap map to add<br />at least 2 points
+              </span>
             )}
           </div>
         </div>

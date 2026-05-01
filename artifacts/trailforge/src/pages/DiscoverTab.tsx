@@ -76,6 +76,10 @@ export default function DiscoverTab() {
   // server response.
   const [joiningGroupId, setJoiningGroupId] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  // Keep the "Groups to Join" section compact so it doesn't push the trail
+  // feed off-screen. We show the first 2 by default and let the user expand
+  // the rest with a single tap.
+  const [showAllGroups, setShowAllGroups] = useState(false);
 
   const refreshDiscoverableGroups = useCallback(async () => {
     if (!isSignedIn) {
@@ -230,13 +234,14 @@ export default function DiscoverTab() {
       </div>
 
       {/* Discoverable groups — show signed-in users any group they could ask
-          to join. Sits above the trail feed so it's the first thing they see
-          on Discover. Hidden when there's nothing to join. */}
+          to join. Sits above the trail feed but stays compact (max 2 rows by
+          default) so it never blocks the trail cards on small phones.
+          Hidden when there's nothing to join. */}
       {isSignedIn && discoverableGroups.length > 0 && (
-        <div className="px-4 mb-4" data-testid="discoverable-groups-section">
-          <div className="flex items-baseline justify-between mb-2">
+        <div className="px-4 mb-3" data-testid="discoverable-groups-section">
+          <div className="flex items-baseline justify-between mb-1.5">
             <h2
-              className="text-xs font-bold uppercase tracking-widest text-amber-400"
+              className="text-[11px] font-bold uppercase tracking-widest text-amber-400"
               style={{ letterSpacing: "0.12em" }}
             >
               Groups to Join
@@ -253,80 +258,80 @@ export default function DiscoverTab() {
               {joinError}
             </p>
           )}
-          <div className="space-y-2">
-            {discoverableGroups.map((g) => {
+          <div className="space-y-1.5">
+            {(showAllGroups
+              ? discoverableGroups
+              : discoverableGroups.slice(0, 2)
+            ).map((g) => {
               const cover = groupCoverPhotoUrl(g.cover_photo_key);
-              const ownerLabel = g.owner.display_name ?? "Unknown owner";
               const isPending = g.my_status === "pending";
               const isBusy = joiningGroupId === g.id;
               return (
                 <div
                   key={g.id}
-                  className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden"
+                  className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg flex items-center gap-2.5 p-2"
                   data-testid={`discoverable-group-${g.id}`}
                 >
-                  <div className="flex items-stretch gap-3 p-3">
-                    {cover ? (
-                      <img
-                        src={cover}
-                        alt=""
-                        className="w-16 h-16 rounded-lg object-cover shrink-0"
-                      />
-                    ) : (
-                      <div className="w-16 h-16 rounded-lg bg-gradient-to-br from-amber-900/40 to-stone-900 flex items-center justify-center shrink-0">
-                        <span className="text-amber-400 text-lg font-bold">
-                          {g.name.slice(0, 1).toUpperCase()}
-                        </span>
-                      </div>
-                    )}
-                    <div className="flex-1 min-w-0 flex flex-col">
-                      <h3 className="text-sm font-bold text-stone-100 truncate">
-                        {g.name}
-                      </h3>
-                      <p className="text-[11px] text-stone-500 truncate">
-                        by {ownerLabel} ·{" "}
-                        {g.member_count} member
-                        {g.member_count === 1 ? "" : "s"}
-                      </p>
-                      {g.description && (
-                        <p className="text-[11px] text-stone-400 mt-1 line-clamp-2">
-                          {g.description}
-                        </p>
-                      )}
-                      <div className="mt-auto pt-2">
-                        <button
-                          type="button"
-                          disabled={isBusy || isPending}
-                          onClick={() => void handleRequestJoin(g)}
-                          className={
-                            "w-full py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors disabled:cursor-not-allowed " +
-                            (isPending
-                              ? "bg-stone-800 text-stone-400 border border-stone-700"
-                              : "text-stone-900 disabled:opacity-50")
-                          }
-                          style={
-                            isPending
-                              ? undefined
-                              : {
-                                  background:
-                                    "linear-gradient(135deg, #d4870c, #f0a832)",
-                                }
-                          }
-                          data-testid={`discoverable-group-join-${g.id}`}
-                        >
-                          {isPending
-                            ? "Request pending"
-                            : isBusy
-                              ? "Sending…"
-                              : "Request to join"}
-                        </button>
-                      </div>
+                  {cover ? (
+                    <img
+                      src={cover}
+                      alt=""
+                      className="w-9 h-9 rounded-md object-cover shrink-0"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-md bg-gradient-to-br from-amber-900/40 to-stone-900 flex items-center justify-center shrink-0">
+                      <span className="text-amber-400 text-xs font-bold">
+                        {g.name.slice(0, 1).toUpperCase()}
+                      </span>
                     </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-[13px] font-bold text-stone-100 truncate leading-tight">
+                      {g.name}
+                    </h3>
+                    <p className="text-[10px] text-stone-500 truncate leading-tight">
+                      {g.member_count} member
+                      {g.member_count === 1 ? "" : "s"}
+                    </p>
                   </div>
+                  <button
+                    type="button"
+                    disabled={isBusy || isPending}
+                    onClick={() => void handleRequestJoin(g)}
+                    className={
+                      "shrink-0 px-2.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors disabled:cursor-not-allowed " +
+                      (isPending
+                        ? "bg-stone-800 text-stone-400 border border-stone-700"
+                        : "text-stone-900 disabled:opacity-50")
+                    }
+                    style={
+                      isPending
+                        ? undefined
+                        : {
+                            background:
+                              "linear-gradient(135deg, #d4870c, #f0a832)",
+                          }
+                    }
+                    data-testid={`discoverable-group-join-${g.id}`}
+                  >
+                    {isPending ? "Pending" : isBusy ? "…" : "Join"}
+                  </button>
                 </div>
               );
             })}
           </div>
+          {discoverableGroups.length > 2 && (
+            <button
+              type="button"
+              onClick={() => setShowAllGroups((v) => !v)}
+              className="mt-1.5 w-full py-1.5 rounded-md text-[11px] font-semibold text-amber-400 hover:text-amber-300 border border-[hsl(30,12%,20%)] bg-[hsl(22,15%,9%)]"
+              data-testid="discoverable-groups-toggle"
+            >
+              {showAllGroups
+                ? "Show less"
+                : `Show ${discoverableGroups.length - 2} more`}
+            </button>
+          )}
         </div>
       )}
 
