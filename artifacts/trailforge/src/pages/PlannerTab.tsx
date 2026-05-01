@@ -8,6 +8,7 @@ import PlannerMap from "@/components/PlannerMap";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
 import {
   geocode,
+  reverseGeocode,
   assembleMultiModalRoute,
   type GeoPoint,
   type AssembledRoute,
@@ -88,6 +89,11 @@ export default function PlannerTab() {
   // Cache geocoded points so we don't re-geocode if unchanged
   const [geocodedStart, setGeocodedStart] = useState<{ q: string; pt: GeoPoint } | null>(null);
   const [geocodedEnd, setGeocodedEnd] = useState<{ q: string; pt: GeoPoint } | null>(null);
+  // "Use my current location" UX state — surfaces a spinner on the
+  // chip while we ask for GPS + reverse-geocode, plus an inline error
+  // notice if the browser refuses or fails.
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState<string | null>(null);
 
   const toggleDifficulty = (level: number) => {
     setDifficulty((prev) =>
@@ -111,6 +117,50 @@ export default function PlannerTab() {
   // Ref for the start address input so we can focus it after the Map tab
   // hands off via "Build Route".
   const startInputRef = useRef<HTMLInputElement | null>(null);
+
+  const useCurrentLocationAsStart = useCallback(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setLocateError("Your device doesn't support location services.");
+      return;
+    }
+    setLocateError(null);
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        const place = await reverseGeocode(latitude, longitude);
+        const pt: GeoPoint = place ?? {
+          lat: latitude,
+          lng: longitude,
+          label: `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
+        };
+        const label =
+          pt.label ?? `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+        setStartLocation(label);
+        setGeocodedStart({ q: label.trim(), pt });
+        // Bump the start sequence so any in-flight blur-fired geocode is
+        // discarded and can't overwrite this confirmed pick.
+        startSeqRef.current++;
+        setPlanError(null);
+        setLocating(false);
+      },
+      (err) => {
+        setLocating(false);
+        if (err.code === err.PERMISSION_DENIED) {
+          setLocateError(
+            "Location permission denied. Enable it in your browser settings to use this.",
+          );
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          setLocateError("Couldn't determine your location. Try again outside.");
+        } else if (err.code === err.TIMEOUT) {
+          setLocateError("Location request timed out. Please try again.");
+        } else {
+          setLocateError("Couldn't get your current location.");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+    );
+  }, []);
 
   // Mount-effect handoff from the Map tab's "Build Route" button. App.tsx
   // sets `?build=1` before switching to this tab; if a route is loaded,
@@ -565,6 +615,9 @@ export default function PlannerTab() {
               onChange={(v) => {
                 setStartLocation(v);
                 setPlanError(null);
+                // The user is now typing a fresh start address — drop any
+                // stale "couldn't get location" notice.
+                if (locateError) setLocateError(null);
               }}
               onSelect={(s, pt) => {
                 setGeocodedStart({ q: s.label.trim(), pt });
@@ -573,8 +626,9 @@ export default function PlannerTab() {
                 // geocode can't overwrite this confirmed pick.
                 startSeqRef.current++;
                 setPlanError(null);
+                if (locateError) setLocateError(null);
               }}
-              placeholder="Start address (e.g. 9 High Street, Stranraer)"
+              placeholder="Start address (UK or Ireland — e.g. Stranraer, Galway)"
               dotColor="#22c55e"
               highlight={highlightInputs}
               confirmed={
@@ -582,6 +636,41 @@ export default function PlannerTab() {
               }
               data-testid="planner-start-address"
             />
+            {/* "Use my current location" — fast path to set Start without
+                typing. Falls back to coordinates if reverse geocode fails. */}
+            <button
+              type="button"
+              onClick={useCurrentLocationAsStart}
+              disabled={locating}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-amber-300 bg-[hsl(22,15%,10%)] border border-amber-500/30 hover:border-amber-500/60 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              data-testid="planner-use-current-location"
+            >
+              {locating ? (
+                <>
+                  <span className="w-3 h-3 border border-amber-400/50 border-t-amber-400 rounded-full animate-spin" />
+                  Locating…
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="3" />
+                    <line x1="12" y1="2" x2="12" y2="5" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                    <line x1="2" y1="12" x2="5" y2="12" />
+                    <line x1="19" y1="12" x2="22" y2="12" />
+                  </svg>
+                  Use my current location as start
+                </>
+              )}
+            </button>
+            {locateError && (
+              <p
+                className="text-[11px] text-red-300 px-1"
+                data-testid="planner-locate-error"
+              >
+                {locateError}
+              </p>
+            )}
             <AddressAutocomplete
               value={endLocation}
               onChange={(v) => {
@@ -594,7 +683,7 @@ export default function PlannerTab() {
                 endSeqRef.current++;
                 setPlanError(null);
               }}
-              placeholder="Destination (e.g. ABR Festival, Ravenstone Manor)"
+              placeholder="Destination (UK or Ireland — e.g. Snowdonia, Killarney)"
               dotColor="#f0a832"
               highlight={highlightInputs}
               confirmed={!!geocodedEnd && geocodedEnd.q === endLocation.trim()}

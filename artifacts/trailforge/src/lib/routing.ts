@@ -285,17 +285,20 @@ export async function searchSuggestions(
     };
 
     try {
+      // Bias to the British Isles (UK + Ireland) so users planning routes
+      // in either country see local results first. We only fall back to a
+      // global search when there are no UK/IE matches at all.
       await throttleNominatim();
-      const gb = await tryFetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb&addressdetails=0`,
+      const local = await tryFetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb,ie&addressdetails=0`,
       );
-      if (!gb.ok) {
-        return { status: "error", error: gb.error };
+      if (!local.ok) {
+        return { status: "error", error: local.error };
       }
-      if (gb.rows.length > 0) {
+      if (local.rows.length > 0) {
         const result: SuggestionsResult = {
           status: "ok",
-          suggestions: gb.rows,
+          suggestions: local.rows,
         };
         rememberSuggestions(q, result);
         return result;
@@ -345,17 +348,55 @@ export async function geocode(query: string): Promise<GeoPoint | null> {
     } as GeoPoint;
   };
   try {
-    // Bias to GB first
-    const gb = await tryFetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=gb`
+    // Bias to the British Isles (UK + Ireland) first; fall back to a
+    // worldwide search if nothing matches there.
+    const local = await tryFetch(
+      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=gb,ie`
     );
-    if (gb) return gb;
-    // Fall back to global
+    if (local) return local;
     return await tryFetch(
       `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`
     );
   } catch {
     return null;
+  }
+}
+
+/**
+ * Reverse geocode a lat/lng to a human-readable address via Nominatim.
+ * Used by the planner's "Use my current location" button so the start
+ * input shows a real place name instead of bare coordinates.
+ */
+export async function reverseGeocode(
+  lat: number,
+  lng: number,
+): Promise<GeoPoint | null> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  // Bail out after a short timeout so the planner's "Locating…" chip can
+  // never hang indefinitely on a flaky network — we always resolve to at
+  // worst the bare-coordinate label.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat.toFixed(
+        6,
+      )}&lon=${lng.toFixed(6)}&zoom=16&addressdetails=0`,
+      { headers: { Accept: "application/json" }, signal: ctrl.signal },
+    );
+    if (!res.ok) {
+      return { lat, lng, label: `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
+    }
+    const data = await res.json();
+    const label =
+      typeof data?.display_name === "string" && data.display_name.length > 0
+        ? (data.display_name as string)
+        : `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    return { lat, lng, label };
+  } catch {
+    return { lat, lng, label: `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
