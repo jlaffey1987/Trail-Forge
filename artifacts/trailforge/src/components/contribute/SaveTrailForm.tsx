@@ -141,6 +141,18 @@ export default function SaveTrailForm({
     );
   };
 
+  // Whenever a new error appears, scroll it into view so the rider
+  // actually sees what went wrong even if the form is scrolled to the
+  // bottom near the Save button. Must stay above the `if (!open)` early
+  // return below — otherwise React sees a different hook count between
+  // renders and crashes the form with "Rendered more hooks than during
+  // the previous render."
+  useEffect(() => {
+    if (error && errorRef.current) {
+      errorRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [error]);
+
   if (!open) return null;
 
   // Wrap every step in a single try/catch. On iOS standalone PWAs an
@@ -225,15 +237,6 @@ export default function SaveTrailForm({
       setError(message);
     }
   };
-
-  // Whenever a new error appears, scroll it into view so the rider
-  // actually sees what went wrong even if the form is scrolled to the
-  // bottom near the Save button.
-  useEffect(() => {
-    if (error && errorRef.current) {
-      errorRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [error]);
 
   return (
     <div
