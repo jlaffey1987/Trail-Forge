@@ -775,7 +775,7 @@ ${trkpts}
   }, [savedTrailToast]);
 
   return (
-    <div className="flex flex-col h-full relative">
+    <div className="flex flex-col h-full w-full relative">
 
       {/* Top controls bar */}
       <div className="absolute top-0 left-0 right-0 z-[1000] flex items-center justify-between px-3 py-2 pointer-events-none">
@@ -1012,8 +1012,8 @@ ${trkpts}
       {/* Map */}
       <div
         ref={mapContainerRef}
-        className="flex-1"
-        style={{ cursor: mapMode === "draw" ? "crosshair" : "grab" }}
+        className="flex-1 w-full"
+        style={{ cursor: mapMode === "draw" ? "crosshair" : "grab", minHeight: 0 }}
       >
         {!leafletLoaded && (
           <LoadingBackdrop
