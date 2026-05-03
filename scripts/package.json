@@ -6,6 +6,7 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "import:act": "tsx ./src/importACT/index.ts",
+    "check:trailforge-assets": "tsx ./src/checkTrailforgeAssetBudget.ts",
     "test": "tsx --test ./src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
