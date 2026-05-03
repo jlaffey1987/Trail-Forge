@@ -446,8 +446,12 @@ export default function PlannerTab() {
       const alreadyInRoute = new Set(routeTrails.map((t) => t.id));
       // Sort by approximate distance from the source trail's centre so
       // the closest alternates float to the top of the picker.
+      // Reference-only "ai-approximated" trails are explicitly hidden
+      // from navigation routing (see PlannerTab.tsx initial-plan flow);
+      // mirror that guard here so they can never be swapped IN either.
       const scored = trails
         .filter((t) => !alreadyInRoute.has(t.id))
+        .filter((t) => t.verification_status !== "ai-approximated")
         .map((t) => {
           const lat =
             t.bbox_min_lat != null && t.bbox_max_lat != null
@@ -491,6 +495,16 @@ export default function PlannerTab() {
         return {
           ok: false,
           error: "That trail is already in your route — pick a different one.",
+        };
+      }
+      // Defense-in-depth: same hard block the initial-plan flow uses
+      // for ai-approximated trails (PlannerTab.tsx:287). The picker
+      // already filters these out, but a stale candidate or a future
+      // bug must never let a reference-only trail enter navigation.
+      if (newTrail.verification_status === "ai-approximated") {
+        return {
+          ok: false,
+          error: "That trail is reference-only and can't be navigated.",
         };
       }
       // Build the new entry list by substituting the trail in place,
