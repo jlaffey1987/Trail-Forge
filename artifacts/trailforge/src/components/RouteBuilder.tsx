@@ -77,6 +77,21 @@ interface Props {
    * the right toast without owning the API call itself.
    */
   onSaveRoute?: (name: string) => Promise<"saved" | "limit" | "error">;
+  /**
+   * The saved-route row currently loaded into the planner, if any. When
+   * set, the builder offers an "Update <name>" affordance in addition
+   * to the regular Save flow so the rider can persist edits back to
+   * the same row instead of duplicating it.
+   */
+  activeLoadedRoute?: { id: string; name: string } | null;
+  /**
+   * Persist the current route over the active loaded saved-route row.
+   * Invoked only when the rider taps "Update <name>" — the parent is
+   * responsible for the API call and surfacing any toast. We only need
+   * to know success vs not-found vs generic error so we can clear the
+   * binding when the row no longer exists.
+   */
+  onUpdateRoute?: () => Promise<"saved" | "not-found" | "error">;
 }
 
 export default function RouteBuilder({
@@ -89,6 +104,8 @@ export default function RouteBuilder({
   entries,
   onReorderEntries,
   onSaveRoute,
+  activeLoadedRoute,
+  onUpdateRoute,
 }: Props) {
   const [downloading, setDownloading] = useState(false);
   const [gpxReady, setGpxReady] = useState(false);
@@ -100,6 +117,10 @@ export default function RouteBuilder({
   const [savingRoute, setSavingRoute] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState<string | null>(null);
+  // "Update <name>" runs without a dialog — it just persists the
+  // current route over the loaded row — so we only need a busy flag
+  // to disable both Update and Save during the in-flight request.
+  const [updatingRoute, setUpdatingRoute] = useState(false);
   // The Map tab no longer ships `gpx_data` with bbox responses, so trails
   // added to the planner from the map arrive without it. We hydrate the
   // missing GPX here on demand so the combined GPX export and the per-trail
@@ -246,6 +267,23 @@ export default function RouteBuilder({
       );
     } else {
       setSaveError("Couldn't save the route. Check your connection and try again.");
+    }
+  };
+
+  const handleUpdateRoute = async () => {
+    if (!onUpdateRoute || !activeLoadedRoute) return;
+    setUpdatingRoute(true);
+    const result = await onUpdateRoute();
+    setUpdatingRoute(false);
+    if (result === "saved") {
+      setSaveToast(`Updated "${activeLoadedRoute.name}"`);
+    } else if (result === "not-found") {
+      // Row was deleted from another device — drop the binding so the
+      // rider doesn't keep tapping Update on a ghost row, and tell them
+      // why the operation didn't take.
+      setSaveToast("That saved route no longer exists — use Save as new.");
+    } else {
+      setSaveToast("Couldn't update — check your connection and try again.");
     }
   };
 
@@ -703,7 +741,54 @@ export default function RouteBuilder({
           {/* Save route — only shown when the parent wired a handler
               (i.e. the rider is signed in). Disabled until at least one
               trail is in the route. */}
-          {onSaveRoute && (
+          {onSaveRoute && activeLoadedRoute && onUpdateRoute && (
+            <>
+              {/* Primary update — overwrite the loaded row. */}
+              <button
+                type="button"
+                onClick={() => void handleUpdateRoute()}
+                disabled={selectedTrails.length === 0 || updatingRoute || savingRoute}
+                data-testid="route-builder-update-route"
+                className="w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background:
+                    selectedTrails.length === 0 || updatingRoute || savingRoute
+                      ? "hsl(22,15%,16%)"
+                      : "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)",
+                  color:
+                    selectedTrails.length === 0 || updatingRoute || savingRoute
+                      ? "#6b7280"
+                      : "#1a0e05",
+                }}
+              >
+                {updatingRoute ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-stone-900/40 border-t-stone-900 rounded-full animate-spin"></span>
+                    Updating…
+                  </>
+                ) : (
+                  <>
+                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.4">
+                      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                      <polyline points="17 21 17 13 7 13 7 21"/>
+                    </svg>
+                    Update "{activeLoadedRoute.name.length > 22 ? `${activeLoadedRoute.name.slice(0, 22)}…` : activeLoadedRoute.name}"
+                  </>
+                )}
+              </button>
+              {/* Secondary — open the regular dialog to create a new row. */}
+              <button
+                type="button"
+                onClick={openSaveDialog}
+                disabled={selectedTrails.length === 0 || updatingRoute || savingRoute}
+                data-testid="route-builder-save-as-new"
+                className="w-full py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest border border-amber-500/30 text-amber-300/90 bg-transparent hover:bg-amber-500/10 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Save as new…
+              </button>
+            </>
+          )}
+          {onSaveRoute && !(activeLoadedRoute && onUpdateRoute) && (
             <button
               type="button"
               onClick={openSaveDialog}

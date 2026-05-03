@@ -14,7 +14,10 @@ import {
   renameSavedRoute,
   type SavedRouteSummary,
 } from "@/lib/savedRoutes";
-import { setRouteEntries } from "@/lib/plannerRouteStore";
+import {
+  setRouteEntries,
+  setActiveLoadedRoute,
+} from "@/lib/plannerRouteStore";
 import type { RouteEntry } from "@/lib/routing";
 import {
   fetchTrailActivityCounts,
@@ -132,6 +135,10 @@ export default function MyTrailsTab() {
         }
       }
       setRouteEntries(entries);
+      // Bind this row as the "active loaded route" so the Route Builder
+      // can offer "Update <name>" on subsequent saves rather than
+      // creating a duplicate every time.
+      setActiveLoadedRoute(route.id, route.name);
       setToast(`Loaded "${route.name}" into the planner`);
       // Jump straight to the Map so the rider sees the route drawn —
       // they can open the Planner from there if they want to edit.

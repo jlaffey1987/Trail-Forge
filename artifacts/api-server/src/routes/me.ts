@@ -1071,6 +1071,98 @@ router.post("/me/saved-routes", async (req: Request, res: Response) => {
   }
 });
 
+// PUT replaces the whole route payload (trails + waypoints + order +
+// distance), keeping the id and re-using the name. Used by the
+// "Update <name>" button when the rider edits a loaded saved route.
+// Body shape matches POST so the client can reuse its build logic.
+router.put("/me/saved-routes/:id", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const id = req.params.id;
+  if (typeof id !== "string" || id.length === 0 || id.length > 100) {
+    res.status(400).json({ error: "Invalid route id" });
+    return;
+  }
+  const parsed = PostSavedRouteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid saved-route payload" });
+    return;
+  }
+  if (parsed.data.trailIds.length === 0) {
+    res.status(400).json({ error: "Cannot save an empty route" });
+    return;
+  }
+
+  // Same de-dupe as POST so an update can't smuggle duplicates past
+  // the contract that a fresh save honours.
+  const seenTrails = new Set<string>();
+  const trailIds: string[] = [];
+  for (const tId of parsed.data.trailIds) {
+    if (seenTrails.has(tId)) continue;
+    seenTrails.add(tId);
+    trailIds.push(tId);
+  }
+  const wpSeen = new Set<string>();
+  const waypoints = (parsed.data.waypoints ?? []).filter((w) => {
+    if (wpSeen.has(w.id)) return false;
+    wpSeen.add(w.id);
+    return true;
+  });
+  const trailIdSet = new Set(trailIds);
+  const wpIdSet = new Set(waypoints.map((w) => w.id));
+  const orderSeen = new Set<string>();
+  const entryOrder = (parsed.data.entryOrder ?? []).filter((r) => {
+    const key = `${r.kind}:${r.id}`;
+    if (orderSeen.has(key)) return false;
+    orderSeen.add(key);
+    if (r.kind === "trail") return trailIdSet.has(r.id);
+    return wpIdSet.has(r.id);
+  });
+
+  try {
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("saved_routes")
+      .update({
+        name: parsed.data.name.trim(),
+        trail_ids: trailIds,
+        waypoints,
+        entry_order: entryOrder,
+        distance_km: parsed.data.distanceKm ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .eq("user_id", auth.userId)
+      .select("id, name, created_at")
+      .single();
+
+    if (error) {
+      if ((error as { code?: string }).code === "PGRST116") {
+        res.status(404).json({ error: "Route not found" });
+        return;
+      }
+      if (isMissingTableError(error)) {
+        res.status(503).json({
+          error:
+            "Saved routes aren't available yet on this database. Apply migration 0018.",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "saved-routes update failed");
+      res.status(500).json({ error: "Failed to update route" });
+      return;
+    }
+
+    res.json({ id: data.id, name: data.name, createdAt: data.created_at });
+  } catch (err) {
+    req.log.error({ err }, "saved-routes PUT failed");
+    res.status(500).json({ error: "Failed to update route" });
+  }
+});
+
 router.patch("/me/saved-routes/:id", async (req: Request, res: Response) => {
   const auth = getAuth(req);
   if (!auth.userId) {

@@ -103,6 +103,67 @@ let pendingRestore: StoredRoute | null =
 const trailListeners = new Set<(trails: Trail[]) => void>();
 const entryListeners = new Set<(entries: RouteEntry[]) => void>();
 
+// ---------------------------------------------------------------------------
+// Active loaded saved-route tracking
+//
+// When the rider taps "Load on Map" on a saved route, we remember which row
+// they loaded. The Route Builder uses this to offer "Update <name>" instead
+// of always creating a new saved route on every Save tap. Cleared on
+// sign-out / user switch and when the rider clears the route entirely.
+// Edits to the route (add / remove / reorder) deliberately DO NOT clear it
+// — the whole point is the rider edits and then taps Update.
+// ---------------------------------------------------------------------------
+
+interface ActiveLoadedRoute {
+  id: string;
+  name: string;
+}
+
+let activeLoadedRoute: ActiveLoadedRoute | null = null;
+const activeLoadedRouteListeners = new Set<
+  (route: ActiveLoadedRoute | null) => void
+>();
+
+function emitActiveLoadedRoute() {
+  for (const l of activeLoadedRouteListeners) {
+    try {
+      l(activeLoadedRoute);
+    } catch {
+      /**/
+    }
+  }
+}
+
+export function setActiveLoadedRoute(id: string, name: string): void {
+  activeLoadedRoute = { id, name };
+  emitActiveLoadedRoute();
+}
+
+export function clearActiveLoadedRoute(): void {
+  if (activeLoadedRoute === null) return;
+  activeLoadedRoute = null;
+  emitActiveLoadedRoute();
+}
+
+export function getActiveLoadedRoute(): ActiveLoadedRoute | null {
+  return activeLoadedRoute;
+}
+
+export function subscribeActiveLoadedRoute(
+  listener: (route: ActiveLoadedRoute | null) => void,
+): () => void {
+  activeLoadedRouteListeners.add(listener);
+  return () => {
+    activeLoadedRouteListeners.delete(listener);
+  };
+}
+
+export function useActiveLoadedRoute(): ActiveLoadedRoute | null {
+  const [value, setValue] = useState<ActiveLoadedRoute | null>(activeLoadedRoute);
+  useEffect(() => subscribeActiveLoadedRoute(setValue), []);
+  return value;
+}
+
 let currentUserId: string | null = null;
 let hasAuthSettled = false;
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -264,6 +325,9 @@ export function setPlannerRouteUserId(userId: string | null): void {
     localOwnerId = null;
     pendingRestore = null;
     clearStorage();
+    // The active loaded-route binding belongs to the previous identity —
+    // a different rider on the same device must not see it.
+    clearActiveLoadedRoute();
     emit();
   } else if (pendingRestore !== null) {
     routeTrails = pendingRestore.trails;
@@ -385,6 +449,9 @@ export function setRouteTrails(next: Trail[]) {
     routeTrails = [];
     routeWaypoints = [];
     entryOrder = [];
+    // Clearing the route also unbinds any "Update <name>" affordance —
+    // the rider has explicitly walked away from the loaded saved route.
+    clearActiveLoadedRoute();
     noteWrite();
     persist();
     emit();

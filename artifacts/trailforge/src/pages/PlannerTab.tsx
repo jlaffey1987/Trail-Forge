@@ -22,7 +22,11 @@ import {
   setRouteEntries,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
-import { createSavedRoute } from "@/lib/savedRoutes";
+import { createSavedRoute, updateSavedRoute } from "@/lib/savedRoutes";
+import {
+  useActiveLoadedRoute,
+  setActiveLoadedRoute,
+} from "@/lib/plannerRouteStore";
 import type { RemoveTrailSectionResult } from "@/components/NavigationView";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import { distancePointToPolylineM } from "@/lib/poi";
@@ -74,6 +78,7 @@ export default function PlannerTab() {
     [routeEntries],
   );
   const [showRouteBuilder, setShowRouteBuilder] = useState(false);
+  const activeLoadedRoute = useActiveLoadedRoute();
 
   // Currently-open trail detail sheet (opened by tapping a search-result
   // card's name). Tracked separately from the result list so prev/next
@@ -1110,9 +1115,47 @@ export default function PlannerTab() {
                     entryOrder,
                     distanceKm: distanceKm > 0 ? distanceKm : null,
                   });
-                  if (created.status === "ok") return "saved";
+                  if (created.status === "ok") {
+                    // The freshly-saved row becomes the new "active loaded
+                    // route" so subsequent edits update it instead of
+                    // creating yet another duplicate.
+                    setActiveLoadedRoute(created.route.id, created.route.name);
+                    return "saved";
+                  }
                   if (created.status === "limit") return "limit";
                   return "error";
+                }
+              : undefined
+          }
+          activeLoadedRoute={activeLoadedRoute}
+          onUpdateRoute={
+            isSignedIn && activeLoadedRoute
+              ? async () => {
+                  const trailIds = routeTrails.map((t) => t.id);
+                  const entryOrder = routeEntries.map((e) =>
+                    e.kind === "trail"
+                      ? { kind: "trail" as const, id: e.trail.id }
+                      : { kind: "waypoint" as const, id: e.waypoint.id },
+                  );
+                  const distanceKm = routeTrails.reduce(
+                    (sum, t) => sum + (t.distance_km ?? 0),
+                    0,
+                  );
+                  const result = await updateSavedRoute(activeLoadedRoute.id, {
+                    // Preserve the existing name on Update — the rename
+                    // pencil in My Trails is the dedicated path for
+                    // changing the name, so Update keeps it stable.
+                    name: activeLoadedRoute.name,
+                    trailIds,
+                    waypoints: routeWaypoints,
+                    entryOrder,
+                    distanceKm: distanceKm > 0 ? distanceKm : null,
+                  });
+                  return result.status === "ok"
+                    ? "saved"
+                    : result.status === "not-found"
+                      ? "not-found"
+                      : "error";
                 }
               : undefined
           }
