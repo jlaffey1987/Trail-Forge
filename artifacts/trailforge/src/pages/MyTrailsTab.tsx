@@ -61,14 +61,45 @@ function formatRiddenDate(iso: string): string {
  * and has a small "Undo" affordance for fast removal.
  */
 function RiddenTrailsSection({
+  signedIn,
   onOpenTrail,
   onToast,
+  onSignIn,
 }: {
+  signedIn: boolean;
   onOpenTrail: (t: Trail) => void;
   onToast: (msg: string) => void;
+  onSignIn: () => void;
 }) {
   const { items, loaded } = useCompletionItems();
   const [expanded, setExpanded] = useState(false);
+
+  // Signed-out riders see a sign-in prompt instead of the loading
+  // spinner — completions are per-user and there's nothing to fetch
+  // until they're authenticated.
+  if (!signedIn) {
+    return (
+      <section
+        className="px-4 pb-6 space-y-3"
+        data-testid="my-trails-ridden-section"
+      >
+        <h2 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">
+          Ridden
+        </h2>
+        <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-4 text-center">
+          <p className="text-stone-500 text-xs">Sign in to track ridden trails.</p>
+          <button
+            type="button"
+            onClick={onSignIn}
+            className="mt-2 text-[11px] font-bold uppercase tracking-wider text-emerald-400 hover:text-emerald-300"
+            data-testid="my-trails-ridden-signin"
+          >
+            Sign in →
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   const totalKm = items.reduce((acc, it) => {
     const km = it.trail?.distance_km;
@@ -796,8 +827,10 @@ export default function MyTrailsTab() {
 
       {/* Ridden trails — log of completed trails the user has marked. */}
       <RiddenTrailsSection
+        signedIn={!!isSignedIn}
         onOpenTrail={setSelectedTrail}
         onToast={setToast}
+        onSignIn={() => setLocation("/sign-in")}
       />
 
       {/* Saved (planned) trails section */}

@@ -8,7 +8,13 @@ import {
   subscribeRouteTrails,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
-import { useCompletionIds } from "@/lib/completionsStore";
+import {
+  markCompleted,
+  unmarkCompleted,
+  useCompletionIds,
+} from "@/lib/completionsStore";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { useLocation } from "wouter";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
@@ -167,6 +173,21 @@ export default function ClusterTrailListSheet({
   }, [controlled]);
   const routeIds = controlled ? selectedIds : storeIds;
   const completedIds = useCompletionIds();
+  const { isSignedIn } = useCurrentUser();
+  const [, setLocation] = useLocation();
+  const [riddenBusy, setRiddenBusy] = useState<string | null>(null);
+
+  const handleToggleRidden = async (trail: Trail) => {
+    if (!isSignedIn) {
+      setLocation("/sign-in");
+      return;
+    }
+    if (riddenBusy) return;
+    setRiddenBusy(trail.id);
+    if (completedIds.has(trail.id)) await unmarkCompleted(trail.id);
+    else await markCompleted(trail);
+    setRiddenBusy(null);
+  };
   // Inline cap warning shown above the rows so a user who taps "+ Route"
   // when the planner is already full sees an explanation rather than a
   // silent no-op (the server PUT enforces PLANNER_MAX_TRAILS too).
@@ -361,6 +382,32 @@ export default function ClusterTrailListSheet({
                       >
                         {difficultyLabel(trail.difficulty)}
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleToggleRidden(trail);
+                      }}
+                      disabled={riddenBusy === trail.id}
+                      aria-pressed={completedIds.has(trail.id)}
+                      title={
+                        completedIds.has(trail.id)
+                          ? "Marked ridden — tap to undo"
+                          : isSignedIn
+                            ? "Mark as ridden"
+                            : "Sign in to mark as ridden"
+                      }
+                      data-testid={`cluster-trail-mark-ridden-${trail.id}`}
+                      className={
+                        "shrink-0 self-center mr-1 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border transition-colors " +
+                        (completedIds.has(trail.id)
+                          ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                          : "border-stone-700 text-stone-400 hover:border-emerald-500/40 hover:text-emerald-300") +
+                        (riddenBusy === trail.id ? " opacity-60" : "")
+                      }
+                    >
+                      {completedIds.has(trail.id) ? "✓ Ridden" : "Ridden?"}
                     </button>
                     <button
                       type="button"

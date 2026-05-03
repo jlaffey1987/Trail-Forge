@@ -474,8 +474,14 @@ function MarkRiddenButton({ trail }: { trail: Trail }) {
   const { completed } = useCompletionState(trail.id);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Backdating: closed by default. Opens a small inline date picker so
+  // riders can log rides from before they joined / before they thought
+  // to mark them. The "fast path" (today) stays one-tap.
+  const [backdating, setBackdating] = useState(false);
+  const todayLocal = new Date().toISOString().slice(0, 10);
+  const [chosenDate, setChosenDate] = useState(todayLocal);
 
-  const handleClick = async () => {
+  const runMark = async (opts?: { completedAt?: string }) => {
     if (!isSignedIn) {
       setLocation("/sign-in");
       return;
@@ -485,7 +491,7 @@ function MarkRiddenButton({ trail }: { trail: Trail }) {
     setError(null);
     const ok = completed
       ? await unmarkCompleted(trail.id)
-      : await markCompleted(trail);
+      : await markCompleted(trail, opts);
     setBusy(false);
     if (!ok) {
       setError(
@@ -493,7 +499,19 @@ function MarkRiddenButton({ trail }: { trail: Trail }) {
           ? "Couldn't remove — try again."
           : "Couldn't mark as ridden — try again.",
       );
+    } else if (!completed) {
+      setBackdating(false);
     }
+  };
+
+  const handleClick = () => void runMark();
+
+  const handleConfirmBackdate = () => {
+    // Convert YYYY-MM-DD to ISO at noon-local so the date stamps as the
+    // chosen day in any timezone (avoids "selected June 1, stored as
+    // May 31" when UTC < local).
+    const iso = new Date(`${chosenDate}T12:00:00`).toISOString();
+    void runMark({ completedAt: iso });
   };
 
   return (
@@ -531,6 +549,51 @@ function MarkRiddenButton({ trail }: { trail: Trail }) {
         >
           {error}
         </p>
+      ) : null}
+      {!completed && isSignedIn ? (
+        <div className="mt-1.5">
+          {!backdating ? (
+            <button
+              type="button"
+              onClick={() => setBackdating(true)}
+              className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 hover:text-emerald-300"
+              data-testid="trail-detail-backdate-toggle"
+            >
+              Ridden on a different day? Backdate →
+            </button>
+          ) : (
+            <div
+              className="flex items-center gap-2"
+              data-testid="trail-detail-backdate-form"
+            >
+              <input
+                type="date"
+                value={chosenDate}
+                max={todayLocal}
+                onChange={(e) => setChosenDate(e.target.value)}
+                className="bg-stone-900 border border-stone-700 rounded px-2 py-1 text-xs text-stone-200"
+                data-testid="trail-detail-backdate-input"
+              />
+              <button
+                type="button"
+                onClick={handleConfirmBackdate}
+                disabled={busy || !chosenDate}
+                className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/15 disabled:opacity-50"
+                data-testid="trail-detail-backdate-confirm"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => setBackdating(false)}
+                className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-stone-400 hover:text-stone-200"
+                data-testid="trail-detail-backdate-cancel"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
       ) : null}
     </div>
   );

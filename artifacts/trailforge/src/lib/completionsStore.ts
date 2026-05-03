@@ -138,15 +138,19 @@ function revertUnmark(trailId: string, item: CompletionItem | null): void {
   });
 }
 
-export async function markCompleted(trail: Trail): Promise<boolean> {
+export async function markCompleted(
+  trail: Trail,
+  opts?: { completedAt?: string; note?: string },
+): Promise<boolean> {
   const myEpoch = epoch;
   const wasCompleted = state.ids.has(trail.id);
+  const stamp = opts?.completedAt ?? new Date().toISOString();
   if (!wasCompleted) {
     const optimistic: CompletionItem = {
       id: `optimistic-${trail.id}`,
       trail_id: trail.id,
-      completed_at: new Date().toISOString(),
-      note: null,
+      completed_at: stamp,
+      note: opts?.note ?? null,
       trail,
     };
     setState({
@@ -156,11 +160,14 @@ export async function markCompleted(trail: Trail): Promise<boolean> {
     });
   }
   try {
+    const body: Record<string, unknown> = { trailId: trail.id };
+    if (opts?.completedAt) body.completedAt = opts.completedAt;
+    if (opts?.note != null) body.note = opts.note;
     const res = await fetch("/api/me/completions", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trailId: trail.id }),
+      body: JSON.stringify(body),
     });
     if (myEpoch !== epoch) return res.ok;
     if (!res.ok) {
