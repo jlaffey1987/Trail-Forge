@@ -311,7 +311,9 @@ export async function decideAmendment(
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decisionReason: decisionReason ?? null }),
+        body: JSON.stringify(
+          decisionReason ? { decisionReason } : {},
+        ),
       },
     );
     return res.ok;
