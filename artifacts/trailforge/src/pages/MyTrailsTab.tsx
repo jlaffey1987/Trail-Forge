@@ -11,6 +11,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
   listSavedRoutes,
   deleteSavedRoute,
+  renameSavedRoute,
   type SavedRouteSummary,
 } from "@/lib/savedRoutes";
 import { setRouteEntries } from "@/lib/plannerRouteStore";
@@ -74,6 +75,14 @@ export default function MyTrailsTab() {
   const [loadingSavedRoutes, setLoadingSavedRoutes] = useState(false);
   const [deletingRouteId, setDeletingRouteId] = useState<string | null>(null);
   const [confirmDeleteRouteId, setConfirmDeleteRouteId] = useState<string | null>(null);
+  // Inline rename dialog state. Holds the row being renamed plus the
+  // editable text — the live `savedRoutes` array isn't mutated until
+  // the server confirms the rename, so a failure leaves the original
+  // name visible.
+  const [renamingRoute, setRenamingRoute] = useState<SavedRouteSummary | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renamingBusy, setRenamingBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const refreshSavedRoutes = useCallback(async () => {
     if (!userId) {
@@ -130,6 +139,48 @@ export default function MyTrailsTab() {
     },
     [setLocation],
   );
+
+  const openRenameDialog = useCallback((route: SavedRouteSummary) => {
+    setRenamingRoute(route);
+    setRenameDraft(route.name);
+    setRenameError(null);
+  }, []);
+
+  const handleSubmitRename = useCallback(async () => {
+    if (!renamingRoute) return;
+    const trimmed = renameDraft.trim();
+    if (trimmed.length === 0) {
+      setRenameError("Name can't be empty");
+      return;
+    }
+    if (trimmed.length > 200) {
+      setRenameError("Name is too long (max 200 chars)");
+      return;
+    }
+    if (trimmed === renamingRoute.name) {
+      setRenamingRoute(null);
+      return;
+    }
+    setRenamingBusy(true);
+    setRenameError(null);
+    const result = await renameSavedRoute(renamingRoute.id, trimmed);
+    setRenamingBusy(false);
+    if (result.status === "ok") {
+      // Patch the local list in place so the new name shows up
+      // immediately without a full refetch round-trip.
+      setSavedRoutes((prev) =>
+        prev.map((r) =>
+          r.id === renamingRoute.id ? { ...r, name: result.name } : r,
+        ),
+      );
+      setRenamingRoute(null);
+      setToast("Route renamed");
+    } else if (result.status === "not-found") {
+      setRenameError("This route no longer exists");
+    } else {
+      setRenameError("Couldn't rename route");
+    }
+  }, [renamingRoute, renameDraft]);
 
   const handleDeleteRoute = useCallback(
     async (id: string) => {
@@ -565,6 +616,18 @@ export default function MyTrailsTab() {
                       </button>
                       <button
                         type="button"
+                        onClick={() => openRenameDialog(route)}
+                        data-testid={`saved-route-rename-${route.id}`}
+                        className="px-3 py-2 rounded-lg text-xs font-semibold text-stone-300 border border-stone-700 hover:bg-stone-800/60 transition-colors"
+                        aria-label={`Rename route ${route.name}`}
+                      >
+                        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.2">
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setConfirmDeleteRouteId(route.id)}
                         disabled={deletingRouteId === route.id}
                         data-testid={`saved-route-delete-${route.id}`}
@@ -769,6 +832,75 @@ export default function MyTrailsTab() {
           setToast("Trail updated");
         }}
       />
+
+      {/* Rename saved-route dialog */}
+      {renamingRoute && (
+        <div
+          className="fixed inset-0 z-[2700] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.85)" }}
+          role="dialog"
+          aria-modal="true"
+          data-testid="rename-route-dialog"
+        >
+          <div className="w-full max-w-sm bg-[hsl(22,15%,12%)] border border-amber-500/30 rounded-2xl p-5">
+            <h3 className="text-base font-bold text-amber-300 uppercase tracking-wider mb-3">
+              Rename Route
+            </h3>
+            <input
+              type="text"
+              value={renameDraft}
+              onChange={(e) => {
+                setRenameDraft(e.target.value);
+                if (renameError) setRenameError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !renamingBusy) {
+                  e.preventDefault();
+                  void handleSubmitRename();
+                } else if (e.key === "Escape") {
+                  setRenamingRoute(null);
+                }
+              }}
+              autoFocus
+              maxLength={200}
+              disabled={renamingBusy}
+              data-testid="rename-route-input"
+              placeholder="Route name"
+              className="w-full px-3 py-2.5 rounded-lg bg-[hsl(22,15%,9%)] border border-stone-700 text-sm text-stone-100 placeholder-stone-500 focus:outline-none focus:border-amber-500/60"
+            />
+            {renameError && (
+              <p
+                className="mt-2 text-[11px] text-red-400"
+                data-testid="rename-route-error"
+              >
+                {renameError}
+              </p>
+            )}
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setRenamingRoute(null)}
+                disabled={renamingBusy}
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-300 border border-stone-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleSubmitRename()}
+                disabled={renamingBusy || renameDraft.trim().length === 0}
+                data-testid="rename-route-submit"
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                style={{
+                  background:
+                    "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)",
+                  color: "#1a0e05",
+                }}
+              >
+                {renamingBusy ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete saved-route confirm */}
       {confirmDeleteRouteId && (() => {

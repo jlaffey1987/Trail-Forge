@@ -81,6 +81,42 @@ export async function createSavedRoute(
   }
 }
 
+export type RenameSavedRouteResult =
+  | { status: "ok"; name: string }
+  | { status: "not-found" }
+  | { status: "error" };
+
+export async function renameSavedRoute(
+  id: string,
+  name: string,
+): Promise<RenameSavedRouteResult> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/me/saved-routes/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[savedRoutes] rename network error:", err);
+    return { status: "error" };
+  }
+  if (res.status === 404) return { status: "not-found" };
+  if (!res.ok) {
+    // eslint-disable-next-line no-console
+    console.warn("[savedRoutes] rename failed:", res.status);
+    return { status: "error" };
+  }
+  try {
+    const body = (await res.json()) as { id: string; name: string };
+    return { status: "ok", name: body.name };
+  } catch {
+    return { status: "error" };
+  }
+}
+
 export async function deleteSavedRoute(id: string): Promise<boolean> {
   const res = await fetch(
     `/api/me/saved-routes/${encodeURIComponent(id)}`,

@@ -797,6 +797,13 @@ const PostSavedRouteBody = z.object({
   distanceKm: z.number().finite().nonnegative().nullable().optional(),
 });
 
+// PATCH only changes the name. We deliberately keep this narrow so it
+// stays a one-tap rename and can't accidentally clobber the route
+// payload — for that the rider can load + re-save (planned follow-up).
+const PatchSavedRouteBody = z.object({
+  name: z.string().trim().min(1).max(200),
+});
+
 const SAVED_ROUTES_PER_USER_LIMIT = 50;
 
 interface SavedRouteRow {
@@ -1061,6 +1068,65 @@ router.post("/me/saved-routes", async (req: Request, res: Response) => {
   } catch (err) {
     req.log.error({ err }, "saved-routes POST failed");
     res.status(500).json({ error: "Failed to save route" });
+  }
+});
+
+router.patch("/me/saved-routes/:id", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const id = req.params.id;
+  if (typeof id !== "string" || id.length === 0 || id.length > 100) {
+    res.status(400).json({ error: "Invalid route id" });
+    return;
+  }
+  const parsed = PatchSavedRouteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid rename payload" });
+    return;
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    // Scope the update to (id, user_id) — same defence as DELETE so
+    // a user can't rename someone else's row by guessing a uuid.
+    // .select() returns the matched rows; if none match (wrong owner
+    // or unknown id) we return 404.
+    const { data, error } = await supa
+      .from("saved_routes")
+      .update({
+        name: parsed.data.name.trim(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .eq("user_id", auth.userId)
+      .select("id, name")
+      .single();
+
+    if (error) {
+      // PGRST116 = no rows found by .single(); treat as 404.
+      if ((error as { code?: string }).code === "PGRST116") {
+        res.status(404).json({ error: "Route not found" });
+        return;
+      }
+      if (isMissingTableError(error)) {
+        res.status(503).json({
+          error:
+            "Saved routes aren't available yet on this database. Apply migration 0018.",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "saved-routes rename failed");
+      res.status(500).json({ error: "Failed to rename route" });
+      return;
+    }
+
+    res.json({ id: data.id, name: data.name });
+  } catch (err) {
+    req.log.error({ err }, "saved-routes PATCH failed");
+    res.status(500).json({ error: "Failed to rename route" });
   }
 });
 
