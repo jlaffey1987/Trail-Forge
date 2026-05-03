@@ -87,6 +87,7 @@ export default function MapTab() {
   // Hybrid place-label overlay shown only over the satellite base. Removed
   // when topo / OS Outdoor are active (those styles ship their own labels).
   const labelLayerRef = useRef<import("leaflet").TileLayer | null>(null);
+  const mapResizeCleanupRef = useRef<(() => void) | null>(null);
   const layerPolylinesRef = useRef<Map<string, import("leaflet").Polyline[]>>(new Map());
   const trailLayerHandleRef = useRef<TrailLayerHandle | null>(null);
   const clusterLayerHandleRef = useRef<ClusterLayerHandle | null>(null);
@@ -268,9 +269,52 @@ export default function MapTab() {
 
     setCurrentZoom(map.getZoom());
     mapRef.current = map;
+
+    // Leaflet measures the container exactly once at init. If the page
+    // layout settles AFTER mount (bottom nav reflow, header safe-area
+    // padding application, font swap, address-bar collapse on mobile
+    // Chrome) the map keeps the original — usually smaller — size and
+    // never re-expands, leaving a grey strip at the bottom that the
+    // tester reported as "the map page never goes full screen."
+    // Two-pronged fix:
+    //   1. Schedule a few invalidateSize() calls after init so the map
+    //      catches up to whatever the final layout is.
+    //   2. Watch the container with a ResizeObserver and invalidateSize
+    //      on every size change for the lifetime of this map instance.
+    const invalidate = () => {
+      try { map.invalidateSize(false); } catch { /* map disposed */ }
+    };
+    const initTimers = [
+      window.setTimeout(invalidate, 0),
+      window.setTimeout(invalidate, 100),
+      window.setTimeout(invalidate, 400),
+      window.setTimeout(invalidate, 1200),
+    ];
+    let resizeObs: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined" && mapContainerRef.current) {
+      resizeObs = new ResizeObserver(() => invalidate());
+      resizeObs.observe(mapContainerRef.current);
+    }
+    window.addEventListener("resize", invalidate);
+    window.addEventListener("orientationchange", invalidate);
+    mapResizeCleanupRef.current = () => {
+      initTimers.forEach((t) => window.clearTimeout(t));
+      resizeObs?.disconnect();
+      window.removeEventListener("resize", invalidate);
+      window.removeEventListener("orientationchange", invalidate);
+    };
+
     // Initial fetch
     void fetchTrailsForCurrentView();
   }, [leafletLoaded, scheduleFetch, fetchTrailsForCurrentView]);
+
+  // Tear down resize listeners when the MapTab unmounts.
+  useEffect(() => {
+    return () => {
+      mapResizeCleanupRef.current?.();
+      mapResizeCleanupRef.current = null;
+    };
+  }, []);
 
   // Re-fetch when filters change (so server-side filters are applied)
   useEffect(() => {
