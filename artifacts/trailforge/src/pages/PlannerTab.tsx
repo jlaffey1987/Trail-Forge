@@ -551,6 +551,101 @@ export default function PlannerTab() {
     removeRouteWaypoint(waypointId);
   }, []);
 
+  // Commit a drag-reorder from the My Route panel. Mirrors the
+  // remove/swap "recompute first, commit on success" contract: when an
+  // assembled trip already exists we re-run the multi-modal assembly
+  // against the proposed order and only persist the new order if it
+  // succeeds, so a transient OSRM hiccup can't strand the rider with a
+  // half-broken route on screen. When no trip has been planned yet we
+  // just persist the new order — there's nothing to recompute.
+  const handleCommitReorder = useCallback(
+    async (
+      nextEntries: typeof routeEntries,
+      onProgress: (step: number, total: number, label: string) => void,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      // Strip the discriminator types down to the store's wire shape so
+      // setRouteEntries doesn't choke on the readonly inferred types
+      // we get from the panel.
+      const wireEntries = nextEntries.map((e) =>
+        e.kind === "trail"
+          ? { kind: "trail" as const, trail: e.trail }
+          : { kind: "waypoint" as const, waypoint: e.waypoint },
+      );
+      if (!assembledRoute) {
+        // Nothing to recompute — just persist the new order. The panel
+        // re-renders from the store on the next tick.
+        setRouteEntries(wireEntries);
+        return { ok: true };
+      }
+      try {
+        const newRoute = await assembleMultiModalRoute(
+          assembledRoute.start,
+          assembledRoute.end,
+          wireEntries,
+          onProgress,
+        );
+        if (newRoute.sections.length === 0) {
+          return {
+            ok: false,
+            error:
+              "Couldn't rebuild the route in that order. Try a different sequence.",
+          };
+        }
+        setRouteEntries(wireEntries);
+        setAssembledRoute(newRoute);
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while re-routing. Please try again.",
+        };
+      }
+    },
+    [assembledRoute],
+  );
+
+  // Substitute a trail from the My Route panel (no active trip).
+  // Reuses the same defense-in-depth and recompute-on-success contract
+  // as handleSwapTrailSection but degrades gracefully when there is no
+  // assembled route yet — in that case we simply replace the trail in
+  // the store and return ok.
+  const handlePlannerSwapTrail = useCallback(
+    async (
+      oldTrailId: string,
+      newTrail: Trail,
+      onProgress: (step: number, total: number, label: string) => void,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      if (assembledRoute) {
+        const result = await handleSwapTrailSection(oldTrailId, newTrail, onProgress);
+        if (result.ok) return { ok: true };
+        return { ok: false, error: result.error };
+      }
+      // No active trip yet — substitute in place in the store.
+      if (newTrail.verification_status === "ai-approximated") {
+        return {
+          ok: false,
+          error: "That trail is reference-only and can't be navigated.",
+        };
+      }
+      if (routeTrails.some((t) => t.id === newTrail.id)) {
+        return {
+          ok: false,
+          error: "That trail is already in your route — pick a different one.",
+        };
+      }
+      const nextEntries = routeEntries.map((e) =>
+        e.kind === "trail" && e.trail.id === oldTrailId
+          ? { kind: "trail" as const, trail: newTrail }
+          : e.kind === "trail"
+            ? { kind: "trail" as const, trail: e.trail }
+            : { kind: "waypoint" as const, waypoint: e.waypoint },
+      );
+      setRouteEntries(nextEntries);
+      return { ok: true };
+    },
+    [assembledRoute, handleSwapTrailSection, routeTrails, routeEntries],
+  );
+
   // Add a POI as a custom waypoint. We try to slot it BETWEEN the most
   // sensible trails by finding the assembled trail section whose polyline
   // is closest to the waypoint and using its trail id as `afterTrailId`.
@@ -1241,7 +1336,7 @@ export default function PlannerTab() {
                 <polyline points="7 10 12 15 17 10"/>
                 <line x1="12" y1="15" x2="12" y2="3"/>
               </svg>
-              Build GPX
+              My Route
             </button>
             <button
               onClick={handlePlanTrip}
@@ -1273,6 +1368,11 @@ export default function PlannerTab() {
           onRemoveWaypoint={handleRemoveWaypoint}
           entries={routeEntries}
           onReorderEntries={setRouteEntries}
+          startLabel={startLocation.trim() || null}
+          endLabel={endLocation.trim() || null}
+          onCommitReorder={handleCommitReorder}
+          onFetchSwapAlternates={handleFetchSwapAlternates}
+          onCommitSwap={handlePlannerSwapTrail}
           onSaveRoute={
             isSignedIn
               ? async (name) => {

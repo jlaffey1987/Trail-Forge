@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   parseGPX,
   buildCombinedGPX,
@@ -92,6 +92,45 @@ interface Props {
    * binding when the row no longer exists.
    */
   onUpdateRoute?: () => Promise<"saved" | "not-found" | "error">;
+  /**
+   * Human-readable Start / End labels framing the stop list. When
+   * provided, the panel renders dedicated anchor rows at the top and
+   * bottom of the list so the rider can see the full ordered trip
+   * (start → trails/waypoints → end). Optional — when omitted the
+   * builder falls back to the legacy stops-only layout.
+   */
+  startLabel?: string | null;
+  endLabel?: string | null;
+  /**
+   * Commit a new entry order after a drag-reorder. When provided, this
+   * wins over `onReorderEntries` for drag commits — the parent owns
+   * snapshot+restore and any in-place re-routing of the assembled
+   * trip. Returns `ok:false` to signal the previous order should stay
+   * on screen (parent must restore the store before resolving). The
+   * panel surfaces the parent-supplied error inline.
+   */
+  onCommitReorder?: (
+    nextEntries: RouteEntry[],
+    onProgress: (step: number, total: number, label: string) => void,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Find candidate trails the rider could substitute the given trail
+   * for. Reuses the same picker contract as the in-trip swap flow
+   * (`NavigationView.onFetchSwapAlternates`). Returning `[]` means
+   * "no alternates found" — the picker shows an empty-state.
+   */
+  onFetchSwapAlternates?: (trailId: string) => Promise<Trail[]>;
+  /**
+   * Substitute the given trail with the chosen alternate. Same
+   * snapshot/restore contract as `onCommitReorder`: on `ok:false` the
+   * planner store is left untouched and the previous trail stays in
+   * the panel.
+   */
+  onCommitSwap?: (
+    oldTrailId: string,
+    newTrail: Trail,
+    onProgress: (step: number, total: number, label: string) => void,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export default function RouteBuilder({
@@ -106,6 +145,11 @@ export default function RouteBuilder({
   onSaveRoute,
   activeLoadedRoute,
   onUpdateRoute,
+  startLabel,
+  endLabel,
+  onCommitReorder,
+  onFetchSwapAlternates,
+  onCommitSwap,
 }: Props) {
   const [downloading, setDownloading] = useState(false);
   const [gpxReady, setGpxReady] = useState(false);
@@ -294,6 +338,193 @@ export default function RouteBuilder({
     return () => window.clearTimeout(t);
   }, [saveToast]);
 
+  // ---------------------------------------------------------------
+  // Drag-to-reorder + per-trail swap state
+  //
+  // All state declared up front so the useCallback handlers below can
+  // safely reference any of them (no temporal-dead-zone surprises).
+  // ---------------------------------------------------------------
+  const rowNodesRef = useRef<Map<number, HTMLElement>>(new Map());
+  const setRowNode = useCallback((idx: number, el: HTMLElement | null) => {
+    if (el) rowNodesRef.current.set(idx, el);
+    else rowNodesRef.current.delete(idx);
+  }, []);
+  const [dragState, setDragState] = useState<{
+    fromIdx: number;
+    overIdx: number;
+  } | null>(null);
+  const dragStateRef = useRef(dragState);
+  useEffect(() => {
+    dragStateRef.current = dragState;
+  }, [dragState]);
+
+  const [reordering, setReordering] = useState<{
+    progress: { pct: number; label: string };
+  } | null>(null);
+  const [reorderError, setReorderError] = useState<string | null>(null);
+
+  const [swapPickerFor, setSwapPickerFor] = useState<{
+    trailId: string;
+    trailName: string;
+  } | null>(null);
+  const [swapAlternates, setSwapAlternates] = useState<Trail[] | null>(null);
+  const [swapping, setSwapping] = useState<{
+    trailName: string;
+    newTrailName: string;
+    progress: { pct: number; label: string };
+  } | null>(null);
+  const [swapError, setSwapError] = useState<string | null>(null);
+
+  const computeOverIdx = useCallback((clientY: number, fromIdx: number) => {
+    let best = fromIdx;
+    for (const [idx, el] of rowNodesRef.current.entries()) {
+      const r = el.getBoundingClientRect();
+      if (clientY >= r.top && clientY <= r.bottom) {
+        best = idx;
+        return best;
+      }
+    }
+    // Pointer may be above the first row or below the last row — clamp.
+    let topMost: { idx: number; top: number } | null = null;
+    let bottomMost: { idx: number; bottom: number } | null = null;
+    for (const [idx, el] of rowNodesRef.current.entries()) {
+      const r = el.getBoundingClientRect();
+      if (topMost === null || r.top < topMost.top) topMost = { idx, top: r.top };
+      if (bottomMost === null || r.bottom > bottomMost.bottom)
+        bottomMost = { idx, bottom: r.bottom };
+    }
+    if (topMost && clientY < topMost.top) return topMost.idx;
+    if (bottomMost && clientY > bottomMost.bottom) return bottomMost.idx;
+    return best;
+  }, []);
+
+  const handleDragPointerDown = useCallback(
+    (idx: number, e: React.PointerEvent<HTMLButtonElement>) => {
+      // Only the primary pointer (left mouse / first touch) starts a
+      // drag. Right-clicks etc. fall through.
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      if (!entries || entries.length < 2) return;
+      if (reordering || swapping) return;
+      e.preventDefault();
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* setPointerCapture can throw in some test envs */
+      }
+      setDragState({ fromIdx: idx, overIdx: idx });
+    },
+    [entries, reordering], // swapping defined below — referenced via closure
+  );
+
+  const handleDragPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>) => {
+      const cur = dragStateRef.current;
+      if (!cur) return;
+      const nextOver = computeOverIdx(e.clientY, cur.fromIdx);
+      if (nextOver !== cur.overIdx) {
+        setDragState({ fromIdx: cur.fromIdx, overIdx: nextOver });
+      }
+    },
+    [computeOverIdx],
+  );
+
+  const commitReorder = useCallback(
+    async (fromIdx: number, toIdx: number) => {
+      if (!entries || fromIdx === toIdx) return;
+      const next = entries.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      setReorderError(null);
+      if (onCommitReorder) {
+        setReordering({ progress: { pct: 0, label: "Re-routing your trip..." } });
+        try {
+          const result = await onCommitReorder(next, (step, total, label) => {
+            const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+            setReordering((prev) =>
+              prev ? { progress: { pct, label } } : prev,
+            );
+          });
+          if (!result.ok) setReorderError(result.error);
+        } catch {
+          setReorderError("Couldn't reorder. Please try again.");
+        } finally {
+          setReordering(null);
+        }
+      } else if (onReorderEntries) {
+        onReorderEntries(next);
+      }
+    },
+    [entries, onCommitReorder, onReorderEntries],
+  );
+
+  const handleDragPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>) => {
+      const cur = dragStateRef.current;
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      setDragState(null);
+      if (!cur) return;
+      void commitReorder(cur.fromIdx, cur.overIdx);
+    },
+    [commitReorder],
+  );
+
+  const handleDragPointerCancel = useCallback(() => {
+    setDragState(null);
+  }, []);
+
+  // Fetch alternates when the picker opens. Each open issues a fresh
+  // request — `swapAlternates === null` means "loading", `[]` means
+  // "loaded but no candidates".
+  useEffect(() => {
+    if (!swapPickerFor || !onFetchSwapAlternates) return;
+    let cancelled = false;
+    setSwapAlternates(null);
+    void onFetchSwapAlternates(swapPickerFor.trailId).then((alts) => {
+      if (cancelled) return;
+      setSwapAlternates(alts);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [swapPickerFor, onFetchSwapAlternates]);
+
+  const handleConfirmSwap = useCallback(
+    async (newTrail: Trail) => {
+      if (!swapPickerFor || !onCommitSwap) return;
+      const { trailId, trailName } = swapPickerFor;
+      setSwapPickerFor(null);
+      setSwapAlternates(null);
+      setSwapError(null);
+      setSwapping({
+        trailName,
+        newTrailName: newTrail.name,
+        progress: { pct: 0, label: "Re-routing your trip..." },
+      });
+      try {
+        const result = await onCommitSwap(
+          trailId,
+          newTrail,
+          (step, total, label) => {
+            const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+            setSwapping((prev) =>
+              prev ? { ...prev, progress: { pct, label } } : prev,
+            );
+          },
+        );
+        if (!result.ok) setSwapError(result.error);
+      } catch {
+        setSwapError("Couldn't swap. Please try again.");
+      } finally {
+        setSwapping(null);
+      }
+    },
+    [swapPickerFor, onCommitSwap],
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(4px)" }}>
       <div
@@ -308,7 +539,7 @@ export default function RouteBuilder({
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-[hsl(30,12%,16%)] shrink-0">
           <div>
-            <h2 className="text-base font-bold text-amber-400 uppercase tracking-widest">Route Builder</h2>
+            <h2 className="text-base font-bold text-amber-400 uppercase tracking-widest">My Route</h2>
             <p className="text-xs text-stone-500 mt-0.5">
               {selectedTrails.length} trail{selectedTrails.length !== 1 ? "s" : ""} · {totalTrailKm.toFixed(1)} km riding
             </p>
@@ -350,22 +581,65 @@ export default function RouteBuilder({
               // glue between trails.
               const trailIdxById = new Map<string, number>();
               selectedTrails.forEach((t, i) => trailIdxById.set(t.id, i));
+              // The arrow fallback shares commitReorder with the drag
+              // handle so it gets the same recompute / snapshot-restore
+              // treatment when the parent has wired onCommitReorder.
+              // Without this, an arrow tap on an already-planned trip
+              // would mutate the store without re-running the
+              // multi-modal assembly.
               const swapEntries = (a: number, b: number) => {
-                if (!onReorderEntries) return;
                 if (a < 0 || b < 0 || a >= entries.length || b >= entries.length) return;
-                const next = entries.slice();
-                [next[a], next[b]] = [next[b], next[a]];
-                onReorderEntries(next);
+                if (a === b) return;
+                void commitReorder(a, b);
               };
-              return entries.map((entry, idx) => {
+              const canReorder = !!(onReorderEntries || onCommitReorder);
+              // Arrow buttons are disabled while a recompute is in
+              // flight so the rider can't fire a second mutation
+              // before the first one settles. Mirrors the drag-handle
+              // guard in handleDragPointerDown.
+              const arrowsBusy = !!reordering || !!swapping;
+              const rows = entries.map((entry, idx) => {
+                const isDragOver =
+                  dragState != null && dragState.overIdx === idx && dragState.fromIdx !== idx;
+                const isDragSource = dragState?.fromIdx === idx;
+                const dragHandle = canReorder ? (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => handleDragPointerDown(idx, e)}
+                    onPointerMove={handleDragPointerMove}
+                    onPointerUp={handleDragPointerUp}
+                    onPointerCancel={handleDragPointerCancel}
+                    aria-label="Drag to reorder this stop"
+                    data-testid={`route-builder-drag-handle-${idx}`}
+                    className="w-7 h-9 rounded flex flex-col items-center justify-center text-stone-500 hover:text-amber-400 transition-colors touch-none cursor-grab active:cursor-grabbing"
+                    style={{ touchAction: "none" }}
+                  >
+                    <svg viewBox="0 0 20 20" className="w-4 h-4" fill="currentColor" aria-hidden="true">
+                      <circle cx="6" cy="5" r="1.4" />
+                      <circle cx="14" cy="5" r="1.4" />
+                      <circle cx="6" cy="10" r="1.4" />
+                      <circle cx="14" cy="10" r="1.4" />
+                      <circle cx="6" cy="15" r="1.4" />
+                      <circle cx="14" cy="15" r="1.4" />
+                    </svg>
+                  </button>
+                ) : null;
                 if (entry.kind === "waypoint") {
                   const wp = entry.waypoint;
                   return (
                     <div
                       key={`wp-${wp.id}`}
+                      ref={(el) => setRowNode(idx, el)}
                       data-testid={`route-builder-waypoint-${wp.id}`}
-                      className="flex items-center gap-2 bg-[hsl(22,15%,13%)] border border-[hsl(30,12%,22%)] rounded-lg px-2 py-2"
+                      className={`flex items-center gap-2 bg-[hsl(22,15%,13%)] border rounded-lg px-2 py-2 transition-all ${
+                        isDragOver
+                          ? "border-amber-400/80 shadow-lg shadow-amber-900/30"
+                          : isDragSource
+                            ? "border-amber-500/60 opacity-60"
+                            : "border-[hsl(30,12%,22%)]"
+                      }`}
                     >
+                      {dragHandle}
                       <div
                         className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
                         style={{
@@ -395,12 +669,12 @@ export default function RouteBuilder({
                           {wp.lng.toFixed(4)}
                         </div>
                       </div>
-                      {onReorderEntries && (
+                      {canReorder && (
                         <div className="flex flex-col gap-0.5">
                           <button
                             type="button"
                             onClick={() => swapEntries(idx, idx - 1)}
-                            disabled={idx === 0}
+                            disabled={idx === 0 || arrowsBusy}
                             aria-label={`Move stop ${wp.name} up`}
                             data-testid={`route-builder-waypoint-up-${wp.id}`}
                             className="w-6 h-6 rounded flex items-center justify-center text-stone-500 hover:text-stone-300 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
@@ -412,7 +686,7 @@ export default function RouteBuilder({
                           <button
                             type="button"
                             onClick={() => swapEntries(idx, idx + 1)}
-                            disabled={idx === entries.length - 1}
+                            disabled={idx === entries.length - 1 || arrowsBusy}
                             aria-label={`Move stop ${wp.name} down`}
                             data-testid={`route-builder-waypoint-down-${wp.id}`}
                             className="w-6 h-6 rounded flex items-center justify-center text-stone-500 hover:text-stone-300 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
@@ -456,14 +730,14 @@ export default function RouteBuilder({
                 const start = route ? getTrailStart(route.waypoints) : null;
                 const transitDist = transitDistances[tIdx];
                 const moveTrailUp = () => {
-                  if (onReorderEntries) {
+                  if (canReorder) {
                     swapEntries(idx, idx - 1);
                   } else {
                     moveUp(tIdx);
                   }
                 };
                 const moveTrailDown = () => {
-                  if (onReorderEntries) {
+                  if (canReorder) {
                     swapEntries(idx, idx + 1);
                   } else {
                     moveDown(tIdx);
@@ -478,9 +752,18 @@ export default function RouteBuilder({
                 const showTransit =
                   nextEntry?.kind === "trail" && transitDist != null;
                 return (
-                  <div key={`trail-${trail.id}`}>
-                    <div className="bg-[hsl(22,15%,13%)] border border-[hsl(30,12%,22%)] rounded-xl overflow-hidden">
+                  <div key={`trail-${trail.id}`} ref={(el) => setRowNode(idx, el)}>
+                    <div
+                      className={`bg-[hsl(22,15%,13%)] border rounded-xl overflow-hidden transition-all ${
+                        isDragOver
+                          ? "border-amber-400/80 shadow-lg shadow-amber-900/30"
+                          : isDragSource
+                            ? "border-amber-500/60 opacity-60"
+                            : "border-[hsl(30,12%,22%)]"
+                      }`}
+                    >
                       <div className="flex items-center gap-2 p-3">
+                        {dragHandle}
                         <div className="w-7 h-7 rounded-full bg-amber-500 text-stone-900 flex items-center justify-center text-xs font-black shrink-0">
                           {tIdx + 1}
                         </div>
@@ -513,7 +796,9 @@ export default function RouteBuilder({
                         <div className="flex flex-col gap-0.5">
                           <button
                             onClick={moveTrailUp}
-                            disabled={isFirst}
+                            disabled={isFirst || arrowsBusy}
+                            aria-label={`Move ${trail.name} earlier`}
+                            data-testid={`route-builder-trail-up-${trail.id}`}
                             className="w-6 h-6 rounded flex items-center justify-center text-stone-500 hover:text-stone-300 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
                           >
                             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -522,7 +807,9 @@ export default function RouteBuilder({
                           </button>
                           <button
                             onClick={moveTrailDown}
-                            disabled={isLast}
+                            disabled={isLast || arrowsBusy}
+                            aria-label={`Move ${trail.name} later`}
+                            data-testid={`route-builder-trail-down-${trail.id}`}
                             className="w-6 h-6 rounded flex items-center justify-center text-stone-500 hover:text-stone-300 disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
                           >
                             <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -530,8 +817,30 @@ export default function RouteBuilder({
                             </svg>
                           </button>
                         </div>
+                        {onCommitSwap && onFetchSwapAlternates && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwapPickerFor({ trailId: trail.id, trailName: trail.name })
+                            }
+                            disabled={!!reordering || !!swapping}
+                            aria-label={`Swap ${trail.name} for another trail`}
+                            data-testid={`route-builder-trail-swap-${trail.id}`}
+                            title="Swap for another trail"
+                            className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-amber-400 hover:bg-amber-900/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="17 1 21 5 17 9" />
+                              <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                              <polyline points="7 23 3 19 7 15" />
+                              <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+                            </svg>
+                          </button>
+                        )}
                         <button
                           onClick={() => onRemove(trail.id)}
+                          aria-label={`Remove ${trail.name}`}
+                          data-testid={`route-builder-trail-remove-${trail.id}`}
                           className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-600 hover:text-red-400 hover:bg-red-900/20 transition-colors"
                         >
                           <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
@@ -564,6 +873,76 @@ export default function RouteBuilder({
                   </div>
                 );
               });
+              // Frame the rows with Start / End anchors when the parent
+              // tells us where the trip begins and ends. These are pure
+              // visual anchors — they're not draggable, swappable, or
+              // removable, just a reminder of the bookends.
+              return (
+                <>
+                  {startLabel && (
+                    <div
+                      data-testid="route-builder-start-anchor"
+                      className="flex items-center gap-2 bg-[hsl(22,15%,11%)] border border-amber-500/30 rounded-lg px-2 py-2"
+                    >
+                      <div
+                        className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 bg-amber-500/20 border-2 border-amber-500"
+                        aria-hidden="true"
+                      >
+                        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="10" r="3" />
+                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
+                        </svg>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Start</div>
+                        <div className="text-xs text-stone-200 truncate">{startLabel}</div>
+                      </div>
+                    </div>
+                  )}
+                  {rows}
+                  {endLabel && (
+                    <div
+                      data-testid="route-builder-end-anchor"
+                      className="flex items-center gap-2 bg-[hsl(22,15%,11%)] border border-amber-500/30 rounded-lg px-2 py-2"
+                    >
+                      <div
+                        className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 bg-amber-500/20 border-2 border-amber-500"
+                        aria-hidden="true"
+                      >
+                        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M4 21V4a1 1 0 0 1 1-1h12l-2 4 2 4H6" />
+                        </svg>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">End</div>
+                        <div className="text-xs text-stone-200 truncate">{endLabel}</div>
+                      </div>
+                    </div>
+                  )}
+                  {(reorderError || swapError) && (
+                    <div
+                      data-testid="route-builder-reorder-error"
+                      className="bg-red-900/30 border border-red-600/50 rounded-lg px-3 py-2 flex items-start gap-2"
+                    >
+                      <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                      </svg>
+                      <p className="text-[11px] text-red-200 leading-tight flex-1">{reorderError ?? swapError}</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReorderError(null);
+                          setSwapError(null);
+                        }}
+                        aria-label="Dismiss error"
+                        className="text-red-400 ml-1"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
+                </>
+              );
             })()
           ) : (
             <>
@@ -964,6 +1343,139 @@ export default function RouteBuilder({
           data-testid="route-builder-toast"
         >
           {saveToast}
+        </div>
+      )}
+
+      {/* Reorder / swap progress overlay — covers the sheet so the
+          rider can't fire a second mutation while we're rebuilding the
+          assembled trip. Shares the same look as the planner-tab plan
+          progress block. */}
+      {(reordering || swapping) && (
+        <div
+          className="fixed inset-0 z-[2750] flex items-center justify-center px-6"
+          style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(2px)" }}
+          data-testid="route-builder-recompute-overlay"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="w-full max-w-sm bg-[hsl(22,15%,12%)] border border-amber-500/40 rounded-2xl px-5 py-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-3.5 h-3.5 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></span>
+              <p className="text-xs font-bold text-amber-300 uppercase tracking-wider">
+                {swapping ? `Swapping ${swapping.trailName}…` : "Reordering route…"}
+              </p>
+            </div>
+            <p className="text-[11px] text-stone-300 mb-2">
+              {(swapping ?? reordering)!.progress.label}
+            </p>
+            <div className="h-1.5 bg-stone-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-amber-500 to-amber-300 transition-all duration-300"
+                style={{ width: `${(swapping ?? reordering)!.progress.pct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Per-trail swap picker — shown when the rider taps the swap
+          icon on a trail row. Reuses the same data contract as the
+          in-trip swap flow so the alternates already exclude
+          AI-approximated trails. */}
+      {swapPickerFor && (
+        <div
+          className="fixed inset-0 z-[2700] flex items-end justify-center"
+          style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(4px)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Swap ${swapPickerFor.trailName}`}
+          data-testid="route-builder-swap-picker"
+        >
+          <div
+            className="w-full max-w-md bg-[hsl(22,15%,10%)] border-t border-amber-500/30 rounded-t-2xl flex flex-col"
+            style={{ maxHeight: "70vh" }}
+          >
+            <div className="flex items-start justify-between px-4 py-3 border-b border-[hsl(30,12%,16%)] shrink-0">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-amber-400 uppercase tracking-widest">
+                  Swap Trail
+                </h3>
+                <p className="text-xs text-stone-400 mt-0.5 truncate">
+                  Replace <span className="text-stone-200">{swapPickerFor.trailName}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSwapPickerFor(null);
+                  setSwapAlternates(null);
+                }}
+                aria-label="Close swap picker"
+                data-testid="route-builder-swap-cancel"
+                className="w-8 h-8 rounded-full bg-stone-800 flex items-center justify-center text-stone-400 hover:text-stone-200 transition-colors shrink-0"
+              >
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-4 py-3 space-y-2">
+              {swapAlternates === null ? (
+                <div className="flex items-center gap-2 py-6 justify-center text-stone-500">
+                  <span className="w-3.5 h-3.5 border-2 border-stone-600 border-t-stone-300 rounded-full animate-spin"></span>
+                  <span className="text-xs">Finding nearby alternates…</span>
+                </div>
+              ) : swapAlternates.length === 0 ? (
+                <div
+                  className="text-center py-6 text-xs text-stone-500"
+                  data-testid="route-builder-swap-empty"
+                >
+                  No similar trails found nearby. Try removing this trail and adding another from the map.
+                </div>
+              ) : (
+                swapAlternates.map((alt) => {
+                  const altDiff = alt.difficulty ?? 5;
+                  return (
+                    <button
+                      key={alt.id}
+                      type="button"
+                      onClick={() => void handleConfirmSwap(alt)}
+                      data-testid={`route-builder-swap-pick-${alt.id}`}
+                      className="w-full text-left bg-[hsl(22,15%,13%)] border border-[hsl(30,12%,22%)] hover:border-amber-500/60 rounded-lg px-3 py-2.5 transition-all"
+                    >
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span
+                          className="w-4 h-4 rounded text-[10px] font-bold text-black flex items-center justify-center shrink-0"
+                          style={{ backgroundColor: DIFFICULTY_COLORS[altDiff] ?? "#fbbf24" }}
+                        >
+                          {altDiff}
+                        </span>
+                        <span className="text-sm font-bold text-stone-100 truncate">
+                          {alt.name}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {alt.distance_km != null && (
+                          <>
+                            <span className="text-[10px] text-stone-500">
+                              {alt.distance_km.toFixed(1)} km
+                            </span>
+                            <span className="text-stone-700">·</span>
+                          </>
+                        )}
+                        <span
+                          className={`text-[10px] ${alt.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}`}
+                        >
+                          {alt.legal_status}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
