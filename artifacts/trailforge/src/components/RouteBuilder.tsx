@@ -487,7 +487,7 @@ export default function RouteBuilder({
       }
       setDragState({ fromIdx: idx, overIdx: idx });
     },
-    [entries, reordering], // swapping defined below — referenced via closure
+    [entries, reordering, swapping, removing],
   );
 
   const handleDragPointerMove = useCallback(
