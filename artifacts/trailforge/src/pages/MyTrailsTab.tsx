@@ -320,7 +320,7 @@ export default function MyTrailsTab() {
     .toFixed(1);
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto relative">
+    <div className="flex flex-col h-full tf-scroll relative">
       <div className="px-4 pt-4 pb-2 flex items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-bold tracking-wide text-amber-400 uppercase" style={{ letterSpacing: "0.12em" }}>

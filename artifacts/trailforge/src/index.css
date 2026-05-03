@@ -132,10 +132,24 @@
      when the app runs as an installed PWA. Tailwind's `py-3.5` only
      gives us 14px top padding which the system bar would happily sit
      on top of, so we top up with the safe-area inset and drop the
-     Tailwind top-pad. */
+     Tailwind top-pad. We also pad the sides so landscape rotation
+     keeps the sign-in / user buttons clear of the rotated notch. */
   .safe-top {
-    padding-top: calc(env(safe-area-inset-top, 0px) + 0.875rem);
+    padding-top: calc(env(safe-area-inset-top, 0px) + 1rem);
+    padding-left: max(1rem, env(safe-area-inset-left, 0px));
+    padding-right: max(1rem, env(safe-area-inset-right, 0px));
   }
+}
+
+/* Reserve a stable scrollbar gutter on every full-height scroll
+   container in the app shell. Without this, switching from a tab
+   that scrolls (Discover / My Trails / Planner) into one that does
+   not (Map) makes the bottom nav and header visibly shift by the
+   scrollbar width, which feels like a bug. `stable` keeps the
+   gutter reserved even when the scrollbar is not currently shown. */
+.tf-scroll {
+  scrollbar-gutter: stable;
+  overflow-y: auto;
 }
 
 /* Waypoint marker pulse */

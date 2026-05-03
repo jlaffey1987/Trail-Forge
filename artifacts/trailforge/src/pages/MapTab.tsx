@@ -775,7 +775,7 @@ ${trkpts}
   }, [savedTrailToast]);
 
   return (
-    <div className="flex flex-col h-full w-full relative">
+    <div className="flex flex-col h-full relative">
 
       {/* Top controls bar */}
       <div className="absolute top-0 left-0 right-0 z-[1000] flex items-center justify-between px-3 py-2 pointer-events-none">

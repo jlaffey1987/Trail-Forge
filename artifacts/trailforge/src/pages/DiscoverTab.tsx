@@ -189,25 +189,24 @@ export default function DiscoverTab() {
   });
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto">
-      <div className="px-4 pt-4 pb-2">
-        <h1 className="text-lg font-bold tracking-wide text-amber-400 uppercase" style={{ letterSpacing: "0.12em" }}>
-          Discover
-        </h1>
-        <p className="text-xs text-stone-400 mt-0.5">
-          {loading ? "Loading live trails..." : `${trails.length} community trails`}
-        </p>
-      </div>
-
-      {/* Search Bar + Filter Chips — pinned to the top of the scroll area
-          so the ribbon stays visible (and tappable) once the trail feed
-          loads and the page becomes scrollable. Without this, the chips
-          scroll out of view almost immediately on small phones, which
-          looked like a "ribbon disappears" bug. */}
+    <div className="flex flex-col h-full tf-scroll">
+      {/* Title + search + filter ribbon are all part of the same sticky
+          block so the ribbon never appears to "flash then disappear" as
+          the trail feed loads and the page starts scrolling. The whole
+          header stays pinned to the top of the scroll area with a
+          subtle border that makes the pin intentional-looking. */}
       <div
-        className="sticky top-0 z-20 bg-[hsl(22,15%,8%)]/95 backdrop-blur supports-[backdrop-filter]:bg-[hsl(22,15%,8%)]/80 pt-1 pb-2 mb-1"
+        className="sticky top-0 z-20 bg-[hsl(22,15%,8%)]/95 backdrop-blur supports-[backdrop-filter]:bg-[hsl(22,15%,8%)]/85 pt-3 pb-2 mb-1 border-b border-[hsl(30,12%,14%)]/60"
         data-testid="discover-sticky-controls"
       >
+        <div className="px-4 pb-2">
+          <h1 className="text-lg font-bold tracking-wide text-amber-400 uppercase" style={{ letterSpacing: "0.12em" }}>
+            Discover
+          </h1>
+          <p className="text-xs text-stone-400 mt-0.5">
+            {loading ? "Loading live trails..." : `${trails.length} community trails`}
+          </p>
+        </div>
         <div className="px-4 mb-2">
           <div className="relative">
             <svg viewBox="0 0 24 24" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500" fill="none" stroke="currentColor" strokeWidth="2">

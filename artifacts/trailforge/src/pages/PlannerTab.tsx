@@ -199,7 +199,7 @@ export default function PlannerTab() {
     setPlanError(null);
     // Scroll the address inputs into view and focus the first empty one.
     requestAnimationFrame(() => {
-      const container = document.querySelector(".overflow-y-auto");
+      const container = document.querySelector(".tf-scroll");
       if (container) container.scrollTo({ top: 0, behavior: "smooth" });
       const target = startInputRef.current;
       if (target && !startLocation.trim()) target.focus();
@@ -612,7 +612,7 @@ export default function PlannerTab() {
       setHighlightInputs(true);
       const which = missingStart && missingEnd ? "start address and destination" : missingStart ? "start address" : "destination";
       setPlanError(`Please enter your ${which} above to plan navigation.`);
-      const container = document.querySelector(".overflow-y-auto");
+      const container = document.querySelector(".tf-scroll");
       if (container) container.scrollTo({ top: 0, behavior: "smooth" });
       setTimeout(() => setHighlightInputs(false), 3000);
       return;
@@ -708,7 +708,7 @@ export default function PlannerTab() {
 
   return (
     <div className="flex flex-col h-full relative">
-      <div className="flex-1 overflow-y-auto pb-2" style={{ paddingBottom: routeTrails.length > 0 ? "120px" : "0" }}>
+      <div className="flex-1 tf-scroll pb-2" style={{ paddingBottom: routeTrails.length > 0 ? "120px" : "0" }}>
         {/* Hero band — biking POV photo with dark gradient overlay so the
             title stays legible. Uses the existing ride-640 / ride-1280 pair
             via <picture>+srcset. Eager-loaded so it doesn't pop in on first
