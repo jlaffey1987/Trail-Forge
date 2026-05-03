@@ -68,6 +68,10 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
   const [gpxFile, setGpxFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rejecting, setRejecting] = useState<TrailAmendment | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [deciding, setDeciding] = useState(false);
+  const [decideError, setDecideError] = useState<string | null>(null);
 
   const initial = useMemo(
     () => ({
@@ -154,20 +158,57 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
     }
   };
 
-  const decide = async (am: TrailAmendment, decision: "approve" | "reject") => {
-    const reasonText =
-      decision === "reject"
-        ? prompt("Reason for rejection (optional):") ?? undefined
-        : undefined;
-    const ok = await decideAmendment(trail.id, am.id, decision, reasonText);
-    if (!ok) {
-      alert("Decision failed");
-      return;
+  const runDecision = async (
+    am: TrailAmendment,
+    decision: "approve" | "reject",
+    reasonText?: string,
+  ) => {
+    setDeciding(true);
+    setDecideError(null);
+    try {
+      const ok = await decideAmendment(trail.id, am.id, decision, reasonText);
+      if (!ok) {
+        setDecideError(
+          decision === "approve"
+            ? "Could not approve this amendment. Please try again."
+            : "Could not reject this amendment. Please try again.",
+        );
+        return false;
+      }
+      // Refetch to pick up server-side state (status + decided_by/at).
+      const rows = await fetchTrailAmendments(trail.id);
+      setItems(rows);
+      onCountsChanged?.();
+      return true;
+    } finally {
+      setDeciding(false);
     }
-    // Refetch to pick up server-side state (status + decided_by/at).
-    const rows = await fetchTrailAmendments(trail.id);
-    setItems(rows);
-    onCountsChanged?.();
+  };
+
+  const onApprove = (am: TrailAmendment) => {
+    void runDecision(am, "approve");
+  };
+
+  const onRejectClick = (am: TrailAmendment) => {
+    setDecideError(null);
+    setRejectReason("");
+    setRejecting(am);
+  };
+
+  const confirmReject = async () => {
+    if (!rejecting) return;
+    const trimmed = rejectReason.trim();
+    const ok = await runDecision(rejecting, "reject", trimmed === "" ? undefined : trimmed);
+    if (ok) {
+      setRejecting(null);
+      setRejectReason("");
+    }
+  };
+
+  const cancelReject = () => {
+    if (deciding) return;
+    setRejecting(null);
+    setRejectReason("");
   };
 
   return (
@@ -189,6 +230,23 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
           <span className="text-[11px] text-stone-500">Sign in to propose</span>
         )}
       </div>
+
+      {decideError && !rejecting ? (
+        <div
+          className="rounded-lg border border-red-600/40 bg-red-900/20 px-3 py-2 text-[11px] text-red-300 flex items-start justify-between gap-2"
+          role="alert"
+          data-testid="amendment-decide-error"
+        >
+          <span>{decideError}</span>
+          <button
+            onClick={() => setDecideError(null)}
+            className="text-red-300/80 hover:text-red-200 text-[10px] uppercase tracking-wider"
+            data-testid="amendment-decide-error-dismiss"
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
 
       {showForm ? (
         <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg p-3 space-y-2">
@@ -316,15 +374,17 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
               {canModerate && am.status === "pending" ? (
                 <div className="flex gap-2 mt-2 justify-end">
                   <button
-                    onClick={() => decide(am, "reject")}
-                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-red-300 border border-red-600/40 hover:bg-red-900/30"
+                    onClick={() => onRejectClick(am)}
+                    disabled={deciding}
+                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-red-300 border border-red-600/40 hover:bg-red-900/30 disabled:opacity-50"
                     data-testid={`amendment-reject-${am.id}`}
                   >
                     Reject
                   </button>
                   <button
-                    onClick={() => decide(am, "approve")}
-                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-emerald-300 border border-emerald-600/40 hover:bg-emerald-900/30"
+                    onClick={() => onApprove(am)}
+                    disabled={deciding}
+                    className="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-emerald-300 border border-emerald-600/40 hover:bg-emerald-900/30 disabled:opacity-50"
                     data-testid={`amendment-approve-${am.id}`}
                   >
                     Approve
@@ -335,6 +395,84 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
           );
         })}
       </div>
+
+      {rejecting ? (
+        <div
+          className="fixed inset-0 z-[3050] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(3px)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="amendment-reject-title"
+          data-testid="amendment-reject-dialog"
+        >
+          <div
+            className="w-full max-w-md rounded-2xl overflow-hidden"
+            style={{ background: "hsl(22,15%,9%)" }}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[hsl(30,12%,16%)]">
+              <h2
+                id="amendment-reject-title"
+                className="text-base font-bold text-amber-400 uppercase tracking-widest"
+              >
+                Reject Amendment
+              </h2>
+              <button
+                onClick={cancelReject}
+                disabled={deciding}
+                className="text-xs text-stone-500 hover:text-red-400 disabled:opacity-50"
+                data-testid="amendment-reject-cancel"
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="px-4 py-4 space-y-3">
+              <p className="text-xs text-stone-400">
+                Add an optional note explaining why this amendment is being rejected. The
+                author will see this note alongside the decision.
+              </p>
+              <FormField label="Decision reason (optional)">
+                <textarea
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  rows={3}
+                  maxLength={2000}
+                  autoFocus
+                  className="w-full bg-stone-900 border border-stone-700 rounded p-2 text-sm text-stone-200"
+                  data-testid="amendment-reject-reason"
+                />
+              </FormField>
+              {decideError ? (
+                <p
+                  className="text-[11px] text-red-400"
+                  role="alert"
+                  data-testid="amendment-reject-dialog-error"
+                >
+                  {decideError}
+                </p>
+              ) : null}
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={cancelReject}
+                  disabled={deciding}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-300 border border-stone-700 hover:bg-stone-800 disabled:opacity-50"
+                  data-testid="amendment-reject-dialog-cancel"
+                >
+                  Keep Pending
+                </button>
+                <button
+                  onClick={confirmReject}
+                  disabled={deciding}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                  style={{ background: "linear-gradient(135deg, #b91c1c, #ef4444)" }}
+                  data-testid="amendment-reject-confirm"
+                >
+                  {deciding ? "Rejecting…" : "Confirm Reject"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

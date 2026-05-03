@@ -225,13 +225,15 @@ describe("TrailAmendmentsPanel — moderator approve/reject UI", () => {
     expect(onCountsChanged).toHaveBeenCalled();
   });
 
-  it("rejects a pending amendment: status flips to 'rejected', the rejection reason is sent, and buttons disappear", async () => {
+  it("rejects a pending amendment via the in-app dialog: status flips to 'rejected', the rejection reason is sent, and buttons disappear", async () => {
     const TrailAmendmentsPanel = await importPanel();
     const user = userEvent.setup();
     const onCountsChanged = vi.fn();
 
-    // The reject button asks for an optional decision reason via window.prompt.
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("Not enough evidence");
+    // Native prompt() should no longer be used. Fail loudly if it is.
+    const promptSpy = vi.spyOn(window, "prompt").mockImplementation(() => {
+      throw new Error("window.prompt should not be called");
+    });
 
     render(
       <TrailAmendmentsPanel
@@ -247,6 +249,12 @@ describe("TrailAmendmentsPanel — moderator approve/reject UI", () => {
 
     await user.click(within(row).getByTestId(`amendment-reject-${AMENDMENT_ID}`));
 
+    // The in-app rejection dialog opens.
+    const dialog = await screen.findByTestId("amendment-reject-dialog");
+    const reasonInput = within(dialog).getByTestId("amendment-reject-reason");
+    await user.type(reasonInput, "Not enough evidence");
+    await user.click(within(dialog).getByTestId("amendment-reject-confirm"));
+
     await waitFor(() =>
       expect(
         within(screen.getByTestId(`amendment-${AMENDMENT_ID}`)).getByTestId(
@@ -254,6 +262,9 @@ describe("TrailAmendmentsPanel — moderator approve/reject UI", () => {
         ).textContent?.toLowerCase(),
       ).toContain("rejected"),
     );
+
+    // Dialog closes after a successful rejection.
+    expect(screen.queryByTestId("amendment-reject-dialog")).not.toBeInTheDocument();
 
     // Buttons gone now that status is no longer pending.
     expect(
@@ -267,7 +278,7 @@ describe("TrailAmendmentsPanel — moderator approve/reject UI", () => {
       ),
     ).not.toBeInTheDocument();
 
-    // Decision note from the prompt is rendered.
+    // Decision note from the dialog is rendered.
     expect(screen.getByText(/Decision note: Not enough evidence/)).toBeInTheDocument();
 
     expect(backend.decisions).toHaveLength(1);
@@ -278,8 +289,138 @@ describe("TrailAmendmentsPanel — moderator approve/reject UI", () => {
     });
     expect(backend.amendments[0]!.status).toBe("rejected");
     expect(onCountsChanged).toHaveBeenCalled();
+    expect(promptSpy).not.toHaveBeenCalled();
 
     promptSpy.mockRestore();
+  });
+
+  it("shows an inline error inside the reject dialog (not a native alert) when rejection fails, and the dialog stays open", async () => {
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const u = new URL(url, "http://test.local");
+      if (/\/amendments\/[^/]+\/reject$/.test(u.pathname)) {
+        return jsonResponse({ error: "boom" }, { status: 500 });
+      }
+      return handleRequest(url, init);
+    });
+
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {
+      throw new Error("window.alert should not be called");
+    });
+
+    const TrailAmendmentsPanel = await importPanel();
+    const user = userEvent.setup();
+
+    render(
+      <TrailAmendmentsPanel
+        trail={fakeTrail() as never}
+        onCountsChanged={() => {}}
+        canModerate={true}
+      />,
+    );
+
+    const row = await screen.findByTestId(`amendment-${AMENDMENT_ID}`);
+    await user.click(within(row).getByTestId(`amendment-reject-${AMENDMENT_ID}`));
+
+    const dialog = await screen.findByTestId("amendment-reject-dialog");
+    await user.type(within(dialog).getByTestId("amendment-reject-reason"), "Nope");
+    await user.click(within(dialog).getByTestId("amendment-reject-confirm"));
+
+    // Dialog remains open with a visible error inside it.
+    const dialogError = await within(
+      await screen.findByTestId("amendment-reject-dialog"),
+    ).findByTestId("amendment-reject-dialog-error");
+    expect(dialogError.textContent ?? "").toMatch(/could not reject/i);
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    // Amendment is still pending since the request failed.
+    expect(
+      within(screen.getByTestId(`amendment-${AMENDMENT_ID}`)).getByTestId(
+        `amendment-status-${AMENDMENT_ID}`,
+      ).textContent?.toLowerCase(),
+    ).toContain("pending");
+    expect(backend.amendments[0]!.status).toBe("pending");
+
+    alertSpy.mockRestore();
+  });
+
+  it("cancelling the reject dialog leaves the amendment pending and does not call the backend", async () => {
+    const TrailAmendmentsPanel = await importPanel();
+    const user = userEvent.setup();
+
+    render(
+      <TrailAmendmentsPanel
+        trail={fakeTrail() as never}
+        onCountsChanged={() => {}}
+        canModerate={true}
+      />,
+    );
+
+    const row = await screen.findByTestId(`amendment-${AMENDMENT_ID}`);
+    await user.click(within(row).getByTestId(`amendment-reject-${AMENDMENT_ID}`));
+
+    const dialog = await screen.findByTestId("amendment-reject-dialog");
+    await user.click(within(dialog).getByTestId("amendment-reject-dialog-cancel"));
+
+    expect(screen.queryByTestId("amendment-reject-dialog")).not.toBeInTheDocument();
+    expect(backend.decisions).toHaveLength(0);
+    expect(backend.amendments[0]!.status).toBe("pending");
+  });
+
+  it("surfaces an inline error (not a native alert) when a decision request fails", async () => {
+    // Force the decision endpoint to fail.
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const u = new URL(url, "http://test.local");
+      if (/\/amendments\/[^/]+\/(approve|reject)$/.test(u.pathname)) {
+        return jsonResponse({ error: "boom" }, { status: 500 });
+      }
+      return handleRequest(url, init);
+    });
+
+    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {
+      throw new Error("window.alert should not be called");
+    });
+
+    const TrailAmendmentsPanel = await importPanel();
+    const user = userEvent.setup();
+
+    render(
+      <TrailAmendmentsPanel
+        trail={fakeTrail() as never}
+        onCountsChanged={() => {}}
+        canModerate={true}
+      />,
+    );
+
+    const row = await screen.findByTestId(`amendment-${AMENDMENT_ID}`);
+    await user.click(within(row).getByTestId(`amendment-approve-${AMENDMENT_ID}`));
+
+    const banner = await screen.findByTestId("amendment-decide-error");
+    expect(banner.textContent ?? "").toMatch(/could not approve/i);
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    // Sanity: the rejection dialog is not open for an approve failure.
+    expect(screen.queryByTestId("amendment-reject-dialog")).not.toBeInTheDocument();
+
+    // Status is still pending since the request failed.
+    expect(
+      within(screen.getByTestId(`amendment-${AMENDMENT_ID}`)).getByTestId(
+        `amendment-status-${AMENDMENT_ID}`,
+      ).textContent?.toLowerCase(),
+    ).toContain("pending");
+
+    alertSpy.mockRestore();
   });
 
   it("does not show Approve/Reject buttons when canModerate is false", async () => {
