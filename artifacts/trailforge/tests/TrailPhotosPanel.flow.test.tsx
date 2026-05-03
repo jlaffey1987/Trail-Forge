@@ -67,6 +67,8 @@ interface PhotoRow {
 interface FakeBackend {
   photos: PhotoRow[];
   uploads: { url: string; method: string; contentType: string | null; bytes: number }[];
+  finalizePosts: number;
+  uploadUrlPosts: number;
 }
 
 let backend: FakeBackend;
@@ -121,6 +123,7 @@ async function handleRequest(url: string, init?: RequestInit): Promise<Response>
     }
 
     if (sub === "/upload-url" && method === "POST") {
+      backend.uploadUrlPosts += 1;
       const photoId = randomUUID();
       const storageKey = `trails/${trailId}/photos/${photoId}.jpg`;
       return jsonResponse({
@@ -131,6 +134,7 @@ async function handleRequest(url: string, init?: RequestInit): Promise<Response>
     }
 
     if (sub === "" && method === "POST") {
+      backend.finalizePosts += 1;
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       const row: PhotoRow = {
         id: randomUUID(),
@@ -164,7 +168,7 @@ async function handleRequest(url: string, init?: RequestInit): Promise<Response>
 }
 
 beforeEach(() => {
-  backend = { photos: [], uploads: [] };
+  backend = { photos: [], uploads: [], finalizePosts: 0, uploadUrlPosts: 0 };
   fetchSpy = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -247,6 +251,53 @@ describe("TrailPhotosPanel — upload + delete UI journey", () => {
     );
     await waitFor(() => expect(screen.getByText("0 photos")).toBeInTheDocument());
     expect(backend.photos).toHaveLength(0);
+    expect(onCountsChanged).toHaveBeenCalled();
+  });
+
+  it("caps a too-large multi-file selection at MAX_PHOTOS_PER_UPLOAD and surfaces a warning", async () => {
+    const { MAX_PHOTOS_PER_UPLOAD } = await import("@/lib/photoUpload");
+    const TrailPhotosPanel = await importPanel();
+    const user = userEvent.setup();
+    const onCountsChanged = vi.fn();
+
+    render(<TrailPhotosPanel trailId={TRAIL_ID} onCountsChanged={onCountsChanged} />);
+
+    await waitFor(() => expect(screen.getByText("0 photos")).toBeInTheDocument());
+
+    const fileInput = screen.getByTestId("photo-file-input") as HTMLInputElement;
+    const overage = 2;
+    const files = Array.from({ length: MAX_PHOTOS_PER_UPLOAD + overage }, (_, i) =>
+      new File([new Uint8Array([1, 2, 3, 4])], `ride-${i}.jpg`, { type: "image/jpeg" }),
+    );
+    await user.upload(fileInput, files);
+
+    await waitFor(() =>
+      expect(backend.photos).toHaveLength(MAX_PHOTOS_PER_UPLOAD),
+    );
+
+    // Exactly N PUTs to the bucket fired (one per accepted file), and
+    // exactly N finalize POSTs + N upload-url POSTs landed on the API.
+    expect(backend.uploads).toHaveLength(MAX_PHOTOS_PER_UPLOAD);
+    expect(backend.uploads.every((u) => u.method === "PUT")).toBe(true);
+    expect(backend.finalizePosts).toBe(MAX_PHOTOS_PER_UPLOAD);
+    expect(backend.uploadUrlPosts).toBe(MAX_PHOTOS_PER_UPLOAD);
+
+    // The warning text is shown verbatim.
+    const status = await screen.findByTestId("photo-upload-status");
+    expect(status.textContent).toBe(
+      `Max ${MAX_PHOTOS_PER_UPLOAD} photos per upload — only the first ${MAX_PHOTOS_PER_UPLOAD} were taken`,
+    );
+
+    // Exactly N thumbnails render.
+    await waitFor(() =>
+      expect(
+        screen.getByText(`${MAX_PHOTOS_PER_UPLOAD} photos`),
+      ).toBeInTheDocument(),
+    );
+    const thumbs = screen
+      .getByTestId("trail-photos-panel")
+      .querySelectorAll('[data-testid^="photo-"]:not([data-testid^="photo-delete-"]):not([data-testid="photo-file-input"]):not([data-testid="photo-upload-btn"]):not([data-testid="photo-upload-status"])');
+    expect(thumbs.length).toBe(MAX_PHOTOS_PER_UPLOAD);
     expect(onCountsChanged).toHaveBeenCalled();
   });
 });
