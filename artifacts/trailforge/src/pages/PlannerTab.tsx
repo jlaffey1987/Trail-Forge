@@ -1239,8 +1239,11 @@ export default function PlannerTab() {
         )}
       </div>
 
-      {/* Route Bar — sticky above bottom nav */}
-      {routeTrails.length > 0 && (
+      {/* Route Bar — sticky above bottom nav. We open the bar (and the
+          "My Route" entry point) for any non-empty route, including
+          waypoint-only routes, so riders can manage custom stops they
+          dropped on the map even before adding a trail. */}
+      {routeEntries.length > 0 && (
         <div
           className="absolute bottom-0 left-0 right-0 z-10 px-3 pb-3 pt-3"
           style={{ background: "linear-gradient(to top, hsl(22,15%,7%) 75%, transparent)" }}
@@ -1283,11 +1286,28 @@ export default function PlannerTab() {
             </div>
             <div className="flex-1 min-w-0">
               <div className="text-[11px] font-black text-amber-400 uppercase tracking-wider">
-                {routeTrails.length} Trail{routeTrails.length !== 1 ? "s" : ""} · {totalRouteKm.toFixed(1)} km off-road
+                {routeTrails.length > 0 ? (
+                  <>
+                    {routeTrails.length} Trail{routeTrails.length !== 1 ? "s" : ""} · {totalRouteKm.toFixed(1)} km off-road
+                  </>
+                ) : (
+                  <>
+                    {routeWaypoints.length} Stop{routeWaypoints.length !== 1 ? "s" : ""} · Add a trail to plan
+                  </>
+                )}
               </div>
               <div className="text-[10px] text-stone-400 mt-0.5 truncate">
-                {routeTrails.map((t) => t.name).slice(0, 2).join(" → ")}
-                {routeTrails.length > 2 ? ` → +${routeTrails.length - 2} more` : ""}
+                {routeTrails.length > 0 ? (
+                  <>
+                    {routeTrails.map((t) => t.name).slice(0, 2).join(" → ")}
+                    {routeTrails.length > 2 ? ` → +${routeTrails.length - 2} more` : ""}
+                  </>
+                ) : (
+                  <>
+                    {routeWaypoints.map((w) => w.name).slice(0, 2).join(" → ")}
+                    {routeWaypoints.length > 2 ? ` → +${routeWaypoints.length - 2} more` : ""}
+                  </>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
@@ -1304,13 +1324,23 @@ export default function PlannerTab() {
                 type="button"
                 onClick={() => {
                   if (planningTrip) return;
-                  if (routeTrails.length > 1 && !window.confirm(`Clear all ${routeTrails.length} trails from your route?`)) return;
+                  // Clear both trails and waypoints — the bar shows
+                  // entry-level state, so the X must wipe both kinds.
+                  if (
+                    routeEntries.length > 1 &&
+                    !window.confirm(
+                      `Clear all ${routeEntries.length} stops from your route?`,
+                    )
+                  ) {
+                    return;
+                  }
                   setRouteTrails([]);
+                  setRouteEntries([]);
                   setPlanError(null);
                 }}
                 disabled={planningTrip}
-                aria-label="Clear all trails from route"
-                title="Clear all trails"
+                aria-label="Clear all stops from route"
+                title="Clear all stops"
                 className="ml-1 w-7 h-7 rounded-md flex items-center justify-center border border-stone-700 bg-stone-900/60 text-stone-400 hover:border-red-500/60 hover:text-red-400 hover:bg-red-900/20 transition-all disabled:opacity-50"
               >
                 <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1340,7 +1370,8 @@ export default function PlannerTab() {
             </button>
             <button
               onClick={handlePlanTrip}
-              disabled={planningTrip}
+              disabled={planningTrip || routeTrails.length === 0}
+              title={routeTrails.length === 0 ? "Add a trail to plan a navigable trip" : undefined}
               className="py-2.5 rounded-lg text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 text-stone-900 disabled:opacity-50 shadow-lg shadow-amber-900/30"
               style={{ background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" }}
             >
