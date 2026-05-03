@@ -12,6 +12,7 @@ import {
   HYBRID_LABEL_TILE_ATTRIBUTION,
 } from "@/lib/routing";
 import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
+import type { Trail } from "@/lib/supabase";
 
 // Find nearest section to a user position; returns { section, distanceM }
 function findNearestSection(route: AssembledRoute, user: GeoPoint): { section: RouteSection; distanceM: number } | null {
@@ -64,6 +65,13 @@ export type RemoveTrailSectionResult =
   | { ok: true }
   | { ok: false; error: string };
 
+/** Result returned by the swap callback the parent supplies. Same
+ * contract as the removal callback — `ok:false` means the previous
+ * route stays on screen and the planner's selection is unchanged. */
+export type SwapTrailSectionResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 interface Props {
   route: AssembledRoute;
   onClose: () => void;
@@ -83,9 +91,35 @@ interface Props {
     trailId: string,
     onProgress: (step: number, total: number, label: string) => void,
   ) => Promise<RemoveTrailSectionResult>;
+  /**
+   * Find candidate trails the rider could swap the given trail for —
+   * typically nearby, similar-difficulty trails the rider hasn't already
+   * added to the route. Called when the rider opens the swap picker.
+   * Returning `[]` means "no alternates found" — the picker shows an
+   * empty-state. The picker shows a loading spinner while the promise
+   * is in flight.
+   */
+  onFetchSwapAlternates?: (trailId: string) => Promise<Trail[]>;
+  /**
+   * Substitute the given trail with the chosen alternate and rebuild
+   * the assembled route in place. Same success/failure contract as
+   * `onRemoveTrailSection` — on `ok:false` the previous route stays
+   * on screen and the planner selection is untouched.
+   */
+  onSwapTrailSection?: (
+    oldTrailId: string,
+    newTrail: Trail,
+    onProgress: (step: number, total: number, label: string) => void,
+  ) => Promise<SwapTrailSectionResult>;
 }
 
-export default function NavigationView({ route, onClose, onRemoveTrailSection }: Props) {
+export default function NavigationView({
+  route,
+  onClose,
+  onRemoveTrailSection,
+  onFetchSwapAlternates,
+  onSwapTrailSection,
+}: Props) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const sectionLayersRef = useRef<Map<number, import("leaflet").Polyline | import("leaflet").Marker>>(new Map());
@@ -115,6 +149,24 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
     wasRiding: boolean;
   } | null>(null);
   const [removalError, setRemovalError] = useState<string | null>(null);
+
+  // Swap flow state. The picker fetches asynchronously, so
+  // `swapAlternates === null` means "loading"; `[]` means "loaded but
+  // no candidates". `swapping` mirrors the `removing` shape so the
+  // overlay's spinner UI is symmetric between the two flows.
+  const [swapPickerFor, setSwapPickerFor] = useState<{
+    trailId: string;
+    trailName: string;
+  } | null>(null);
+  const [swapAlternates, setSwapAlternates] = useState<Trail[] | null>(null);
+  const [swapping, setSwapping] = useState<{
+    trailId: string;
+    trailName: string;
+    newTrailName: string;
+    progress: { pct: number; label: string };
+    wasRiding: boolean;
+  } | null>(null);
+  const [swapError, setSwapError] = useState<string | null>(null);
 
   // Computed nav state from current user position
   const nearestInfo = userPos ? findNearestSection(route, userPos) : null;
@@ -431,7 +483,7 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
   // dismissible error banner explains why so the rider can retry.
   const handleConfirmRemove = async (trailId: string, trailName: string) => {
     if (!onRemoveTrailSection) return;
-    if (removing) return;
+    if (removing || swapping) return;
     setPendingRemoval(null);
     setRemovalError(null);
     const wasRiding = riding;
@@ -468,6 +520,90 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
         err instanceof Error
           ? err.message
           : "Something went wrong while re-routing. Please try again.",
+      );
+      if (wasRiding) setRiding(true);
+    }
+  };
+
+  // Open the alternates picker for the given trail and start fetching
+  // candidates. We snapshot the trail name so the picker header reads
+  // "Swap <name>" even after the picker is dismissed mid-fetch.
+  const handleOpenSwapPicker = async (trailId: string, trailName: string) => {
+    if (!onFetchSwapAlternates) return;
+    if (removing || swapping) return;
+    setSwapError(null);
+    setSwapPickerFor({ trailId, trailName });
+    setSwapAlternates(null);
+    try {
+      const alts = await onFetchSwapAlternates(trailId);
+      // Drop stale results if the rider closed the picker (or opened a
+      // different one) while this fetch was in flight.
+      setSwapPickerFor((current) => {
+        if (current?.trailId !== trailId) return current;
+        setSwapAlternates(alts);
+        return current;
+      });
+    } catch {
+      setSwapPickerFor((current) => {
+        if (current?.trailId !== trailId) return current;
+        setSwapAlternates([]);
+        setSwapError("Couldn't load nearby trails. Check your connection.");
+        return current;
+      });
+    }
+  };
+
+  // Substitute the active trail with the picked alternate. Same
+  // GPS-pause / restore-on-failure contract as removal.
+  const handleConfirmSwap = async (
+    oldTrailId: string,
+    oldTrailName: string,
+    newTrail: Trail,
+  ) => {
+    if (!onSwapTrailSection) return;
+    if (removing || swapping) return;
+    setSwapPickerFor(null);
+    setSwapAlternates(null);
+    setSwapError(null);
+    const wasRiding = riding;
+    if (wasRiding) setRiding(false);
+    setSwapping({
+      trailId: oldTrailId,
+      trailName: oldTrailName,
+      newTrailName: newTrail.name,
+      progress: { pct: 0, label: `Routing via ${newTrail.name}…` },
+      wasRiding,
+    });
+    try {
+      const result = await onSwapTrailSection(
+        oldTrailId,
+        newTrail,
+        (step, total, label) => {
+          const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+          setSwapping((prev) =>
+            prev && prev.trailId === oldTrailId
+              ? { ...prev, progress: { pct, label } }
+              : prev,
+          );
+        },
+      );
+      setSwapping(null);
+      if (result.ok) {
+        // The active section index belonged to the OLD trail and is
+        // gone now — drop the overlay and let the rider tap the new
+        // trail on the map if they want to inspect it.
+        setActiveSection(null);
+        if (wasRiding) setRiding(true);
+      } else {
+        setSwapError(result.error);
+        if (wasRiding) setRiding(true);
+      }
+    } catch (err) {
+      setSwapping(null);
+      setSwapError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while swapping. Please try again.",
       );
       if (wasRiding) setRiding(true);
     }
@@ -759,9 +895,18 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
           const isTrailSec = sec.kind === "trail";
           const trailId = isTrailSec ? sec.trail.id : null;
           const trailName = isTrailSec ? sec.trail.name : "";
-          const canRemove = isTrailSec && !!onRemoveTrailSection && !removing;
+          const canRemove =
+            isTrailSec && !!onRemoveTrailSection && !removing && !swapping;
+          const canSwap =
+            isTrailSec &&
+            !!onFetchSwapAlternates &&
+            !!onSwapTrailSection &&
+            !removing &&
+            !swapping &&
+            !swapPickerFor;
           const isPendingThis = isTrailSec && pendingRemoval?.trailId === trailId;
           const isRemovingThis = isTrailSec && removing?.trailId === trailId;
+          const isSwappingThis = isTrailSec && swapping?.trailId === trailId;
           return (
             <div className="absolute top-2 left-2 right-2 z-[500]">
               <div
@@ -788,25 +933,73 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
                   >×</button>
                 </div>
 
-                {/* Trail-only: Remove from trip + inline confirm + progress */}
-                {isTrailSec && canRemove && !isPendingThis && !isRemovingThis && (
-                  <div className="px-2 pb-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPendingRemoval({ trailId: trailId!, trailName })
-                      }
-                      data-testid="nav-remove-trail-button"
-                      className="w-full py-1.5 rounded-md bg-stone-900/45 hover:bg-stone-900/65 border border-white/30 text-[11px] font-bold uppercase tracking-wider text-white flex items-center justify-center gap-1.5 transition-colors"
-                    >
-                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6"/>
-                        <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5 6"/>
-                        <path d="M10 11v6M14 11v6"/>
-                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                      </svg>
-                      Remove from trip
-                    </button>
+                {/* Trail-only: Swap + Remove buttons (paired), inline
+                    confirm + progress. Hidden once a swap or remove is
+                    in flight so the rider can't fire the other action
+                    mid-recompute. */}
+                {isTrailSec &&
+                  !isPendingThis &&
+                  !isRemovingThis &&
+                  !isSwappingThis &&
+                  (canRemove || canSwap) && (
+                    <div className="px-2 pb-2 flex gap-1.5">
+                      {canSwap && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleOpenSwapPicker(trailId!, trailName)
+                          }
+                          data-testid="nav-swap-trail-button"
+                          className="flex-1 py-1.5 rounded-md bg-stone-900/45 hover:bg-stone-900/65 border border-white/30 text-[11px] font-bold uppercase tracking-wider text-white flex items-center justify-center gap-1.5 transition-colors"
+                        >
+                          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="17 1 21 5 17 9"/>
+                            <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+                            <polyline points="7 23 3 19 7 15"/>
+                            <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+                          </svg>
+                          Swap trail
+                        </button>
+                      )}
+                      {canRemove && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPendingRemoval({ trailId: trailId!, trailName })
+                          }
+                          data-testid="nav-remove-trail-button"
+                          className="flex-1 py-1.5 rounded-md bg-stone-900/45 hover:bg-stone-900/65 border border-white/30 text-[11px] font-bold uppercase tracking-wider text-white flex items-center justify-center gap-1.5 transition-colors"
+                        >
+                          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5 6"/>
+                            <path d="M10 11v6M14 11v6"/>
+                            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                          </svg>
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  )}
+                {/* Swap-in-progress strip — mirrors the removal strip
+                    so the two flows feel symmetric to the rider. */}
+                {isSwappingThis && (
+                  <div
+                    className="px-2 pb-2"
+                    data-testid="nav-swap-trail-progress"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                      <span className="text-[11px] font-bold truncate">
+                        {swapping!.progress.label}
+                      </span>
+                    </div>
+                    <div className="h-1 bg-black/30 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-white/85 transition-all duration-300"
+                        style={{ width: `${swapping!.progress.pct}%` }}
+                      ></div>
+                    </div>
                   </div>
                 )}
                 {isTrailSec && isPendingThis && !isRemovingThis && (
@@ -859,6 +1052,123 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
           );
         })()}
 
+        {/* Swap-trail alternates picker — full-width sheet near the
+            top so it doesn't fight the bottom Sections/Turns panel.
+            Shown only after the rider taps Swap; clicking outside or
+            Cancel closes it without affecting the route. */}
+        {swapPickerFor && (
+          <div
+            className="absolute top-2 left-2 right-2 z-[600]"
+            data-testid="nav-swap-trail-picker"
+          >
+            <div className="rounded-lg bg-[hsl(22,15%,11%)]/97 backdrop-blur shadow-xl border border-amber-500/40 overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 border-b border-[hsl(30,12%,20%)]">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-wider text-amber-400 font-bold">
+                    Swap trail
+                  </div>
+                  <div
+                    className="text-xs text-stone-300 truncate"
+                    title={swapPickerFor.trailName}
+                  >
+                    Replace {swapPickerFor.trailName}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSwapPickerFor(null);
+                    setSwapAlternates(null);
+                  }}
+                  data-testid="nav-swap-trail-cancel"
+                  aria-label="Cancel swap"
+                  className="text-stone-400 hover:text-stone-200 text-lg leading-none px-1"
+                >×</button>
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {swapAlternates === null && (
+                  <div
+                    className="flex items-center justify-center gap-2 py-6"
+                    data-testid="nav-swap-trail-loading"
+                  >
+                    <span className="w-3.5 h-3.5 border-2 border-stone-600 border-t-amber-400 rounded-full animate-spin"></span>
+                    <span className="text-[11px] text-stone-400">
+                      Finding nearby trails…
+                    </span>
+                  </div>
+                )}
+                {swapAlternates !== null && swapAlternates.length === 0 && (
+                  <div
+                    className="px-3 py-5 text-center text-[11px] text-stone-500"
+                    data-testid="nav-swap-trail-empty"
+                  >
+                    No nearby trails of similar difficulty were found. Try
+                    Remove from trip instead.
+                  </div>
+                )}
+                {swapAlternates !== null && swapAlternates.length > 0 && (
+                  <ul className="divide-y divide-[hsl(30,12%,18%)]">
+                    {swapAlternates.map((alt) => (
+                      <li key={alt.id}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleConfirmSwap(
+                              swapPickerFor.trailId,
+                              swapPickerFor.trailName,
+                              alt,
+                            )
+                          }
+                          data-testid={`nav-swap-trail-pick-${alt.id}`}
+                          className="w-full text-left px-3 py-2 hover:bg-amber-500/10 transition-colors flex items-center gap-2"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-bold text-stone-100 truncate">
+                              {alt.name}
+                            </div>
+                            <div className="text-[10px] text-stone-500 mt-0.5">
+                              {alt.distance_km != null
+                                ? `${alt.distance_km.toFixed(1)} km`
+                                : "—"}
+                              {alt.difficulty != null
+                                ? ` · Difficulty ${alt.difficulty}`
+                                : ""}
+                              {alt.legal_status ? ` · ${alt.legal_status}` : ""}
+                            </div>
+                          </div>
+                          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-amber-400 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <polyline points="9 18 15 12 9 6"/>
+                          </svg>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Swap error banner — sibling to the removal banner. */}
+        {swapError && (
+          <div
+            className="absolute bottom-2 left-2 right-2 z-[500]"
+            data-testid="nav-swap-trail-error"
+          >
+            <div className="rounded-lg bg-red-900/90 border border-red-500/60 backdrop-blur shadow-lg px-3 py-2 flex items-start gap-2">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-300 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <p className="flex-1 text-[11px] text-red-100 leading-tight">{swapError}</p>
+              <button
+                onClick={() => setSwapError(null)}
+                aria-label="Dismiss error"
+                className="text-red-300 hover:text-white text-base leading-none -mt-0.5"
+              >×</button>
+            </div>
+          </div>
+        )}
+
         {/* Removal error banner — sits over the map so it's visible
             no matter which tab is active in the bottom panel. */}
         {removalError && (
@@ -908,10 +1218,10 @@ export default function NavigationView({ route, onClose, onRemoveTrailSection }:
             route={route}
             activeSection={activeSection}
             onSelect={setActiveSection}
-            canRemoveTrails={!!onRemoveTrailSection && !removing}
+            canRemoveTrails={!!onRemoveTrailSection && !removing && !swapping}
             removingTrailId={removing?.trailId ?? null}
             onRequestRemoveTrail={(trailId, trailName) => {
-              if (removing) return;
+              if (removing || swapping) return;
               // Open the section in the overlay so the rider sees the
               // confirm prompt in the same place whether they tapped
               // the row's remove button or the polyline.

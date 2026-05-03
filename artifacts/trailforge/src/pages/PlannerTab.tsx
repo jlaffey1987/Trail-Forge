@@ -27,7 +27,11 @@ import {
   useActiveLoadedRoute,
   setActiveLoadedRoute,
 } from "@/lib/plannerRouteStore";
-import type { RemoveTrailSectionResult } from "@/components/NavigationView";
+import type {
+  RemoveTrailSectionResult,
+  SwapTrailSectionResult,
+} from "@/components/NavigationView";
+import { fetchTrailsInBbox } from "@/lib/supabase";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import { distancePointToPolylineM } from "@/lib/poi";
@@ -365,6 +369,154 @@ export default function PlannerTab() {
         }
         // Commit the removal: setRouteEntries keeps surviving waypoints
         // in their existing positions relative to the remaining trails.
+        setRouteEntries(newEntries);
+        setAssembledRoute(newRoute);
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while re-routing. Please try again.",
+        };
+      }
+    },
+    [assembledRoute, routeTrails, routeEntries],
+  );
+
+  // Find candidate trails the rider could substitute the given trail
+  // for. We expand the trail's bbox by ~0.4° (≈ 40 km) so we surface
+  // genuinely nearby alternates, filter to ±1 difficulty so we don't
+  // suggest a green lane when the rider planned a black, drop the
+  // current trail and any other trails already in the route, and cap
+  // the list at 8 so the picker stays scannable on a small screen.
+  const handleFetchSwapAlternates = useCallback(
+    async (trailId: string): Promise<Trail[]> => {
+      const target = routeTrails.find((t) => t.id === trailId);
+      if (!target) return [];
+      // Centre the search bbox on the target trail. Fall back to its
+      // first/last polyline points if the bbox columns are missing for
+      // very old rows. If even that's unavailable we have nothing to
+      // search around — return [] rather than fetching the entire DB.
+      let centerLat: number | null = null;
+      let centerLng: number | null = null;
+      if (
+        target.bbox_min_lat != null &&
+        target.bbox_max_lat != null &&
+        target.bbox_min_lng != null &&
+        target.bbox_max_lng != null
+      ) {
+        centerLat = (target.bbox_min_lat + target.bbox_max_lat) / 2;
+        centerLng = (target.bbox_min_lng + target.bbox_max_lng) / 2;
+      }
+      if (centerLat == null || centerLng == null) {
+        // The assembled route's matching trail section carries a fully
+        // hydrated polyline — use its midpoint as a fallback anchor.
+        const sec = assembledRoute?.sections.find(
+          (s) => s.kind === "trail" && s.trail.id === trailId,
+        );
+        if (sec && sec.kind === "trail" && sec.polyline.length > 0) {
+          const mid = sec.polyline[Math.floor(sec.polyline.length / 2)];
+          centerLat = mid.lat;
+          centerLng = mid.lng;
+        }
+      }
+      if (centerLat == null || centerLng == null) return [];
+
+      const radiusDeg = 0.4;
+      const bbox = {
+        minLat: centerLat - radiusDeg,
+        maxLat: centerLat + radiusDeg,
+        minLng: centerLng - radiusDeg,
+        maxLng: centerLng + radiusDeg,
+      };
+      // Planner difficulty is a 1..10 scale (see Trail.difficulty in
+      // supabase.ts and the difficulty filter chips in MapTab). Clamp
+      // to that range so we don't accidentally drop legitimate
+      // candidates when the rider's trail is rated 6+.
+      const difficulties =
+        target.difficulty != null
+          ? [target.difficulty - 1, target.difficulty, target.difficulty + 1]
+              .filter((d) => d >= 1 && d <= 10)
+          : undefined;
+
+      const { trails } = await fetchTrailsInBbox(bbox, {
+        difficulties,
+        limit: 60,
+      });
+
+      const alreadyInRoute = new Set(routeTrails.map((t) => t.id));
+      // Sort by approximate distance from the source trail's centre so
+      // the closest alternates float to the top of the picker.
+      const scored = trails
+        .filter((t) => !alreadyInRoute.has(t.id))
+        .map((t) => {
+          const lat =
+            t.bbox_min_lat != null && t.bbox_max_lat != null
+              ? (t.bbox_min_lat + t.bbox_max_lat) / 2
+              : centerLat!;
+          const lng =
+            t.bbox_min_lng != null && t.bbox_max_lng != null
+              ? (t.bbox_min_lng + t.bbox_max_lng) / 2
+              : centerLng!;
+          const dLat = lat - centerLat!;
+          const dLng = lng - centerLng!;
+          return { trail: t, distSq: dLat * dLat + dLng * dLng };
+        })
+        .sort((a, b) => a.distSq - b.distSq)
+        .slice(0, 8)
+        .map((s) => s.trail);
+
+      return scored;
+    },
+    [routeTrails, assembledRoute],
+  );
+
+  // Substitute a trail in the route with the chosen alternate and
+  // rebuild the assembled route in place. Mirrors handleRemoveTrailSection's
+  // "recompute first, commit on success" contract — a re-routing failure
+  // leaves the rider with their original route on screen and the original
+  // trail still in the planner.
+  const handleSwapTrailSection = useCallback(
+    async (
+      oldTrailId: string,
+      newTrail: Trail,
+      onProgress: (step: number, total: number, label: string) => void,
+    ): Promise<SwapTrailSectionResult> => {
+      if (!assembledRoute) {
+        return { ok: false, error: "No active route to update." };
+      }
+      if (!routeTrails.some((t) => t.id === oldTrailId)) {
+        return { ok: false, error: "That trail is no longer in your route." };
+      }
+      if (routeTrails.some((t) => t.id === newTrail.id)) {
+        return {
+          ok: false,
+          error: "That trail is already in your route — pick a different one.",
+        };
+      }
+      // Build the new entry list by substituting the trail in place,
+      // keeping every surviving waypoint exactly where it was so a
+      // fuel stop tucked between trails 2 and 3 doesn't get reshuffled.
+      const newEntries = routeEntries.map((e) =>
+        e.kind === "trail" && e.trail.id === oldTrailId
+          ? { kind: "trail" as const, trail: newTrail }
+          : e.kind === "trail"
+            ? { kind: "trail" as const, trail: e.trail }
+            : { kind: "waypoint" as const, waypoint: e.waypoint },
+      );
+      try {
+        const newRoute = await assembleMultiModalRoute(
+          assembledRoute.start,
+          assembledRoute.end,
+          newEntries,
+          onProgress,
+        );
+        if (newRoute.sections.length === 0) {
+          return {
+            ok: false,
+            error:
+              "Couldn't build a route through that trail. Pick a different one.",
+          };
+        }
         setRouteEntries(newEntries);
         setAssembledRoute(newRoute);
         return { ok: true };
@@ -1183,6 +1335,8 @@ export default function PlannerTab() {
           route={assembledRoute}
           onClose={() => setShowNav(false)}
           onRemoveTrailSection={handleRemoveTrailSection}
+          onFetchSwapAlternates={handleFetchSwapAlternates}
+          onSwapTrailSection={handleSwapTrailSection}
         />
       )}
 
