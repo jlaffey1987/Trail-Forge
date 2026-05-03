@@ -29,6 +29,7 @@ import {
 } from "@/lib/plannerRouteStore";
 import type { RemoveTrailSectionResult } from "@/components/NavigationView";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
+import LoadingBackdrop from "@/components/LoadingBackdrop";
 import { distancePointToPolylineM } from "@/lib/poi";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
@@ -800,6 +801,20 @@ export default function PlannerTab() {
             ) : "Find Trails"}
           </button>
         </div>
+
+        {/* In-flight search backdrop — shows beneath the controls so the page
+            doesn't feel empty while results are streaming back. */}
+        {searching && results.length === 0 && (
+          <div className="px-4 pb-4">
+            <div className="min-h-[220px] rounded-xl overflow-hidden">
+              <LoadingBackdrop
+                variant="ride"
+                label="Searching Supabase…"
+                testId="planner-loading-backdrop"
+              />
+            </div>
+          </div>
+        )}
 
         {/* Trail Discovery Map — shown once we have search results OR a geocoded address */}
         {(results.length > 0 || startPin || endPin) && (

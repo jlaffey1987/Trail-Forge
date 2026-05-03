@@ -28,6 +28,7 @@ import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import EditTrailDialog from "@/components/contribute/EditTrailDialog";
 import GroupsSection from "@/components/groups/GroupsSection";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
+import LoadingBackdrop from "@/components/LoadingBackdrop";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -668,9 +669,12 @@ export default function MyTrailsTab() {
           )}
         </div>
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-10">
-            <div className="w-8 h-8 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin mb-3"></div>
-            <p className="text-xs text-stone-400">Loading from Supabase…</p>
+          <div className="min-h-[220px] rounded-xl overflow-hidden">
+            <LoadingBackdrop
+              variant="ride2"
+              label="Loading from Supabase…"
+              testId="my-trails-loading-backdrop"
+            />
           </div>
         ) : savedTrails.length === 0 ? (
           <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-4 text-center">
