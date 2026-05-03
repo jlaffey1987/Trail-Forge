@@ -199,38 +199,51 @@ export default function DiscoverTab() {
         </p>
       </div>
 
-      {/* Search Bar */}
-      <div className="px-4 mb-3">
-        <div className="relative">
-          <svg viewBox="0 0 24 24" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.35-4.35" />
-          </svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search community trails..."
-            className="w-full bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg pl-9 pr-4 py-2.5 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:border-amber-500/60 transition-colors"
-          />
+      {/* Search Bar + Filter Chips — pinned to the top of the scroll area
+          so the ribbon stays visible (and tappable) once the trail feed
+          loads and the page becomes scrollable. Without this, the chips
+          scroll out of view almost immediately on small phones, which
+          looked like a "ribbon disappears" bug. */}
+      <div
+        className="sticky top-0 z-20 bg-[hsl(22,15%,8%)]/95 backdrop-blur supports-[backdrop-filter]:bg-[hsl(22,15%,8%)]/80 pt-1 pb-2 mb-1"
+        data-testid="discover-sticky-controls"
+      >
+        <div className="px-4 mb-2">
+          <div className="relative">
+            <svg viewBox="0 0 24 24" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search community trails..."
+              className="w-full bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-lg pl-9 pr-4 py-2.5 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:border-amber-500/60 transition-colors"
+            />
+          </div>
         </div>
-      </div>
 
-      {/* Filter Chips */}
-      <div className="px-4 mb-3 flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
-        {FILTERS.map((f) => (
-          <button
-            key={f}
-            onClick={() => setActiveFilter(f)}
-            className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
-              activeFilter === f
-                ? "bg-amber-500 text-stone-900"
-                : "bg-[hsl(22,15%,14%)] text-stone-400 border border-[hsl(30,12%,20%)]"
-            }`}
-          >
-            {f}
-          </button>
-        ))}
+        <div
+          className="px-4 flex gap-2 overflow-x-auto pb-1"
+          style={{ scrollbarWidth: "none" }}
+          data-testid="discover-filter-ribbon"
+        >
+          {FILTERS.map((f) => (
+            <button
+              key={f}
+              onClick={() => setActiveFilter(f)}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                activeFilter === f
+                  ? "bg-amber-500 text-stone-900"
+                  : "bg-[hsl(22,15%,14%)] text-stone-400 border border-[hsl(30,12%,20%)]"
+              }`}
+              data-testid={`discover-filter-${f.replace(/\s+/g, "-").toLowerCase()}`}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Discoverable groups — show signed-in users any group they could ask

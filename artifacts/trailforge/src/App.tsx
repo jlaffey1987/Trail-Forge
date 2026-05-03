@@ -242,7 +242,7 @@ function MainShell() {
   return (
     <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
       <header
-        className="tf-header shrink-0 flex items-center justify-between px-4 py-3.5 border-b border-[hsl(30,12%,14%)]"
+        className="tf-header safe-top shrink-0 flex items-center justify-between px-4 pb-3.5 border-b border-[hsl(30,12%,14%)]"
       >
         <div className="flex items-center">
           <img

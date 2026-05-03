@@ -128,6 +128,14 @@
   .safe-bottom {
     padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
+  /* Push the header content below the device status bar / camera notch
+     when the app runs as an installed PWA. Tailwind's `py-3.5` only
+     gives us 14px top padding which the system bar would happily sit
+     on top of, so we top up with the safe-area inset and drop the
+     Tailwind top-pad. */
+  .safe-top {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 0.875rem);
+  }
 }
 
 /* Waypoint marker pulse */

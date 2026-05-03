@@ -609,35 +609,10 @@ export default function PlannerTab() {
               boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
             }}
           >
-            <AddressAutocomplete
-              ref={startInputRef}
-              value={startLocation}
-              onChange={(v) => {
-                setStartLocation(v);
-                setPlanError(null);
-                // The user is now typing a fresh start address — drop any
-                // stale "couldn't get location" notice.
-                if (locateError) setLocateError(null);
-              }}
-              onSelect={(s, pt) => {
-                setGeocodedStart({ q: s.label.trim(), pt });
-                setStartLocation(s.label);
-                // Bump the per-field sequence so a stale blur-fired
-                // geocode can't overwrite this confirmed pick.
-                startSeqRef.current++;
-                setPlanError(null);
-                if (locateError) setLocateError(null);
-              }}
-              placeholder="Start address (UK or Ireland — e.g. Stranraer, Galway)"
-              dotColor="#22c55e"
-              highlight={highlightInputs}
-              confirmed={
-                !!geocodedStart && geocodedStart.q === startLocation.trim()
-              }
-              data-testid="planner-start-address"
-            />
             {/* "Use my current location" — fast path to set Start without
-                typing. Falls back to coordinates if reverse geocode fails. */}
+                typing. Lives ABOVE the start/end inputs so the stack reads
+                top-to-bottom: shortcut → Start → End. Falls back to bare
+                coordinates if reverse geocode fails. */}
             <button
               type="button"
               onClick={useCurrentLocationAsStart}
@@ -671,6 +646,33 @@ export default function PlannerTab() {
                 {locateError}
               </p>
             )}
+            <AddressAutocomplete
+              ref={startInputRef}
+              value={startLocation}
+              onChange={(v) => {
+                setStartLocation(v);
+                setPlanError(null);
+                // The user is now typing a fresh start address — drop any
+                // stale "couldn't get location" notice.
+                if (locateError) setLocateError(null);
+              }}
+              onSelect={(s, pt) => {
+                setGeocodedStart({ q: s.label.trim(), pt });
+                setStartLocation(s.label);
+                // Bump the per-field sequence so a stale blur-fired
+                // geocode can't overwrite this confirmed pick.
+                startSeqRef.current++;
+                setPlanError(null);
+                if (locateError) setLocateError(null);
+              }}
+              placeholder="Start address (UK or Ireland — e.g. Stranraer, Galway)"
+              dotColor="#22c55e"
+              highlight={highlightInputs}
+              confirmed={
+                !!geocodedStart && geocodedStart.q === startLocation.trim()
+              }
+              data-testid="planner-start-address"
+            />
             <AddressAutocomplete
               value={endLocation}
               onChange={(v) => {
