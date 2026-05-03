@@ -68,6 +68,15 @@ interface Props {
    * enable the up/down reorder buttons on waypoint rows.
    */
   onReorderEntries?: (entries: RouteEntry[]) => void;
+  /**
+   * Persist the current route under a name. Receives the name and the
+   * caller is expected to do the API write + refresh. Optional — when
+   * omitted (e.g. signed-out caller) the Save button is hidden so we
+   * don't tease a feature the user can't use without an account.
+   * Returns "saved" / "limit" / "error" so the builder can surface
+   * the right toast without owning the API call itself.
+   */
+  onSaveRoute?: (name: string) => Promise<"saved" | "limit" | "error">;
 }
 
 export default function RouteBuilder({
@@ -79,10 +88,18 @@ export default function RouteBuilder({
   onRemoveWaypoint,
   entries,
   onReorderEntries,
+  onSaveRoute,
 }: Props) {
   const [downloading, setDownloading] = useState(false);
   const [gpxReady, setGpxReady] = useState(false);
   const [transitDistances, setTransitDistances] = useState<number[]>([]);
+  // Save-route dialog state. Kept local so the parent doesn't need to
+  // own a modal — the builder is already a full-screen sheet.
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [savingRoute, setSavingRoute] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
   // The Map tab no longer ships `gpx_data` with bbox responses, so trails
   // added to the planner from the map arrive without it. We hydrate the
   // missing GPX here on demand so the combined GPX export and the per-trail
@@ -191,6 +208,53 @@ export default function RouteBuilder({
   };
 
   const routeFilename = selectedTrails.map((t) => t.name.split(" ")[0]).join("-");
+
+  // Auto-suggest a name from the first/last trail so the rider rarely
+  // has to type — they can always override.
+  const suggestedName = (() => {
+    if (selectedTrails.length === 0) return "";
+    if (selectedTrails.length === 1) return selectedTrails[0].name;
+    const first = selectedTrails[0].name.split(" ")[0];
+    const last = selectedTrails[selectedTrails.length - 1].name.split(" ")[0];
+    return `${first} → ${last}`;
+  })();
+
+  const openSaveDialog = () => {
+    setSaveName(suggestedName);
+    setSaveError(null);
+    setShowSaveDialog(true);
+  };
+
+  const handleConfirmSave = async () => {
+    if (!onSaveRoute) return;
+    const trimmed = saveName.trim();
+    if (trimmed.length === 0) {
+      setSaveError("Give your route a name");
+      return;
+    }
+    setSavingRoute(true);
+    setSaveError(null);
+    const result = await onSaveRoute(trimmed);
+    setSavingRoute(false);
+    if (result === "saved") {
+      setShowSaveDialog(false);
+      setSaveName("");
+      setSaveToast(`Saved "${trimmed}" to My Trails`);
+    } else if (result === "limit") {
+      setSaveError(
+        "You've reached 50 saved routes. Delete one in My Trails to save a new one.",
+      );
+    } else {
+      setSaveError("Couldn't save the route. Check your connection and try again.");
+    }
+  };
+
+  // Auto-dismiss the save toast after a couple of seconds.
+  useEffect(() => {
+    if (!saveToast) return;
+    const t = window.setTimeout(() => setSaveToast(null), 2500);
+    return () => window.clearTimeout(t);
+  }, [saveToast]);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(4px)" }}>
@@ -636,6 +700,26 @@ export default function RouteBuilder({
 
         {/* Action Buttons */}
         <div className="px-4 pb-6 pt-3 space-y-2 border-t border-[hsl(30,12%,16%)] shrink-0">
+          {/* Save route — only shown when the parent wired a handler
+              (i.e. the rider is signed in). Disabled until at least one
+              trail is in the route. */}
+          {onSaveRoute && (
+            <button
+              type="button"
+              onClick={openSaveDialog}
+              disabled={selectedTrails.length === 0}
+              data-testid="route-builder-save-route"
+              className="w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest border transition-all flex items-center justify-center gap-2 border-amber-500/40 text-amber-300 bg-amber-500/5 hover:bg-amber-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.4">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                <polyline points="17 21 17 13 7 13 7 21"/>
+                <polyline points="7 3 7 8 15 8"/>
+              </svg>
+              Save Route to My Trails
+            </button>
+          )}
+
           {/* Download GPX */}
           <button
             onClick={handleDownloadGPX}
@@ -709,6 +793,94 @@ export default function RouteBuilder({
           </p>
         </div>
       </div>
+
+      {/* Save-route dialog — sits above the builder sheet. Plain controlled
+          input so it works inside the iOS standalone PWA where window.prompt
+          is suppressed. */}
+      {showSaveDialog && (
+        <div
+          className="fixed inset-0 z-[2700] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.85)" }}
+          role="dialog"
+          aria-modal="true"
+          data-testid="save-route-dialog"
+        >
+          <div className="w-full max-w-sm bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,22%)] rounded-2xl p-5">
+            <h3 className="text-sm font-bold text-amber-400 uppercase tracking-widest mb-1">
+              Save Route
+            </h3>
+            <p className="text-xs text-stone-400 mb-3">
+              {selectedTrails.length} trail{selectedTrails.length !== 1 ? "s" : ""} · {totalTrailKm.toFixed(1)} km
+            </p>
+            <label className="block text-[11px] uppercase tracking-wider text-stone-500 font-bold mb-1">
+              Route name
+            </label>
+            <input
+              type="text"
+              value={saveName}
+              onChange={(e) => {
+                setSaveName(e.target.value);
+                if (saveError) setSaveError(null);
+              }}
+              maxLength={120}
+              placeholder="e.g. Welsh Weekend Loop"
+              autoFocus
+              data-testid="save-route-name-input"
+              className="w-full px-3 py-2.5 rounded-lg bg-[hsl(22,15%,9%)] border border-[hsl(30,12%,22%)] text-stone-100 text-sm placeholder-stone-600 focus:outline-none focus:border-amber-500/60"
+            />
+            {saveError && (
+              <p
+                className="text-[11px] text-red-400 mt-2"
+                data-testid="save-route-error"
+              >
+                {saveError}
+              </p>
+            )}
+            <div className="flex gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSaveDialog(false);
+                  setSaveError(null);
+                }}
+                disabled={savingRoute}
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-300 border border-stone-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmSave()}
+                disabled={savingRoute || saveName.trim().length === 0}
+                data-testid="save-route-confirm"
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                style={{
+                  background:
+                    savingRoute || saveName.trim().length === 0
+                      ? "hsl(22,15%,16%)"
+                      : "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)",
+                  color:
+                    savingRoute || saveName.trim().length === 0
+                      ? "#6b7280"
+                      : "#1a0e05",
+                }}
+              >
+                {savingRoute ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success toast */}
+      {saveToast && (
+        <div
+          className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[2800] bg-[hsl(22,15%,14%)] border border-amber-500/40 text-amber-300 text-xs font-bold px-4 py-2 rounded-full shadow-lg"
+          data-testid="route-builder-toast"
+        >
+          {saveToast}
+        </div>
+      )}
     </div>
   );
 }

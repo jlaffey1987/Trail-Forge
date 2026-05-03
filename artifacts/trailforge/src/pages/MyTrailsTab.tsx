@@ -9,6 +9,13 @@ import {
 } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
+  listSavedRoutes,
+  deleteSavedRoute,
+  type SavedRouteSummary,
+} from "@/lib/savedRoutes";
+import { setRouteEntries } from "@/lib/plannerRouteStore";
+import type { RouteEntry } from "@/lib/routing";
+import {
   fetchTrailActivityCounts,
   type TrailActivityCounts,
 } from "@/lib/trailContent";
@@ -60,6 +67,85 @@ export default function MyTrailsTab() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Saved routes — named library a signed-in rider has stashed away.
+  // Loaded once per sign-in; refreshed after a load/delete so the list
+  // stays accurate without polling.
+  const [savedRoutes, setSavedRoutes] = useState<SavedRouteSummary[]>([]);
+  const [loadingSavedRoutes, setLoadingSavedRoutes] = useState(false);
+  const [deletingRouteId, setDeletingRouteId] = useState<string | null>(null);
+  const [confirmDeleteRouteId, setConfirmDeleteRouteId] = useState<string | null>(null);
+
+  const refreshSavedRoutes = useCallback(async () => {
+    if (!userId) {
+      setSavedRoutes([]);
+      return;
+    }
+    setLoadingSavedRoutes(true);
+    const routes = await listSavedRoutes();
+    setSavedRoutes(routes);
+    setLoadingSavedRoutes(false);
+  }, [userId]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    void refreshSavedRoutes();
+  }, [isLoaded, refreshSavedRoutes]);
+
+  const handleLoadRoute = useCallback(
+    (route: SavedRouteSummary) => {
+      // Rebuild a RouteEntry[] from the saved row's hydrated trails +
+      // waypoints, ordered by entryOrder. Trails the rider can no
+      // longer see (private/deleted) are silently skipped — same
+      // behaviour as the planner-route GET. setRouteEntries replaces
+      // the live store, persists to localStorage, AND triggers the
+      // debounced PUT /me/planner-route, so the swap is mirrored
+      // across devices.
+      const trailById = new Map(route.trails.map((t) => [t.id, t]));
+      const wpById = new Map(route.waypoints.map((w) => [w.id, w]));
+      const order =
+        route.entryOrder.length > 0
+          ? route.entryOrder
+          : [
+              ...route.trailIds.map((id) => ({ kind: "trail" as const, id })),
+              ...route.waypoints.map((w) => ({
+                kind: "waypoint" as const,
+                id: w.id,
+              })),
+            ];
+      const entries: RouteEntry[] = [];
+      for (const ref of order) {
+        if (ref.kind === "trail") {
+          const t = trailById.get(ref.id);
+          if (t) entries.push({ kind: "trail", trail: t });
+        } else {
+          const w = wpById.get(ref.id);
+          if (w) entries.push({ kind: "waypoint", waypoint: w });
+        }
+      }
+      setRouteEntries(entries);
+      setToast(`Loaded "${route.name}" into the planner`);
+      // Jump straight to the Map so the rider sees the route drawn —
+      // they can open the Planner from there if they want to edit.
+      setLocation("/map");
+    },
+    [setLocation],
+  );
+
+  const handleDeleteRoute = useCallback(
+    async (id: string) => {
+      setDeletingRouteId(id);
+      const ok = await deleteSavedRoute(id);
+      setDeletingRouteId(null);
+      setConfirmDeleteRouteId(null);
+      if (ok) {
+        setSavedRoutes((prev) => prev.filter((r) => r.id !== id));
+        setToast("Route deleted");
+      } else {
+        setToast("Couldn't delete route");
+      }
+    },
+    [],
+  );
 
   const refreshOwned = useCallback(async () => {
     if (!userId) {
@@ -382,6 +468,125 @@ export default function MyTrailsTab() {
 
       <GroupsSection signedIn={!!isSignedIn} />
 
+      {/* Saved Routes — named library of multi-trail routes */}
+      {isSignedIn && (
+        <section className="px-4 pb-6 space-y-3" data-testid="saved-routes-section">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">
+              Saved Routes ({savedRoutes.length})
+            </h2>
+            <span className="text-[10px] text-stone-500">From the planner</span>
+          </div>
+          {loadingSavedRoutes ? (
+            <div className="flex flex-col items-center justify-center py-6">
+              <div className="w-6 h-6 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></div>
+            </div>
+          ) : savedRoutes.length === 0 ? (
+            <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-4 text-center">
+              <p className="text-stone-500 text-xs">No saved routes yet.</p>
+              <p className="text-stone-600 text-[11px] mt-1">
+                Build a route in the Planner, then tap "Save Route to My Trails".
+              </p>
+            </div>
+          ) : (
+            savedRoutes.map((route) => {
+              const trailCount = route.trails.length;
+              // The hydrated count can be lower than trail_ids.length if
+              // the rider lost access to some trails (private/deleted).
+              // Surface that so they aren't surprised when loading.
+              const missing = route.trailIds.length - trailCount;
+              return (
+                <div
+                  key={route.id}
+                  data-testid={`saved-route-${route.id}`}
+                  className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl overflow-hidden"
+                >
+                  <div className="p-3">
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1 min-w-0">
+                        <h3 className="text-sm font-bold text-stone-100 truncate">
+                          {route.name}
+                        </h3>
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+                          <span className="text-[11px] text-stone-400">
+                            {trailCount} trail{trailCount !== 1 ? "s" : ""}
+                          </span>
+                          {route.waypoints.length > 0 && (
+                            <>
+                              <span className="text-[11px] text-stone-600">·</span>
+                              <span className="text-[11px] text-stone-400">
+                                {route.waypoints.length} stop
+                                {route.waypoints.length !== 1 ? "s" : ""}
+                              </span>
+                            </>
+                          )}
+                          {route.distanceKm != null && (
+                            <>
+                              <span className="text-[11px] text-stone-600">·</span>
+                              <span className="text-[11px] text-amber-400">
+                                {route.distanceKm.toFixed(1)} km
+                              </span>
+                            </>
+                          )}
+                          <span className="text-[11px] text-stone-600">·</span>
+                          <span className="text-[11px] text-stone-500">
+                            {formatDate(route.createdAt)}
+                          </span>
+                        </div>
+                        {missing > 0 && (
+                          <p
+                            className="text-[10px] text-amber-500/70 mt-1"
+                            data-testid={`saved-route-missing-${route.id}`}
+                          >
+                            {missing} trail{missing !== 1 ? "s" : ""} no longer available
+                          </p>
+                        )}
+                      </div>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30 shrink-0">
+                        Route
+                      </span>
+                    </div>
+                    <div className="flex gap-2 mt-3">
+                      <button
+                        type="button"
+                        onClick={() => handleLoadRoute(route)}
+                        disabled={trailCount === 0}
+                        data-testid={`saved-route-load-${route.id}`}
+                        className="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900 disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{
+                          background:
+                            trailCount === 0
+                              ? "hsl(22,15%,16%)"
+                              : "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)",
+                          color: trailCount === 0 ? "#6b7280" : "#1a0e05",
+                        }}
+                      >
+                        Load on Map
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteRouteId(route.id)}
+                        disabled={deletingRouteId === route.id}
+                        data-testid={`saved-route-delete-${route.id}`}
+                        className="px-3 py-2 rounded-lg text-xs font-semibold text-red-400 border border-red-500/30 hover:bg-red-900/30 transition-colors disabled:opacity-50"
+                        aria-label={`Delete route ${route.name}`}
+                      >
+                        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.2">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                          <path d="M10 11v6M14 11v6" />
+                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </section>
+      )}
+
       {/* Saved (planned) trails section */}
       <section className="px-4 pb-6 space-y-3">
         <div className="flex items-baseline justify-between">
@@ -564,6 +769,47 @@ export default function MyTrailsTab() {
           setToast("Trail updated");
         }}
       />
+
+      {/* Delete saved-route confirm */}
+      {confirmDeleteRouteId && (() => {
+        const route = savedRoutes.find((r) => r.id === confirmDeleteRouteId);
+        if (!route) return null;
+        return (
+          <div
+            className="fixed inset-0 z-[2700] flex items-center justify-center px-4"
+            style={{ background: "rgba(0,0,0,0.85)" }}
+            role="dialog"
+            aria-modal="true"
+            data-testid="delete-route-confirm"
+          >
+            <div className="w-full max-w-sm bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,22%)] rounded-2xl p-5">
+              <h3 className="text-base font-bold text-red-400 uppercase tracking-wider mb-2">
+                Delete Route?
+              </h3>
+              <p className="text-xs text-stone-400 mb-4">
+                "{route.name}" will be removed from your saved routes. The trails themselves stay where they are.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setConfirmDeleteRouteId(null)}
+                  disabled={deletingRouteId != null}
+                  className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-300 border border-stone-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void handleDeleteRoute(confirmDeleteRouteId)}
+                  disabled={deletingRouteId != null}
+                  data-testid="delete-route-confirm-button"
+                  className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-white bg-red-600 disabled:opacity-50"
+                >
+                  {deletingRouteId != null ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Delete confirm */}
       {confirmDeleteId && (

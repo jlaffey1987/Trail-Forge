@@ -22,6 +22,7 @@ import {
   setRouteEntries,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
+import { createSavedRoute } from "@/lib/savedRoutes";
 import type { RemoveTrailSectionResult } from "@/components/NavigationView";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import { distancePointToPolylineM } from "@/lib/poi";
@@ -1085,6 +1086,36 @@ export default function PlannerTab() {
           onRemoveWaypoint={handleRemoveWaypoint}
           entries={routeEntries}
           onReorderEntries={setRouteEntries}
+          onSaveRoute={
+            isSignedIn
+              ? async (name) => {
+                  // Build the persistence payload from the live store. We
+                  // reach into routeEntries (not routeTrails) so the
+                  // entry_order reflects whatever interleave the rider
+                  // currently has — fuel/campsite stops between trails.
+                  const trailIds = routeTrails.map((t) => t.id);
+                  const entryOrder = routeEntries.map((e) =>
+                    e.kind === "trail"
+                      ? { kind: "trail" as const, id: e.trail.id }
+                      : { kind: "waypoint" as const, id: e.waypoint.id },
+                  );
+                  const distanceKm = routeTrails.reduce(
+                    (sum, t) => sum + (t.distance_km ?? 0),
+                    0,
+                  );
+                  const created = await createSavedRoute({
+                    name,
+                    trailIds,
+                    waypoints: routeWaypoints,
+                    entryOrder,
+                    distanceKm: distanceKm > 0 ? distanceKm : null,
+                  });
+                  if (created.status === "ok") return "saved";
+                  if (created.status === "limit") return "limit";
+                  return "error";
+                }
+              : undefined
+          }
         />
       )}
 

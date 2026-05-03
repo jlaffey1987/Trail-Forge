@@ -773,4 +773,334 @@ router.put("/me/planner-route", async (req: Request, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Saved routes — named library of routes (a rider can keep many).
+//
+// `planner_routes` (above) is a per-user singleton: their *current*
+// in-progress route. `saved_routes` is the persistent library — riders
+// save a built route under a name ("Welsh Weekend Loop") and can load
+// it back into the planner later. Loading a saved route is a client-side
+// operation: the client reads this row, replaces the planner store
+// in-memory, then PUT /me/planner-route persists the swap.
+//
+// Schema is in `supabase/migrations/0018_saved_routes.sql`. Same
+// missing-table tolerance as the planner-route endpoints so the UI
+// degrades gracefully on a database that hasn't had the migration
+// applied yet.
+// ---------------------------------------------------------------------------
+
+const PostSavedRouteBody = z.object({
+  name: z.string().trim().min(1).max(200),
+  trailIds: z.array(z.string().min(1)).max(PLANNER_MAX_TRAILS),
+  waypoints: z.array(PlannerWaypoint).max(PLANNER_MAX_WAYPOINTS).optional(),
+  entryOrder: z.array(PlannerEntryRef).max(PLANNER_MAX_ENTRIES).optional(),
+  distanceKm: z.number().finite().nonnegative().nullable().optional(),
+});
+
+const SAVED_ROUTES_PER_USER_LIMIT = 50;
+
+interface SavedRouteRow {
+  id: string;
+  name: string;
+  trail_ids: string[];
+  waypoints: unknown;
+  entry_order: unknown;
+  distance_km: string | number | null;
+  created_at: string;
+}
+
+router.get("/me/saved-routes", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("saved_routes")
+      .select("id, name, trail_ids, waypoints, entry_order, distance_km, created_at")
+      .eq("user_id", auth.userId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        // Migration 0018 not yet applied — pretend the rider has no
+        // saved routes so the UI shows the empty state instead of an
+        // error toast.
+        res.json({ routes: [] });
+        return;
+      }
+      req.log.error({ err: error }, "saved-routes GET failed");
+      res.status(500).json({ error: "Failed to fetch saved routes" });
+      return;
+    }
+
+    const rows = (data ?? []) as SavedRouteRow[];
+
+    // Hydrate trails across ALL routes in one query so the My Trails
+    // listing renders without N round trips. Same visibility model as
+    // the planner-route GET above (public OR owned OR shared into a
+    // group the rider belongs to) — strip trails the rider can't see.
+    const allTrailIds = new Set<string>();
+    for (const row of rows) {
+      const ids = Array.isArray(row.trail_ids) ? row.trail_ids : [];
+      for (const id of ids) {
+        if (typeof id === "string") allTrailIds.add(id);
+      }
+    }
+
+    let trailById = new Map<string, Record<string, unknown>>();
+    if (allTrailIds.size > 0) {
+      const { data: trailRows, error: trailErr } = await supa
+        .from("trails")
+        .select(PLANNER_TRAIL_COLUMNS)
+        .in("id", Array.from(allTrailIds))
+        .is("deleted_at", null);
+      if (trailErr) {
+        req.log.warn({ err: trailErr }, "saved-routes trail hydrate failed");
+      } else {
+        const fetched = (trailRows as unknown as Array<Record<string, unknown>>) ?? [];
+        const visibleIds = new Set<string>();
+        const needsGroupCheck: string[] = [];
+        for (const row of fetched) {
+          const id = typeof row.id === "string" ? row.id : null;
+          if (!id) continue;
+          if (row.is_public === true || row.owner_user_id === auth.userId) {
+            visibleIds.add(id);
+          } else {
+            needsGroupCheck.push(id);
+          }
+        }
+        if (needsGroupCheck.length > 0) {
+          const { data: memberships } = await supa
+            .from("group_members")
+            .select("group_id")
+            .eq("user_id", auth.userId);
+          const groupIds = ((memberships ?? []) as Array<{ group_id: string }>)
+            .map((m) => m.group_id);
+          if (groupIds.length > 0) {
+            const { data: shares } = await supa
+              .from("trail_shares")
+              .select("trail_id")
+              .in("trail_id", needsGroupCheck)
+              .in("group_id", groupIds);
+            for (const r of (shares ?? []) as Array<{ trail_id: string }>) {
+              visibleIds.add(r.trail_id);
+            }
+          }
+        }
+        for (const row of fetched) {
+          const id = row?.id;
+          if (typeof id === "string" && visibleIds.has(id)) {
+            trailById.set(id, row);
+          }
+        }
+      }
+    }
+
+    const routes = rows.map((row) => {
+      const trailIds = Array.isArray(row.trail_ids)
+        ? row.trail_ids.filter((id): id is string => typeof id === "string")
+        : [];
+      const trails: Array<Record<string, unknown>> = [];
+      for (const id of trailIds) {
+        const t = trailById.get(id);
+        if (t) trails.push(t);
+      }
+      const waypoints = Array.isArray(row.waypoints) ? row.waypoints : [];
+      const entryOrder = Array.isArray(row.entry_order) ? row.entry_order : [];
+      const distance =
+        row.distance_km == null
+          ? null
+          : typeof row.distance_km === "string"
+            ? Number(row.distance_km)
+            : row.distance_km;
+      return {
+        id: row.id,
+        name: row.name,
+        trailIds,
+        trails,
+        waypoints,
+        entryOrder,
+        distanceKm: Number.isFinite(distance as number) ? distance : null,
+        createdAt: row.created_at,
+      };
+    });
+
+    res.json({ routes });
+  } catch (err) {
+    req.log.error({ err }, "saved-routes GET failed");
+    res.status(500).json({ error: "Failed to fetch saved routes" });
+  }
+});
+
+router.post("/me/saved-routes", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const parsed = PostSavedRouteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid saved-route payload" });
+    return;
+  }
+
+  if (parsed.data.trailIds.length === 0) {
+    res.status(400).json({ error: "Cannot save an empty route" });
+    return;
+  }
+
+  // De-dupe trailIds & waypoints; filter dangling entry_order refs.
+  // Same defence-in-depth as PUT /me/planner-route.
+  const seenTrails = new Set<string>();
+  const trailIds: string[] = [];
+  for (const id of parsed.data.trailIds) {
+    if (seenTrails.has(id)) continue;
+    seenTrails.add(id);
+    trailIds.push(id);
+  }
+  const wpSeen = new Set<string>();
+  const waypoints = (parsed.data.waypoints ?? []).filter((w) => {
+    if (wpSeen.has(w.id)) return false;
+    wpSeen.add(w.id);
+    return true;
+  });
+  const trailIdSet = new Set(trailIds);
+  const wpIdSet = new Set(waypoints.map((w) => w.id));
+  const orderSeen = new Set<string>();
+  const entryOrder = (parsed.data.entryOrder ?? []).filter((r) => {
+    const key = `${r.kind}:${r.id}`;
+    if (orderSeen.has(key)) return false;
+    orderSeen.add(key);
+    if (r.kind === "trail") return trailIdSet.has(r.id);
+    return wpIdSet.has(r.id);
+  });
+
+  try {
+    const supa = getSupabaseAdmin();
+
+    // Cap per-user count so a buggy client (or motivated abuser) can't
+    // fill the table. 50 named routes is well past anything a real
+    // rider needs — when they hit it they can delete an old one.
+    const { count, error: countErr } = await supa
+      .from("saved_routes")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", auth.userId);
+    if (countErr && !isMissingTableError(countErr)) {
+      req.log.warn({ err: countErr }, "saved-routes count failed");
+    }
+    if ((count ?? 0) >= SAVED_ROUTES_PER_USER_LIMIT) {
+      res.status(409).json({
+        error: `You've reached the limit of ${SAVED_ROUTES_PER_USER_LIMIT} saved routes. Delete one to save a new one.`,
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const insertRow = {
+      user_id: auth.userId,
+      name: parsed.data.name.trim(),
+      trail_ids: trailIds,
+      waypoints,
+      entry_order: entryOrder,
+      distance_km: parsed.data.distanceKm ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+
+    let { data, error } = await supa
+      .from("saved_routes")
+      .insert(insertRow)
+      .select("id, name, created_at")
+      .single();
+
+    // Mirror the planner-route FK-recovery: if /me/sync hasn't landed
+    // yet the FK against users.id will fail; stub-insert the row and
+    // retry once.
+    if (error?.code === "23503") {
+      const { error: userErr } = await supa
+        .from("users")
+        .upsert({ id: auth.userId, updated_at: now }, { onConflict: "id" });
+      if (!userErr) {
+        const retry = await supa
+          .from("saved_routes")
+          .insert(insertRow)
+          .select("id, name, created_at")
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
+    }
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        req.log.warn(
+          "saved_routes table missing — apply migration 0018_saved_routes.sql",
+        );
+        res.status(503).json({
+          error:
+            "Saved routes aren't available yet on this database. Apply migration 0018.",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "saved-routes insert failed");
+      res.status(500).json({ error: "Failed to save route" });
+      return;
+    }
+
+    if (!data) {
+      res.status(500).json({ error: "Failed to save route" });
+      return;
+    }
+
+    res.json({ id: data.id, name: data.name, createdAt: data.created_at });
+  } catch (err) {
+    req.log.error({ err }, "saved-routes POST failed");
+    res.status(500).json({ error: "Failed to save route" });
+  }
+});
+
+router.delete("/me/saved-routes/:id", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const id = req.params.id;
+  if (typeof id !== "string" || id.length === 0 || id.length > 100) {
+    res.status(400).json({ error: "Invalid route id" });
+    return;
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    // Scope the delete to (id, user_id) so a user can't delete another
+    // rider's row even if they guess a uuid.
+    const { error } = await supa
+      .from("saved_routes")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", auth.userId);
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.json({ deleted: false });
+        return;
+      }
+      req.log.error({ err: error }, "saved-routes delete failed");
+      res.status(500).json({ error: "Failed to delete route" });
+      return;
+    }
+
+    res.json({ deleted: true });
+  } catch (err) {
+    req.log.error({ err }, "saved-routes DELETE failed");
+    res.status(500).json({ error: "Failed to delete route" });
+  }
+});
+
 export default router;
