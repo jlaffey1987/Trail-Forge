@@ -3,6 +3,7 @@ import { getAuth } from "@clerk/express";
 import { z } from "zod";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { logger } from "../lib/logger";
 import { explainAdminAccess, getAdminAccessState } from "../lib/admin";
 import {
   computeRouteStats,
@@ -706,9 +707,19 @@ export async function runForumScan(opts?: { oneOffUrl?: string | null }): Promis
           // wrote a 2-point ~500m offset here; that polluted the map.)
           if (waypoints.length < 2 || !bbox) {
             skipped++;
+            const reason = `no GPX and no nearby OSM track to snap to`;
             errors.push(
-              `skipped "${extracted.trailName ?? postUrl}": no GPX and no nearby OSM track to snap to`,
+              `skipped "${extracted.trailName ?? postUrl}": ${reason}`,
             );
+            const recorded = await recordScanSkip(supa, {
+              sourceUrl: postUrl,
+              sourceLabel: src.label,
+              extractedName: extracted.trailName ?? null,
+              reason,
+            });
+            if (!recorded.ok && recorded.error) {
+              errors.push(`failed to persist skip for ${postUrl}: ${recorded.error}`);
+            }
             continue;
           }
 
@@ -788,6 +799,82 @@ export async function runForumScan(opts?: { oneOffUrl?: string | null }): Promis
   }
 
   return { scanned, visitedPosts, queued, skipped, errors };
+}
+
+async function recordScanSkip(
+  supa: ReturnType<typeof getSupabaseAdmin>,
+  args: {
+    sourceUrl: string;
+    sourceLabel: string | null;
+    extractedName: string | null;
+    reason: string;
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const now = new Date().toISOString();
+  // Upsert by source_url so repeated scans bump the counter rather than
+  // duplicating rows. If the row was already resolved, surface it again
+  // (status -> pending) because the underlying problem still exists.
+  const { data: existing, error: selErr } = await supa
+    .from("ai_scan_skips")
+    .select("id, seen_count")
+    .eq("source_url", args.sourceUrl)
+    .maybeSingle();
+  if (selErr) {
+    if (isMissingTableError(selErr)) {
+      logger.warn(
+        { sourceUrl: args.sourceUrl },
+        "ai_scan_skips table missing — apply migration 0020; skip not persisted",
+      );
+      return { ok: false, error: "ai_scan_skips table missing — apply migration 0020" };
+    }
+    logger.error(
+      { err: selErr, sourceUrl: args.sourceUrl },
+      "ai_scan_skips lookup failed; skip not persisted",
+    );
+    return { ok: false, error: selErr.message ?? "scan_skip lookup failed" };
+  }
+  if (existing) {
+    const { error: updErr } = await supa
+      .from("ai_scan_skips")
+      .update({
+        last_seen_at: now,
+        seen_count: (existing.seen_count as number ?? 0) + 1,
+        reason: args.reason,
+        source_label: args.sourceLabel,
+        extracted_name: args.extractedName,
+        status: "pending",
+        resolved_at: null,
+        resolved_by: null,
+        resolved_note: null,
+      })
+      .eq("id", existing.id as string);
+    if (updErr) {
+      logger.error(
+        { err: updErr, sourceUrl: args.sourceUrl },
+        "ai_scan_skips bump failed",
+      );
+      return { ok: false, error: updErr.message ?? "scan_skip update failed" };
+    }
+    return { ok: true };
+  }
+  const { error: insErr } = await supa.from("ai_scan_skips").insert({
+    source_url: args.sourceUrl,
+    source_label: args.sourceLabel,
+    extracted_name: args.extractedName,
+    reason: args.reason,
+    status: "pending",
+    first_seen_at: now,
+    last_seen_at: now,
+    seen_count: 1,
+  });
+  if (insErr) {
+    logger.error(
+      { err: insErr, sourceUrl: args.sourceUrl },
+      "ai_scan_skips insert failed",
+    );
+    return { ok: false, error: insErr.message ?? "scan_skip insert failed" };
+  }
+  return { ok: true };
 }
 
 router.post(
@@ -1182,6 +1269,73 @@ router.post(
       })
       .eq("id", id.data);
     if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.json({ ok: true });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// AI scan skips — posts the forum scanner couldn't turn into a trail. The
+// scanner records them so a moderator can revisit the source thread, decide
+// whether to chase a manual GPX upload, and then dismiss the entry.
+// ---------------------------------------------------------------------------
+router.get(
+  "/admin/ai-scan-skips",
+  requireAdmin(async (req, res) => {
+    const status = String(req.query.status ?? "pending");
+    if (status !== "pending" && status !== "resolved") {
+      res.status(400).json({ error: "Invalid status filter" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("ai_scan_skips")
+      .select("*")
+      .eq("status", status)
+      .order("last_seen_at", { ascending: false })
+      .limit(200);
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.json({
+          items: [],
+          note: "ai_scan_skips table missing — apply migration 0020",
+        });
+        return;
+      }
+      res.status(500).json({ error: "Failed to load ai scan skips" });
+      return;
+    }
+    res.json({ items: data ?? [] });
+  }),
+);
+
+router.post(
+  "/admin/ai-scan-skips/:id/resolve",
+  requireAdmin(async (req, res, userId) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const note =
+      typeof req.body?.note === "string" ? req.body.note.slice(0, 500) : null;
+    const supa = getSupabaseAdmin();
+    const { error } = await supa
+      .from("ai_scan_skips")
+      .update({
+        status: "resolved",
+        resolved_at: new Date().toISOString(),
+        resolved_by: userId,
+        resolved_note: note,
+      })
+      .eq("id", id.data);
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.status(400).json({ error: "ai_scan_skips table missing — apply migration 0020" });
+        return;
+      }
       res.status(500).json({ error: error.message });
       return;
     }

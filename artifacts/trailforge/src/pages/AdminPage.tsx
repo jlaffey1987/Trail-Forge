@@ -22,6 +22,21 @@ interface Discovery {
   bbox_max_lng: number | null;
 }
 
+interface ScanSkip {
+  id: string;
+  source_url: string;
+  source_label: string | null;
+  extracted_name: string | null;
+  reason: string;
+  status: "pending" | "resolved";
+  first_seen_at: string;
+  last_seen_at: string;
+  seen_count: number;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolved_note: string | null;
+}
+
 interface ForumSource {
   id: string;
   label: string;
@@ -70,6 +85,8 @@ export default function AdminPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("pending");
   const [items, setItems] = useState<Discovery[]>([]);
   const [forumSources, setForumSources] = useState<ForumSource[]>([]);
+  const [scanSkips, setScanSkips] = useState<ScanSkip[]>([]);
+  const [skipFilter, setSkipFilter] = useState<"pending" | "resolved">("pending");
   const [admins, setAdmins] = useState<AdminEntry[]>([]);
   const [envAdmins, setEnvAdmins] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -116,6 +133,17 @@ export default function AdminPage() {
     if (j.note) setInfo(j.note);
   }, [statusFilter]);
 
+  const loadScanSkips = useCallback(async () => {
+    const r = await fetch(
+      `/api/admin/ai-scan-skips?status=${encodeURIComponent(skipFilter)}`,
+      { credentials: "include" },
+    );
+    if (!r.ok) return;
+    const j = (await r.json()) as { items?: ScanSkip[]; note?: string };
+    setScanSkips(j.items ?? []);
+    if (j.note) setInfo(j.note);
+  }, [skipFilter]);
+
   const loadForumSources = useCallback(async () => {
     const r = await fetch("/api/admin/forum-sources", { credentials: "include" });
     if (!r.ok) return;
@@ -142,8 +170,9 @@ export default function AdminPage() {
       loadDiscoveries();
       loadForumSources();
       loadAdmins();
+      loadScanSkips();
     }
-  }, [adminCheck, loadDiscoveries, loadForumSources, loadAdmins]);
+  }, [adminCheck, loadDiscoveries, loadForumSources, loadAdmins, loadScanSkips]);
 
   if (adminCheck === "loading") {
     return (
@@ -339,6 +368,24 @@ export default function AdminPage() {
         (Array.isArray(j.errors) && j.errors.length ? ` — ${j.errors.length} errors` : ""),
     );
     loadDiscoveries();
+    loadScanSkips();
+  };
+
+  const handleResolveSkip = async (id: string) => {
+    setBusy(`skip-${id}`);
+    const r = await fetch(`/api/admin/ai-scan-skips/${id}/resolve`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    setBusy(null);
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      setInfo(`Resolve failed: ${r.status} ${t.slice(0, 120)}`);
+      return;
+    }
+    loadScanSkips();
   };
 
   const handleHarvest = async () => {
@@ -711,6 +758,104 @@ export default function AdminPage() {
                 >
                   Remove
                 </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section
+        className="mb-6 bg-stone-900 border border-stone-800 rounded-xl p-4"
+        data-testid="admin-scan-skips-section"
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-bold text-amber-400 uppercase">
+            Forum posts that need a manual look
+          </h2>
+          <div className="flex items-center gap-1">
+            {(["pending", "resolved"] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setSkipFilter(s)}
+                className={`px-2 py-1 rounded-md text-[10px] uppercase tracking-wider ${
+                  skipFilter === s
+                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                    : "text-stone-500 border border-transparent hover:text-stone-300"
+                }`}
+                data-testid={`admin-skip-status-${s}`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="text-xs text-stone-500 mb-3">
+          Posts the AI scanner couldn't auto-import — no downloadable GPX and no
+          OSM track to snap to. Open the source thread, decide whether to chase
+          a manual GPX upload, then mark resolved to clear it from the list.
+        </p>
+        {scanSkips.length === 0 ? (
+          <p className="text-xs text-stone-500" data-testid="admin-scan-skips-empty">
+            Nothing in the {skipFilter} list.
+          </p>
+        ) : (
+          <ul className="space-y-2" data-testid="admin-scan-skips-list">
+            {scanSkips.map((s) => (
+              <li
+                key={s.id}
+                className="border border-stone-800 rounded-lg p-3 bg-stone-950"
+                data-testid="admin-scan-skip-item"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      {s.source_label ? (
+                        <span className="px-2 py-0.5 text-[10px] uppercase tracking-wider rounded-full bg-stone-800 text-stone-300">
+                          {s.source_label}
+                        </span>
+                      ) : null}
+                      {s.seen_count > 1 ? (
+                        <span className="px-2 py-0.5 text-[10px] uppercase tracking-wider rounded-full bg-amber-500/15 text-amber-300">
+                          seen {s.seen_count}×
+                        </span>
+                      ) : null}
+                    </div>
+                    <h3 className="text-sm font-bold text-stone-200 truncate">
+                      {s.extracted_name ?? "(no name extracted)"}
+                    </h3>
+                    <p className="text-[11px] text-stone-400 mt-0.5">
+                      {s.reason}
+                    </p>
+                    <a
+                      href={s.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-amber-400 mt-1 inline-block break-all"
+                      data-testid={`admin-skip-link-${s.id}`}
+                    >
+                      {s.source_url} ↗
+                    </a>
+                    <p className="text-[11px] text-stone-500 mt-1">
+                      first seen {new Date(s.first_seen_at).toLocaleString()}
+                      {s.last_seen_at !== s.first_seen_at
+                        ? ` · last ${new Date(s.last_seen_at).toLocaleString()}`
+                        : ""}
+                      {s.resolved_at
+                        ? ` · resolved ${new Date(s.resolved_at).toLocaleString()}${s.resolved_by ? ` by ${s.resolved_by}` : ""}`
+                        : ""}
+                    </p>
+                  </div>
+                  {skipFilter === "pending" ? (
+                    <button
+                      onClick={() => handleResolveSkip(s.id)}
+                      disabled={busy === `skip-${s.id}`}
+                      className="px-3 py-1.5 rounded-md border border-amber-500/40 text-amber-300 text-[11px] font-bold uppercase disabled:opacity-50 shrink-0"
+                      data-testid={`admin-resolve-skip-${s.id}`}
+                    >
+                      {busy === `skip-${s.id}` ? "…" : "Mark resolved"}
+                    </button>
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>
