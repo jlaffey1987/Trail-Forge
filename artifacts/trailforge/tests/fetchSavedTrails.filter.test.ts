@@ -20,25 +20,6 @@ const realTrail = {
   bbox_max_lng: 144.97,
 };
 
-const phantomTrail = {
-  id: "phantom",
-  user_id: null,
-  name: "Legacy 2-point placeholder",
-  type: null,
-  difficulty: null,
-  distance_km: 0.5,
-  terrain: null,
-  legal_status: null,
-  is_public: true,
-  created_at: "2025-06-01T00:00:00Z",
-  verification_status: "ai-approximated",
-  path_point_count: 2,
-  bbox_min_lat: -37.8,
-  bbox_max_lat: -37.795,
-  bbox_min_lng: 144.96,
-  bbox_max_lng: 144.96,
-};
-
 const verifiedTrail = {
   ...realTrail,
   id: "verified",
@@ -46,7 +27,7 @@ const verifiedTrail = {
   verification_status: "verified",
 };
 
-describe("fetchSavedTrails — synthetic placeholder filter", () => {
+describe("fetchSavedTrails — read-path contract", () => {
   beforeEach(() => {
     vi.stubGlobal(
       "window",
@@ -60,13 +41,19 @@ describe("fetchSavedTrails — synthetic placeholder filter", () => {
     vi.restoreAllMocks();
   });
 
-  it("drops legacy 2-point ai-approximated placeholders even if the API returns them", async () => {
+  // Legacy 2-point ai-approximated placeholder rows used to be filtered out
+  // here in the client. As of supabase migration
+  // `0019_phantom_ai_trails_cleanup.sql` they are soft-deleted in the DB
+  // (and a CHECK constraint blocks new ones), so the API server's
+  // `/api/me/saved-trails` join naturally hides them and the client just
+  // forwards whatever the API returns. This test pins that simpler
+  // contract so we don't accidentally re-introduce a redundant filter.
+  it("returns whatever the API server returns, without re-filtering", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         items: [
           { trail_id: "real", status: null, saved_at: null, trail: realTrail },
-          { trail_id: "phantom", status: null, saved_at: null, trail: phantomTrail },
           { trail_id: "verified", status: null, saved_at: null, trail: verifiedTrail },
           { trail_id: "missing", status: null, saved_at: null, trail: null },
         ],

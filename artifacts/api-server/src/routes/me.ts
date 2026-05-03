@@ -53,9 +53,15 @@ const PutPlannerRouteBody = z.object({
  *
  * Returns true for the legacy 2-point ai-approximated placeholders that
  * the AI forum scanner used to persist when no GPX and no nearby OSM
- * track was available. We hide those rows from My Trails so users who
- * saved one in the past don't keep seeing a phantom straight line on
- * the map. Conservative criteria — only matches the exact shape the old
+ * track was available.
+ *
+ * As of trailforge migration `0019_phantom_ai_trails_cleanup.sql` the
+ * matching rows are soft-deleted (`deleted_at IS NOT NULL`) and a CHECK
+ * constraint (`trails_no_phantom_ai_placeholder`) blocks new ones, so
+ * the saved-trails join naturally hides them. This helper is retained
+ * as defence-in-depth for environments where the migration has not yet
+ * been applied (e.g. local dev DBs) and as documentation of the legacy
+ * shape. Conservative criteria — only matches the exact shape the old
  * `approximateTrackFromLocation` fallback wrote (lat+0.005 offset,
  * identical longitude, exactly 2 waypoints).
  */

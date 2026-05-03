@@ -307,8 +307,10 @@ export function clusterTrails(trails: Trail[], zoom: number): TrailCluster[] {
   const cells = new Map<string, Bucket>();
 
   for (const t of trails) {
-    // Mirror renderTrailLayer: never let a synthetic 2-point AI placeholder
-    // contribute to a cluster count or marker position.
+    // Defence in depth: legacy 2-point AI placeholders are soft-deleted
+    // by migration 0019 and the DB constraint blocks new ones, but if
+    // one ever leaks past (e.g. via admin tooling or an un-migrated dev
+    // DB) we still refuse to count it toward a cluster.
     if (isSyntheticPlaceholderTrail(t)) continue;
     const bbox = getTrailBbox(t);
     if (!bbox) continue;
@@ -505,10 +507,11 @@ export function renderTrailLayer(
   const showSharedGroupBadges = options.showSharedGroupBadges ?? false;
 
   for (const trail of trails) {
-    // Defence in depth: even if a synthetic 2-point AI placeholder slipped
-    // past the fetch-time filter (e.g. via a future code path that builds
-    // a Trail[] directly), never render it as a polyline. See
-    // isSyntheticPlaceholderTrail in supabase.ts for the criteria.
+    // Defence in depth: legacy 2-point AI placeholders are soft-deleted
+    // by migration 0019 and the DB CHECK constraint blocks new ones,
+    // but if one ever leaks past (e.g. an un-migrated dev DB) we still
+    // refuse to render it as a polyline. See isSyntheticPlaceholderTrail
+    // in supabase.ts for the criteria.
     if (isSyntheticPlaceholderTrail(trail)) continue;
     const latlngs = options.simplifyForZoom != null
       ? getSimplifiedLatLngs(trail, options.simplifyForZoom)

@@ -114,11 +114,17 @@ export interface MapBbox {
  * cutting across countryside on the map — they're essentially noise, even
  * though they carry the dashed `ai-approximated` styling.
  *
- * Going forward those rows are no longer created (the server now skips the
- * post). This helper hides any pre-existing rows from query consumers
- * without needing a DB migration. Trails legitimately approximated to a
- * real OSM way (the snap path) keep many waypoints over a real bbox and
- * are NOT flagged as synthetic, so they continue to render.
+ * As of migration `0019_phantom_ai_trails_cleanup.sql`:
+ *   * every existing row matching this shape was soft-deleted
+ *     (`deleted_at = now()`), so the public RLS policy and standard
+ *     `deleted_at IS NULL` filters hide them everywhere;
+ *   * a CHECK constraint (`trails_no_phantom_ai_placeholder`) rejects any
+ *     future INSERT or UPDATE that would persist the same shape.
+ *
+ * Consumers therefore no longer need to filter on this — the helper is
+ * kept exported as defence-in-depth (e.g. for admin tooling that bypasses
+ * RLS, or to guard a dev DB that has not had the migration applied yet)
+ * and as documentation of the legacy shape.
  *
  * Detection is conservative: only flips to true when ALL of the following
  * hold so a real snapped trail is never hidden by accident:
@@ -244,16 +250,18 @@ export async function fetchTrailsInBbox(
     return q.limit(limit);
   };
 
-  // Drop legacy synthetic 2-point AI placeholders here so neither the map
-  // layer nor the trail list has a chance to render them. The geometry test
-  // is conservative — see isSyntheticPlaceholderTrail for the criteria.
-  const dropPhantoms = (rows: Trail[]) =>
-    rows.filter((t) => !isSyntheticPlaceholderTrail(t));
+  // Legacy synthetic 2-point AI placeholders are soft-deleted by
+  // migration 0019 and a CHECK constraint blocks new ones. The public
+  // RLS policy on `trails` (anon key, used here) requires
+  // `deleted_at IS NULL`, so the soft-deleted phantoms are hidden from
+  // these reads automatically — no client-side filter needed. See
+  // isSyntheticPlaceholderTrail in this file for the historical shape
+  // and the defence-in-depth helper.
 
   // Try slim + bbox first (the fast path).
   let { data, error } = await buildBbox(TRAIL_SLIM_COLUMNS);
   if (!error) {
-    return { trails: dropPhantoms((data as unknown as Trail[]) || []), usedBbox: true };
+    return { trails: (data as unknown as Trail[]) || [], usedBbox: true };
   }
 
   const msg = error.message ?? "";
@@ -271,13 +279,13 @@ export async function fetchTrailsInBbox(
         console.error("Trail bbox fallback fetch failed:", r.error.message);
         return { trails: [], usedBbox: false };
       }
-      return { trails: dropPhantoms((r.data as unknown as Trail[]) || []), usedBbox: false };
+      return { trails: (r.data as unknown as Trail[]) || [], usedBbox: false };
     }
 
     // Slim columns missing (migration 0008 not applied) → retry bbox with "*".
     const r = await buildBbox("*");
     if (!r.error) {
-      return { trails: dropPhantoms((r.data as unknown as Trail[]) || []), usedBbox: true };
+      return { trails: (r.data as unknown as Trail[]) || [], usedBbox: true };
     }
     if (r.error.code === "42703" && /bbox/i.test(r.error.message ?? "")) {
       const all = await buildAll("*");
@@ -285,7 +293,7 @@ export async function fetchTrailsInBbox(
         console.error("Trail bbox fallback fetch failed:", all.error.message);
         return { trails: [], usedBbox: false };
       }
-      return { trails: dropPhantoms((all.data as unknown as Trail[]) || []), usedBbox: false };
+      return { trails: (all.data as unknown as Trail[]) || [], usedBbox: false };
     }
     console.error("Trail bbox fetch failed:", r.error.message);
     return { trails: [], usedBbox: false };
@@ -454,7 +462,7 @@ export async function fetchCommunityTrails(): Promise<Trail[]> {
     console.error("Failed to fetch trails:", error.message);
     return [];
   }
-  return (data || []).filter((t: Trail) => !isSyntheticPlaceholderTrail(t));
+  return data || [];
 }
 
 export async function searchTrails(opts: {
@@ -478,7 +486,7 @@ export async function searchTrails(opts: {
     console.error("Search error:", error.message);
     return [];
   }
-  return (data || []).filter((t: Trail) => !isSyntheticPlaceholderTrail(t));
+  return data || [];
 }
 
 export interface SaveOwner {
@@ -533,12 +541,12 @@ export async function fetchSavedTrails(owner: SaveOwner): Promise<Trail[]> {
     const json = (await res.json()) as { items: SavedTrailItem[] };
     return (json.items ?? [])
       .map((it) => it.trail)
-      .filter((t): t is Trail => t != null)
-      // Defence in depth: the API server already filters legacy synthetic
-      // 2-point AI placeholders out of /api/me/saved-trails, but if an
-      // older deploy or another future caller forgets, drop them here too
-      // so the My Trails list never shows a phantom straight-line trail.
-      .filter((t) => !isSyntheticPlaceholderTrail(t));
+      // Legacy synthetic 2-point AI placeholders are soft-deleted by
+      // migration 0019 and a CHECK constraint blocks new ones. The API
+      // server still filters them explicitly on /api/me/saved-trails
+      // (it uses the service role, so RLS does not auto-hide them) —
+      // this client just trusts whatever the API returns.
+      .filter((t): t is Trail => t != null);
   } catch (err) {
     console.error("Fetch saved trails error:", err);
     return [];
