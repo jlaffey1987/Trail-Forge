@@ -813,7 +813,7 @@ ${trkpts}
               <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
                 <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
               </svg>
-              Filters
+              <span className="hidden sm:inline">Filters</span>
               {filterCount > 0 && (
                 <span className="bg-amber-500 text-stone-900 text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">
                   {filterCount}
@@ -837,7 +837,7 @@ ${trkpts}
               <polyline points="2 17 12 22 22 17"/>
               <polyline points="2 12 12 17 22 12"/>
             </svg>
-            Layers
+            <span className="hidden sm:inline">Layers</span>
             {activeLayerCount > 0 && (
               <span className="bg-amber-500 text-stone-900 text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">
                 {activeLayerCount}
@@ -865,7 +865,7 @@ ${trkpts}
       {mapMode === "explore" && (
         <div
           className={`absolute left-1/2 -translate-x-1/2 z-[1000] pointer-events-none ${
-            routeTrails.length > 0 ? "top-24" : "top-12"
+            routeTrails.length > 0 ? "top-24" : "top-14"
           }`}
         >
           <div className="bg-black/70 backdrop-blur border border-stone-700/60 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full text-stone-200 flex items-center gap-1.5 shadow-lg">
