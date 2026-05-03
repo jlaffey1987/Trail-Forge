@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Show, useClerk, useUser } from "@clerk/react";
 import { useLocation } from "wouter";
 import SettingsDialog from "./SettingsDialog";
+import GlossaryDialog from "./GlossaryDialog";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -42,6 +43,7 @@ function SignedInMenu() {
   const { signOut } = useClerk();
   const [open, setOpen] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showGlossary, setShowGlossary] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -112,6 +114,20 @@ function SignedInMenu() {
             Settings
           </button>
           <button
+            className="w-full text-left px-3 py-2.5 text-xs font-medium text-stone-300 hover:bg-[hsl(22,15%,14%)] flex items-center gap-2 border-b border-[hsl(30,12%,16%)]"
+            onClick={() => {
+              setOpen(false);
+              setShowGlossary(true);
+            }}
+            data-testid="header-glossary"
+          >
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-stone-400" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+              <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+            </svg>
+            Glossary
+          </button>
+          <button
             className="w-full text-left px-3 py-2.5 text-xs font-medium text-stone-300 hover:bg-[hsl(22,15%,14%)] flex items-center gap-2"
             onClick={async () => {
               setOpen(false);
@@ -129,6 +145,7 @@ function SignedInMenu() {
         </div>
       )}
       <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
+      <GlossaryDialog open={showGlossary} onClose={() => setShowGlossary(false)} />
     </div>
   );
 }

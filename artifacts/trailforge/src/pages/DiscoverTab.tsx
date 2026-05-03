@@ -17,6 +17,7 @@ import {
 } from "@/lib/groups";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
+import GlossaryDialog from "@/components/GlossaryDialog";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -62,6 +63,7 @@ export default function DiscoverTab() {
   const [, setLocation] = useLocation();
   const queryString = useSearch();
   const [activeFilter, setActiveFilter] = useState("All");
+  const [showGlossary, setShowGlossary] = useState(false);
   const [liked, setLiked] = useState<Set<string>>(new Set());
   const [trails, setTrails] = useState<SharedTrail[]>([]);
   const [loading, setLoading] = useState(true);
@@ -223,27 +225,46 @@ export default function DiscoverTab() {
           </div>
         </div>
 
-        <div
-          className="px-4 flex gap-2 overflow-x-auto pb-1"
-          style={{ scrollbarWidth: "none" }}
-          data-testid="discover-filter-ribbon"
-        >
-          {FILTERS.map((f) => (
-            <button
-              key={f}
-              onClick={() => setActiveFilter(f)}
-              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
-                activeFilter === f
-                  ? "bg-amber-500 text-stone-900"
-                  : "bg-[hsl(22,15%,14%)] text-stone-400 border border-[hsl(30,12%,20%)]"
-              }`}
-              data-testid={`discover-filter-${f.replace(/\s+/g, "-").toLowerCase()}`}
-            >
-              {f}
-            </button>
-          ))}
+        <div className="px-4 flex items-center gap-2">
+          <div
+            className="flex-1 flex gap-2 overflow-x-auto pb-1"
+            style={{ scrollbarWidth: "none" }}
+            data-testid="discover-filter-ribbon"
+          >
+            {FILTERS.map((f) => (
+              <button
+                key={f}
+                onClick={() => setActiveFilter(f)}
+                className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                  activeFilter === f
+                    ? "bg-amber-500 text-stone-900"
+                    : "bg-[hsl(22,15%,14%)] text-stone-400 border border-[hsl(30,12%,20%)]"
+                }`}
+                data-testid={`discover-filter-${f.replace(/\s+/g, "-").toLowerCase()}`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+          {/* "What do these mean?" affordance — opens the glossary
+              already scrolled to the trail-types section since that's
+              what the filter ribbon is about. */}
+          <button
+            onClick={() => setShowGlossary(true)}
+            className="shrink-0 w-7 h-7 rounded-full bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,20%)] text-stone-400 hover:text-amber-400 hover:border-amber-500/60 transition-colors flex items-center justify-center text-xs font-bold"
+            data-testid="discover-glossary-button"
+            aria-label="What do these filters mean?"
+            title="What do these mean?"
+          >
+            ?
+          </button>
         </div>
       </div>
+      <GlossaryDialog
+        open={showGlossary}
+        onClose={() => setShowGlossary(false)}
+        initialSection="trail-types"
+      />
 
       {/* Discoverable groups — show signed-in users any group they could ask
           to join. Sits above the trail feed but stays compact (max 2 rows by
