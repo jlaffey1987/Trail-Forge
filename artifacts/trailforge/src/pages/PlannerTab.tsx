@@ -551,6 +551,100 @@ export default function PlannerTab() {
     removeRouteWaypoint(waypointId);
   }, []);
 
+  // Commit-style removal handlers used by the My Route panel. Mirror
+  // the recompute-first / commit-on-success contract of
+  // handleCommitReorder so a transient OSRM hiccup during rebuild
+  // can't strand the rider with an inconsistent assembled route. When
+  // no trip has been planned yet (no assembledRoute), we just mutate
+  // the store directly — there's nothing to recompute.
+  const handleCommitRemoveTrail = useCallback(
+    async (
+      trailId: string,
+      onProgress: (step: number, total: number, label: string) => void,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const nextEntries = routeEntries.filter(
+        (e) => !(e.kind === "trail" && e.trail.id === trailId),
+      );
+      if (!assembledRoute) {
+        setRouteEntries(nextEntries);
+        return { ok: true };
+      }
+      // If removing the trail leaves no trails behind, nothing to
+      // re-assemble — drop the assembled route and persist the new
+      // entry list. Waypoint-only state is fine (the planner bar /
+      // My Route panel both still work).
+      const remainingTrails = nextEntries.filter((e) => e.kind === "trail");
+      if (remainingTrails.length === 0) {
+        setRouteEntries(nextEntries);
+        setAssembledRoute(null);
+        return { ok: true };
+      }
+      try {
+        const newRoute = await assembleMultiModalRoute(
+          assembledRoute.start,
+          assembledRoute.end,
+          nextEntries,
+          onProgress,
+        );
+        if (newRoute.sections.length === 0) {
+          return {
+            ok: false,
+            error: "Couldn't rebuild the route without that trail. Try removing a different stop.",
+          };
+        }
+        setRouteEntries(nextEntries);
+        setAssembledRoute(newRoute);
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while re-routing. Please try again.",
+        };
+      }
+    },
+    [assembledRoute, routeEntries],
+  );
+
+  const handleCommitRemoveWaypoint = useCallback(
+    async (
+      waypointId: string,
+      onProgress: (step: number, total: number, label: string) => void,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const nextEntries = routeEntries.filter(
+        (e) => !(e.kind === "waypoint" && e.waypoint.id === waypointId),
+      );
+      if (!assembledRoute) {
+        // No trip to recompute — go through the canonical store API
+        // so cloud-sync + persistence fire.
+        removeRouteWaypoint(waypointId);
+        return { ok: true };
+      }
+      try {
+        const newRoute = await assembleMultiModalRoute(
+          assembledRoute.start,
+          assembledRoute.end,
+          nextEntries,
+          onProgress,
+        );
+        if (newRoute.sections.length === 0) {
+          return {
+            ok: false,
+            error: "Couldn't rebuild the route without that stop. Try removing a different one.",
+          };
+        }
+        setRouteEntries(nextEntries);
+        setAssembledRoute(newRoute);
+        return { ok: true };
+      } catch {
+        return {
+          ok: false,
+          error: "Network error while re-routing. Please try again.",
+        };
+      }
+    },
+    [assembledRoute, routeEntries],
+  );
+
   // Commit a drag-reorder from the My Route panel. Mirrors the
   // remove/swap "recompute first, commit on success" contract: when an
   // assembled trip already exists we re-run the multi-modal assembly
@@ -1404,6 +1498,8 @@ export default function PlannerTab() {
           onCommitReorder={handleCommitReorder}
           onFetchSwapAlternates={handleFetchSwapAlternates}
           onCommitSwap={handlePlannerSwapTrail}
+          onCommitRemoveTrail={handleCommitRemoveTrail}
+          onCommitRemoveWaypoint={handleCommitRemoveWaypoint}
           onSaveRoute={
             isSignedIn
               ? async (name) => {

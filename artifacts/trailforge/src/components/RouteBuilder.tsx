@@ -132,6 +132,27 @@ interface Props {
     newTrail: Trail,
     onProgress: (step: number, total: number, label: string) => void,
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Commit a trail removal from the My Route panel. Same recompute /
+   * snapshot-restore contract as `onCommitReorder` and `onCommitSwap`:
+   * when an assembled trip exists the parent re-runs the multi-modal
+   * assembly with the trail filtered out and only persists the new
+   * order on success. When omitted the legacy `onRemove` path is used
+   * (direct store mutation, no re-routing).
+   */
+  onCommitRemoveTrail?: (
+    trailId: string,
+    onProgress: (step: number, total: number, label: string) => void,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Commit a waypoint removal from the My Route panel. Same contract
+   * as `onCommitRemoveTrail`. When omitted the legacy
+   * `onRemoveWaypoint` path is used.
+   */
+  onCommitRemoveWaypoint?: (
+    waypointId: string,
+    onProgress: (step: number, total: number, label: string) => void,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export default function RouteBuilder({
@@ -151,6 +172,8 @@ export default function RouteBuilder({
   onCommitReorder,
   onFetchSwapAlternates,
   onCommitSwap,
+  onCommitRemoveTrail,
+  onCommitRemoveWaypoint,
 }: Props) {
   const [downloading, setDownloading] = useState(false);
   const [gpxReady, setGpxReady] = useState(false);
@@ -376,6 +399,56 @@ export default function RouteBuilder({
   } | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
 
+  // Removal goes through the same recompute pipeline as reorder/swap
+  // when a commit-style handler is supplied by the parent. We use a
+  // dedicated busy state so the overlay copy can say "Removing X…"
+  // and so the same arrowsBusy guard blocks all three actions while
+  // any one is in flight.
+  const [removing, setRemoving] = useState<{
+    label: string;
+    progress: { pct: number; label: string };
+  } | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  // Shared helper — runs a parent-supplied commit-style handler with
+  // overlay/progress/error wiring identical to `commitReorder` /
+  // swap. Used by the trail and waypoint remove buttons in the
+  // entries-mode rows. Returns true on success so the caller can
+  // chain UI cleanup if needed.
+  const runRemoveCommit = useCallback(
+    async (
+      label: string,
+      run: (
+        onProgress: (step: number, total: number, label: string) => void,
+      ) => Promise<{ ok: true } | { ok: false; error: string }>,
+    ): Promise<boolean> => {
+      setRemoveError(null);
+      setRemoving({
+        label,
+        progress: { pct: 0, label: "Updating your route..." },
+      });
+      try {
+        const result = await run((step, total, lbl) => {
+          const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+          setRemoving((prev) =>
+            prev ? { label: prev.label, progress: { pct, label: lbl } } : prev,
+          );
+        });
+        if (!result.ok) {
+          setRemoveError(result.error);
+          return false;
+        }
+        return true;
+      } catch {
+        setRemoveError("Couldn't remove. Please try again.");
+        return false;
+      } finally {
+        setRemoving(null);
+      }
+    },
+    [],
+  );
+
   const computeOverIdx = useCallback((clientY: number, fromIdx: number) => {
     let best = fromIdx;
     for (const [idx, el] of rowNodesRef.current.entries()) {
@@ -405,7 +478,7 @@ export default function RouteBuilder({
       // drag. Right-clicks etc. fall through.
       if (e.button !== 0 && e.pointerType === "mouse") return;
       if (!entries || entries.length < 2) return;
-      if (reordering || swapping) return;
+      if (reordering || swapping || removing) return;
       e.preventDefault();
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -598,7 +671,7 @@ export default function RouteBuilder({
               // flight so the rider can't fire a second mutation
               // before the first one settles. Mirrors the drag-handle
               // guard in handleDragPointerDown.
-              const arrowsBusy = !!reordering || !!swapping;
+              const arrowsBusy = !!reordering || !!swapping || !!removing;
               // Per-entry approximate coordinate, used for showing each
               // stop's straight-line leg distance from the previous stop.
               // Trail rows use the trail's GPX start when its parsed
@@ -727,13 +800,22 @@ export default function RouteBuilder({
                           </button>
                         </div>
                       )}
-                      {onRemoveWaypoint && (
+                      {(onRemoveWaypoint || onCommitRemoveWaypoint) && (
                         <button
                           type="button"
-                          onClick={() => onRemoveWaypoint(wp.id)}
+                          onClick={() => {
+                            if (onCommitRemoveWaypoint) {
+                              void runRemoveCommit(wp.name, (onProgress) =>
+                                onCommitRemoveWaypoint(wp.id, onProgress),
+                              );
+                            } else if (onRemoveWaypoint) {
+                              onRemoveWaypoint(wp.id);
+                            }
+                          }}
+                          disabled={arrowsBusy}
                           aria-label={`Remove stop ${wp.name}`}
                           data-testid={`route-builder-waypoint-remove-${wp.id}`}
-                          className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0"
+                          className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-500 hover:text-red-400 hover:bg-red-900/20 transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           <svg
                             viewBox="0 0 24 24"
@@ -871,10 +953,19 @@ export default function RouteBuilder({
                           </button>
                         )}
                         <button
-                          onClick={() => onRemove(trail.id)}
+                          onClick={() => {
+                            if (onCommitRemoveTrail) {
+                              void runRemoveCommit(trail.name, (onProgress) =>
+                                onCommitRemoveTrail(trail.id, onProgress),
+                              );
+                            } else {
+                              onRemove(trail.id);
+                            }
+                          }}
+                          disabled={arrowsBusy}
                           aria-label={`Remove ${trail.name}`}
                           data-testid={`route-builder-trail-remove-${trail.id}`}
-                          className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-600 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                          className="w-7 h-7 rounded-full bg-stone-800/60 flex items-center justify-center text-stone-600 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
                             <line x1="18" y1="6" x2="6" y2="18" />
@@ -952,7 +1043,7 @@ export default function RouteBuilder({
                       </div>
                     </div>
                   )}
-                  {(reorderError || swapError) && (
+                  {(reorderError || swapError || removeError) && (
                     <div
                       data-testid="route-builder-reorder-error"
                       className="bg-red-900/30 border border-red-600/50 rounded-lg px-3 py-2 flex items-start gap-2"
@@ -960,12 +1051,13 @@ export default function RouteBuilder({
                       <svg viewBox="0 0 24 24" className="w-4 h-4 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
                         <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
                       </svg>
-                      <p className="text-[11px] text-red-200 leading-tight flex-1">{reorderError ?? swapError}</p>
+                      <p className="text-[11px] text-red-200 leading-tight flex-1">{reorderError ?? swapError ?? removeError}</p>
                       <button
                         type="button"
                         onClick={() => {
                           setReorderError(null);
                           setSwapError(null);
+                          setRemoveError(null);
                         }}
                         aria-label="Dismiss error"
                         className="text-red-400 ml-1"
@@ -1383,7 +1475,7 @@ export default function RouteBuilder({
           rider can't fire a second mutation while we're rebuilding the
           assembled trip. Shares the same look as the planner-tab plan
           progress block. */}
-      {(reordering || swapping) && (
+      {(reordering || swapping || removing) && (
         <div
           className="fixed inset-0 z-[2750] flex items-center justify-center px-6"
           style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(2px)" }}
@@ -1395,16 +1487,20 @@ export default function RouteBuilder({
             <div className="flex items-center gap-2 mb-2">
               <span className="w-3.5 h-3.5 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></span>
               <p className="text-xs font-bold text-amber-300 uppercase tracking-wider">
-                {swapping ? `Swapping ${swapping.trailName}…` : "Reordering route…"}
+                {swapping
+                  ? `Swapping ${swapping.trailName}…`
+                  : removing
+                    ? `Removing ${removing.label}…`
+                    : "Reordering route…"}
               </p>
             </div>
             <p className="text-[11px] text-stone-300 mb-2">
-              {(swapping ?? reordering)!.progress.label}
+              {(swapping ?? removing ?? reordering)!.progress.label}
             </p>
             <div className="h-1.5 bg-stone-800 rounded-full overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-amber-500 to-amber-300 transition-all duration-300"
-                style={{ width: `${(swapping ?? reordering)!.progress.pct}%` }}
+                style={{ width: `${(swapping ?? removing ?? reordering)!.progress.pct}%` }}
               />
             </div>
           </div>
