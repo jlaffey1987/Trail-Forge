@@ -240,7 +240,7 @@ function MainShell() {
   }, []);
 
   return (
-    <div className="flex flex-col h-full max-w-md mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "430px" }}>
+    <div className="flex flex-col h-full mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "min(100%, 560px)" }}>
       <header
         className="tf-header safe-top shrink-0 flex items-center justify-between px-4 pb-3.5 border-b border-[hsl(30,12%,14%)]"
       >
