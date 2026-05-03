@@ -17,6 +17,11 @@ import {
   type TrailActivityCounts,
   type TrailPermissions,
 } from "@/lib/trailContent";
+import {
+  markCompleted,
+  unmarkCompleted,
+  useCompletionState,
+} from "@/lib/completionsStore";
 import TrailNotesPanel from "./trail-content/TrailNotesPanel";
 import TrailPhotosPanel from "./trail-content/TrailPhotosPanel";
 import TrailAmendmentsPanel from "./trail-content/TrailAmendmentsPanel";
@@ -305,6 +310,8 @@ export default function TrailDetailSheet({
               <p className="text-[10px] text-stone-500 mt-0.5" data-testid="trail-detail-counts">
                 {counts.notes} notes · {counts.photos} photos · {counts.pending} pending edits
               </p>
+              <RiddenBadgeInline trailId={trail.id} />
+
               {gpxLoading ? (
                 <div
                   className="flex items-center gap-1.5 mt-1 text-[10px] font-bold text-amber-300/90"
@@ -428,6 +435,103 @@ export default function TrailDetailSheet({
           ) : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Inline "Ridden" pill shown next to the trail title once the rider
+ * has marked the trail as ridden. Subscribes to the global completions
+ * store so it stays in sync across screens (mark in NavigationView →
+ * see it lit up here without re-opening the sheet).
+ */
+function RiddenBadgeInline({ trailId }: { trailId: string }) {
+  const { completed } = useCompletionState(trailId);
+  if (!completed) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider text-emerald-300 bg-emerald-500/15 border border-emerald-500/40"
+      data-testid="trail-detail-ridden-badge"
+      title="You've marked this trail as ridden"
+    >
+      <svg viewBox="0 0 24 24" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="3">
+        <polyline points="20 6 9 17 4 12" />
+      </svg>
+      Ridden
+    </span>
+  );
+}
+
+/**
+ * Primary mark-as-ridden control on the trail detail sheet. Toggles the
+ * completion via the store (optimistic; rolls back on server error).
+ * Signed-out riders see the same affordance but tapping prompts them to
+ * sign in — matches the "Save" button's pattern.
+ */
+function MarkRiddenButton({ trail }: { trail: Trail }) {
+  const { isSignedIn } = useCurrentUser();
+  const [, setLocation] = useLocation();
+  const { completed } = useCompletionState(trail.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleClick = async () => {
+    if (!isSignedIn) {
+      setLocation("/sign-in");
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const ok = completed
+      ? await unmarkCompleted(trail.id)
+      : await markCompleted(trail);
+    setBusy(false);
+    if (!ok) {
+      setError(
+        completed
+          ? "Couldn't remove — try again."
+          : "Couldn't mark as ridden — try again.",
+      );
+    }
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={busy}
+        aria-pressed={completed}
+        data-testid="trail-detail-mark-ridden"
+        className={
+          "w-full py-2.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border " +
+          (completed
+            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+            : "border-stone-700 bg-stone-900/40 text-stone-300 hover:border-emerald-500/40 hover:text-emerald-300") +
+          (busy ? " opacity-60 cursor-wait" : "")
+        }
+      >
+        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+          {completed ? (
+            <polyline points="20 6 9 17 4 12" />
+          ) : (
+            <>
+              <circle cx="12" cy="12" r="9" />
+              <polyline points="9 12 11 14 15 10" />
+            </>
+          )}
+        </svg>
+        {completed ? "Ridden ✓ — tap to undo" : isSignedIn ? "Mark as ridden" : "Sign in to mark ridden"}
+      </button>
+      {error ? (
+        <p
+          className="mt-1 text-[10px] text-red-300"
+          data-testid="trail-detail-mark-ridden-error"
+        >
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -645,6 +749,12 @@ function OverviewPanel({
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
           <p className="text-[11px] text-red-200 leading-tight">{addError}</p>
+        </div>
+      ) : null}
+
+      {!isApproximated ? (
+        <div className="px-4 pb-2">
+          <MarkRiddenButton trail={trail} />
         </div>
       ) : null}
 

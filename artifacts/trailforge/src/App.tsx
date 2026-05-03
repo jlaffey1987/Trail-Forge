@@ -28,6 +28,7 @@ import IntroSplash from "@/components/IntroSplash";
 import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
 import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
+import { loadCompletions, clearCompletions } from "@/lib/completionsStore";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
@@ -349,6 +350,19 @@ function ClerkUserSync() {
   useEffect(() => {
     if (!isLoaded) return;
     setPlannerRouteUserId(isSignedIn && user ? user.id : null);
+  }, [isLoaded, isSignedIn, user]);
+
+  // Hydrate the completions ("ridden") store on sign-in so every trail
+  // card across the app can paint the "ridden" badge without a per-card
+  // fetch. Cleared on sign-out so the next user doesn't briefly see the
+  // previous account's marks.
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (isSignedIn && user) {
+      void loadCompletions();
+    } else {
+      clearCompletions();
+    }
   }, [isLoaded, isSignedIn, user]);
 
   return null;

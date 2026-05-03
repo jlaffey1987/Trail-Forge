@@ -13,6 +13,11 @@ import {
 } from "@/lib/routing";
 import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
 import type { Trail } from "@/lib/supabase";
+import {
+  markCompleted,
+  unmarkCompleted,
+  useCompletionState,
+} from "@/lib/completionsStore";
 
 // Find nearest section to a user position; returns { section, distanceM }
 function findNearestSection(route: AssembledRoute, user: GeoPoint): { section: RouteSection; distanceM: number } | null {
@@ -940,6 +945,14 @@ export default function NavigationView({
                 {isTrailSec &&
                   !isPendingThis &&
                   !isRemovingThis &&
+                  !isSwappingThis && (
+                    <div className="px-2 pb-2">
+                      <NavMarkRiddenButton trail={sec.trail} />
+                    </div>
+                  )}
+                {isTrailSec &&
+                  !isPendingThis &&
+                  !isRemovingThis &&
                   !isSwappingThis &&
                   (canRemove || canSwap) && (
                     <div className="px-2 pb-2 flex gap-1.5">
@@ -1498,6 +1511,67 @@ function TurnByTurnList({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Compact mark-as-ridden control for the trail-section overlay shown
+ * during navigation. Lets a rider log a trail as completed without
+ * leaving the nav view (most likely flow: finish a trail, glance at
+ * overlay, tap "Mark ridden"). Optimistic; rolls back on server error.
+ */
+function NavMarkRiddenButton({ trail }: { trail: Trail }) {
+  const { completed } = useCompletionState(trail.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const handleClick = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const ok = completed
+      ? await unmarkCompleted(trail.id)
+      : await markCompleted(trail);
+    setBusy(false);
+    if (!ok) {
+      // Most likely cause mid-ride is a 401 (session expired) or no
+      // network. Show a brief inline message so the toggle's visual
+      // rollback isn't confusing — auto-clears after 4s.
+      setError(
+        completed ? "Couldn't undo — try again" : "Couldn't mark — sign in & retry",
+      );
+      window.setTimeout(() => setError(null), 4000);
+    }
+  };
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={busy}
+        aria-pressed={completed}
+        data-testid="nav-mark-ridden-button"
+        className={
+          "w-full py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors border " +
+          (completed
+            ? "bg-emerald-500/25 border-emerald-300/60 text-white"
+            : "bg-stone-900/45 hover:bg-stone-900/65 border-white/30 text-white") +
+          (busy ? " opacity-60" : "")
+        }
+      >
+        <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        {completed ? "Ridden ✓ — tap to undo" : "Mark as ridden"}
+      </button>
+      {error ? (
+        <p
+          className="mt-1 text-[10px] text-amber-200 text-center"
+          data-testid="nav-mark-ridden-error"
+        >
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

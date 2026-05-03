@@ -8,6 +8,7 @@ import {
   subscribeRouteTrails,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
+import { useCompletionIds } from "@/lib/completionsStore";
 
 const DIFFICULTY_LABELS: Record<number, string> = {
   1: "Novice", 2: "Easy", 3: "Easy+", 4: "Moderate", 5: "Medium",
@@ -165,6 +166,7 @@ export default function ClusterTrailListSheet({
     });
   }, [controlled]);
   const routeIds = controlled ? selectedIds : storeIds;
+  const completedIds = useCompletionIds();
   // Inline cap warning shown above the rows so a user who taps "+ Route"
   // when the planner is already full sees an explanation rather than a
   // silent no-op (the server PUT enforces PLANNER_MAX_TRAILS too).
@@ -310,8 +312,22 @@ export default function ClusterTrailListSheet({
                       data-testid={`cluster-trail-row-${trail.id}`}
                     >
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-stone-100 truncate">
-                          {trail.name}
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-sm font-semibold text-stone-100 truncate flex-1 min-w-0">
+                            {trail.name}
+                          </div>
+                          {completedIds.has(trail.id) && (
+                            <span
+                              className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider text-emerald-300 bg-emerald-500/15 border border-emerald-500/40"
+                              data-testid={`cluster-trail-ridden-${trail.id}`}
+                              title="You've ridden this trail"
+                            >
+                              <svg viewBox="0 0 24 24" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="3">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                              Ridden
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] text-stone-500 mt-0.5 flex items-center gap-2 flex-wrap">
                           {km != null && <span>{km.toFixed(1)} km</span>}

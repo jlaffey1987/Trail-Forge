@@ -29,11 +29,147 @@ import EditTrailDialog from "@/components/contribute/EditTrailDialog";
 import GroupsSection from "@/components/groups/GroupsSection";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
+import {
+  unmarkCompleted,
+  useCompletionItems,
+  type CompletionItem,
+} from "@/lib/completionsStore";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
   6: "#fb923c", 7: "#f97316", 8: "#ef4444", 9: "#dc2626", 10: "#7f1d1d",
 };
+
+function formatRiddenDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * "Ridden" section — collapsed by default to keep the My Trails list
+ * compact. Shows a count + total km headline always; the full list
+ * expands on tap. Each row is tappable to open the trail detail sheet
+ * (so the rider can edit notes, view the map, or unmark from there)
+ * and has a small "Undo" affordance for fast removal.
+ */
+function RiddenTrailsSection({
+  onOpenTrail,
+  onToast,
+}: {
+  onOpenTrail: (t: Trail) => void;
+  onToast: (msg: string) => void;
+}) {
+  const { items, loaded } = useCompletionItems();
+  const [expanded, setExpanded] = useState(false);
+
+  const totalKm = items.reduce((acc, it) => {
+    const km = it.trail?.distance_km;
+    return acc + (typeof km === "number" && Number.isFinite(km) ? km : 0);
+  }, 0);
+
+  const handleUndo = async (item: CompletionItem) => {
+    const ok = await unmarkCompleted(item.trail_id);
+    onToast(ok ? "Removed from ridden" : "Couldn't remove — try again");
+  };
+
+  return (
+    <section
+      className="px-4 pb-6 space-y-3"
+      data-testid="my-trails-ridden-section"
+    >
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">
+          Ridden ({items.length})
+        </h2>
+        {loaded && items.length > 0 && (
+          <span className="text-[10px] text-emerald-400" data-testid="my-trails-ridden-total">
+            {totalKm.toFixed(1)} km total
+          </span>
+        )}
+      </div>
+      {!loaded ? (
+        <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-4 text-center">
+          <p className="text-stone-500 text-xs">Loading…</p>
+        </div>
+      ) : items.length === 0 ? (
+        <div className="bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-4 text-center">
+          <p className="text-stone-500 text-xs">No ridden trails yet.</p>
+          <p className="text-stone-600 text-[11px] mt-1">
+            Tap "Mark as ridden" on any trail to log it here.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2">
+            {(expanded ? items : items.slice(0, 3)).map((item) => {
+              const trail = item.trail;
+              const diff = trail?.difficulty ?? 5;
+              const km = trail?.distance_km;
+              return (
+                <div
+                  key={item.id}
+                  className="bg-[hsl(22,15%,11%)] border border-emerald-500/20 rounded-xl p-3 flex items-center gap-2"
+                  data-testid={`ridden-trail-${item.trail_id}`}
+                >
+                  <button
+                    type="button"
+                    className="flex-1 min-w-0 text-left"
+                    onClick={() => trail && onOpenTrail(trail)}
+                    disabled={!trail}
+                    aria-label={trail ? `View details for ${trail.name}` : "Trail unavailable"}
+                  >
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span
+                        className="w-5 h-5 rounded text-[10px] font-bold text-black flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: DIFFICULTY_COLORS[diff] ?? "#fbbf24" }}
+                      >
+                        {diff}
+                      </span>
+                      <h3 className="text-sm font-bold text-stone-100 truncate">
+                        {trail?.name ?? "Trail"}
+                      </h3>
+                    </div>
+                    <p className="text-[10px] text-stone-500">
+                      Ridden {formatRiddenDate(item.completed_at)}
+                      {typeof km === "number" ? ` · ${km.toFixed(1)} km` : ""}
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleUndo(item)}
+                    className="shrink-0 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider text-stone-400 hover:text-red-300 border border-stone-700 hover:border-red-500/40 transition-colors"
+                    data-testid={`ridden-trail-undo-${item.trail_id}`}
+                    aria-label={`Remove ${trail?.name ?? "trail"} from ridden`}
+                  >
+                    Undo
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {items.length > 3 && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="w-full py-1.5 rounded-md text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 border border-[hsl(30,12%,20%)] bg-[hsl(22,15%,9%)]"
+              data-testid="my-trails-ridden-toggle"
+            >
+              {expanded ? "Show less" : `Show ${items.length - 3} more`}
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
 
 const UPLOAD_GPX_INTENT_KEY_PREFIX = "trailforge.upload_gpx_intent_at:";
 const UPLOAD_GPX_INTENT_TTL_MS = 5 * 60 * 1000;
@@ -657,6 +793,12 @@ export default function MyTrailsTab() {
           )}
         </section>
       )}
+
+      {/* Ridden trails — log of completed trails the user has marked. */}
+      <RiddenTrailsSection
+        onOpenTrail={setSelectedTrail}
+        onToast={setToast}
+      />
 
       {/* Saved (planned) trails section */}
       <section className="px-4 pb-6 space-y-3">

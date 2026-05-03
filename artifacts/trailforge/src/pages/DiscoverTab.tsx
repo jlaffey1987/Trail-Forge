@@ -18,6 +18,11 @@ import {
 import TrailDetailSheet from "@/components/TrailDetailSheet";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import GlossaryDialog from "@/components/GlossaryDialog";
+import {
+  markCompleted,
+  unmarkCompleted,
+  useCompletionIds,
+} from "@/lib/completionsStore";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -82,6 +87,7 @@ export default function DiscoverTab() {
   // feed off-screen. We show the first 2 by default and let the user expand
   // the rest with a single tap.
   const [showAllGroups, setShowAllGroups] = useState(false);
+  const completedIds = useCompletionIds();
 
   const refreshDiscoverableGroups = useCallback(async () => {
     if (!isSignedIn) {
@@ -394,6 +400,7 @@ export default function DiscoverTab() {
               const preview = PREVIEW_GRADIENTS[idx % PREVIEW_GRADIENTS.length];
               const isLiked = liked.has(trail.id);
               const likesBase = 100 + (idx * 73 + diff * 37) % 800;
+              const isRidden = completedIds.has(trail.id);
 
               const canOpenDetail = isSignedIn;
               const openDetail = () => {
@@ -445,9 +452,23 @@ export default function DiscoverTab() {
                   </div>
 
                   <div className="p-3">
-                    <div className="flex items-start justify-between mb-1">
-                      <h3 className="text-sm font-bold text-stone-100">{trail.name}</h3>
-                      <span className="text-[10px] text-stone-500 ml-2 shrink-0">{getPostedTime(trail.created_at)}</span>
+                    <div className="flex items-start justify-between mb-1 gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                        <h3 className={`text-sm font-bold truncate ${isRidden ? "text-stone-300" : "text-stone-100"}`}>{trail.name}</h3>
+                        {isRidden && (
+                          <span
+                            className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider text-emerald-300 bg-emerald-500/15 border border-emerald-500/40"
+                            data-testid={`discover-card-ridden-${trail.id}`}
+                            title="You've ridden this trail"
+                          >
+                            <svg viewBox="0 0 24 24" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="3">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            Ridden
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-stone-500 shrink-0">{getPostedTime(trail.created_at)}</span>
                     </div>
 
                     <div className="flex items-center gap-2 mb-2">
@@ -532,18 +553,46 @@ export default function DiscoverTab() {
                           <span className="text-xs text-stone-500">{Math.floor(likesBase * 0.13)}</span>
                         </div>
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (canOpenDetail) openDetail();
-                        }}
-                        disabled={!canOpenDetail}
-                        className="text-xs text-amber-400 font-semibold hover:text-amber-300 transition-colors disabled:text-stone-500 disabled:cursor-not-allowed"
-                        title={canOpenDetail ? undefined : "Sign in to view trail details"}
-                        data-testid={`discover-card-view-${trail.id}`}
-                      >
-                        View Trail
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (!isSignedIn) {
+                              setLocation("/sign-in");
+                              return;
+                            }
+                            if (isRidden) await unmarkCompleted(trail.id);
+                            else await markCompleted(trail);
+                          }}
+                          aria-pressed={isRidden}
+                          title={
+                            isRidden
+                              ? "Marked ridden — tap to undo"
+                              : "Mark as ridden"
+                          }
+                          data-testid={`discover-card-mark-ridden-${trail.id}`}
+                          className={
+                            "px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors border " +
+                            (isRidden
+                              ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                              : "border-stone-700 text-stone-400 hover:border-emerald-500/40 hover:text-emerald-300")
+                          }
+                        >
+                          {isRidden ? "Ridden ✓" : "Ridden?"}
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (canOpenDetail) openDetail();
+                          }}
+                          disabled={!canOpenDetail}
+                          className="text-xs text-amber-400 font-semibold hover:text-amber-300 transition-colors disabled:text-stone-500 disabled:cursor-not-allowed"
+                          title={canOpenDetail ? undefined : "Sign in to view trail details"}
+                          data-testid={`discover-card-view-${trail.id}`}
+                        >
+                          View Trail
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
