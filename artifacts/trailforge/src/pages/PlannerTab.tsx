@@ -804,7 +804,7 @@ export default function PlannerTab() {
 
   return (
     <div className="flex flex-col h-full relative">
-      <div ref={scrollerRef} className="flex-1 tf-scroll pb-2" style={{ paddingBottom: routeTrails.length > 0 ? "120px" : "0" }}>
+      <div ref={scrollerRef} className="flex-1 tf-scroll pb-2" style={{ paddingBottom: routeEntries.length > 0 ? "120px" : "0" }}>
         {/* Hero band — biking POV photo with dark gradient overlay so the
             title stays legible. Uses the existing ride-640 / ride-1280 pair
             via <picture>+srcset. Eager-loaded so it doesn't pop in on first

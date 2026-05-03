@@ -11,6 +11,7 @@ import {
   type TrailRoute,
 } from "@/lib/gpx";
 import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
+import { haversineM } from "@/lib/routing";
 import type { RouteEntry, RouteWaypoint } from "@/lib/routing";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
@@ -598,7 +599,26 @@ export default function RouteBuilder({
               // before the first one settles. Mirrors the drag-handle
               // guard in handleDragPointerDown.
               const arrowsBusy = !!reordering || !!swapping;
+              // Per-entry approximate coordinate, used for showing each
+              // stop's straight-line leg distance from the previous stop.
+              // Trail rows use the trail's GPX start when its parsed
+              // route is available; otherwise leg distance is omitted.
+              const entryCoord = (e: RouteEntry): { lat: number; lng: number } | null => {
+                if (e.kind === "waypoint") return { lat: e.waypoint.lat, lng: e.waypoint.lng };
+                const ti = trailIdxById.get(e.trail.id);
+                if (ti == null) return null;
+                const r = routes[ti];
+                const s = r ? getTrailStart(r.waypoints) : null;
+                return s ? { lat: s.lat, lng: s.lon } : null;
+              };
               const rows = entries.map((entry, idx) => {
+                const stopNum = idx + 1;
+                const prevCoord = idx > 0 ? entryCoord(entries[idx - 1]) : null;
+                const thisCoord = entryCoord(entry);
+                const legKm =
+                  prevCoord && thisCoord
+                    ? haversineM(prevCoord, thisCoord) / 1000
+                    : null;
                 const isDragOver =
                   dragState != null && dragState.overIdx === idx && dragState.fromIdx !== idx;
                 const isDragSource = dragState?.fromIdx === idx;
@@ -641,7 +661,13 @@ export default function RouteBuilder({
                     >
                       {dragHandle}
                       <div
-                        className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+                        className="w-7 h-7 rounded-full bg-stone-800 text-stone-100 flex items-center justify-center text-[11px] font-black shrink-0 border border-stone-600"
+                        aria-label={`Stop ${stopNum}`}
+                      >
+                        {stopNum}
+                      </div>
+                      <div
+                        className="w-6 h-6 rounded-full flex items-center justify-center shrink-0"
                         style={{
                           background: WAYPOINT_KIND_COLOR[wp.kind],
                           border: "2px solid #f0a832",
@@ -649,8 +675,8 @@ export default function RouteBuilder({
                       >
                         <svg
                           viewBox="0 0 24 24"
-                          width="13"
-                          height="13"
+                          width="11"
+                          height="11"
                           fill="none"
                           stroke="#fff"
                           strokeWidth="2.4"
@@ -665,8 +691,12 @@ export default function RouteBuilder({
                           {wp.name}
                         </div>
                         <div className="text-[10px] text-stone-500 capitalize">
-                          {wp.kind} stop · {wp.lat.toFixed(4)},{" "}
-                          {wp.lng.toFixed(4)}
+                          {wp.kind} stop
+                          {legKm != null && (
+                            <>
+                              {" "}· <span className="text-stone-400">{legKm.toFixed(1)} km from prev</span>
+                            </>
+                          )}
                         </div>
                       </div>
                       {canReorder && (
@@ -764,8 +794,11 @@ export default function RouteBuilder({
                     >
                       <div className="flex items-center gap-2 p-3">
                         {dragHandle}
-                        <div className="w-7 h-7 rounded-full bg-amber-500 text-stone-900 flex items-center justify-center text-xs font-black shrink-0">
-                          {tIdx + 1}
+                        <div
+                          className="w-7 h-7 rounded-full bg-amber-500 text-stone-900 flex items-center justify-center text-xs font-black shrink-0"
+                          aria-label={`Stop ${stopNum}`}
+                        >
+                          {stopNum}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-1.5 mb-0.5">
@@ -783,11 +816,11 @@ export default function RouteBuilder({
                             <span className={`text-[10px] ${trail.legal_status === "BOAT" ? "text-amber-400" : "text-green-400"}`}>
                               {trail.legal_status}
                             </span>
-                            {start && (
+                            {legKm != null && (
                               <>
                                 <span className="text-stone-700">·</span>
-                                <span className="text-[10px] text-stone-600">
-                                  {start.lat.toFixed(4)}, {start.lon.toFixed(4)}
+                                <span className="text-[10px] text-stone-400">
+                                  {legKm.toFixed(1)} km from prev
                                 </span>
                               </>
                             )}
