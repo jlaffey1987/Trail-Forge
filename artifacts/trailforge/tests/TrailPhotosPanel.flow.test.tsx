@@ -254,6 +254,63 @@ describe("TrailPhotosPanel — upload + delete UI journey", () => {
     expect(onCountsChanged).toHaveBeenCalled();
   });
 
+  it("opens the lightbox on thumbnail click, navigates with prev/next (with wrap-around), and closes", async () => {
+    // Seed 3 photos so the GET /photos response renders thumbnails up front.
+    const seeded: PhotoRow[] = [0, 1, 2].map((i) => ({
+      id: `00000000-0000-4000-8000-00000000000${i + 1}`,
+      trail_id: TRAIL_ID,
+      author_user_id: "someone_else",
+      storage_key: `trails/${TRAIL_ID}/photos/photo-${i}.jpg`,
+      width: 1200,
+      height: 800,
+      caption: `Photo ${i}`,
+      // Descending created_at so the panel renders them in index order 0,1,2.
+      created_at: new Date(2026, 0, 10 - i).toISOString(),
+      hidden_at: null,
+      users: { id: "someone_else", display_name: "Other Rider", avatar_url: null },
+    }));
+    backend.photos.push(...seeded);
+
+    const TrailPhotosPanel = await importPanel();
+    const user = userEvent.setup();
+    render(<TrailPhotosPanel trailId={TRAIL_ID} />);
+
+    await waitFor(() => expect(screen.getByText("3 photos")).toBeInTheDocument());
+
+    const expectedSrc = (i: number) =>
+      `/api/storage/objects/trails/${TRAIL_ID}/photos/photo-${i}.jpg`;
+
+    // Click the first thumbnail — the lightbox should open showing photo 0.
+    const firstThumb = screen.getByTestId(`photo-${seeded[0]!.id}`);
+    await user.click(firstThumb.querySelector("button")!);
+
+    const lightbox = await screen.findByTestId("photo-lightbox");
+    const lightboxImg = () => lightbox.querySelector("img")!;
+    expect(lightboxImg().getAttribute("src")).toBe(expectedSrc(0));
+
+    // Next → photo 1, Next → photo 2, Next wraps back to photo 0.
+    const nextBtn = screen.getByLabelText("Next");
+    await user.click(nextBtn);
+    expect(lightboxImg().getAttribute("src")).toBe(expectedSrc(1));
+    await user.click(nextBtn);
+    expect(lightboxImg().getAttribute("src")).toBe(expectedSrc(2));
+    await user.click(nextBtn);
+    expect(lightboxImg().getAttribute("src")).toBe(expectedSrc(0));
+
+    // Prev from index 0 wraps to photo 2.
+    const prevBtn = screen.getByLabelText("Previous");
+    await user.click(prevBtn);
+    expect(lightboxImg().getAttribute("src")).toBe(expectedSrc(2));
+    await user.click(prevBtn);
+    expect(lightboxImg().getAttribute("src")).toBe(expectedSrc(1));
+
+    // Close button removes the lightbox.
+    await user.click(screen.getByLabelText("Close"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("photo-lightbox")).not.toBeInTheDocument(),
+    );
+  });
+
   it("caps a too-large multi-file selection at MAX_PHOTOS_PER_UPLOAD and surfaces a warning", async () => {
     const { MAX_PHOTOS_PER_UPLOAD } = await import("@/lib/photoUpload");
     const TrailPhotosPanel = await importPanel();
