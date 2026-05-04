@@ -9,12 +9,14 @@ import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTr
 import SaveTrailForm from "@/components/contribute/SaveTrailForm";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import MapRoutePanel from "@/components/MapRoutePanel";
+import MapTrailSearch from "@/components/MapTrailSearch";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
-import { getTrailLatLngs } from "@/lib/trailLayer";
+import { getTrailLatLngs, invalidateTrailGeometryCache } from "@/lib/trailLayer";
 import { useLeaflet } from "@/lib/useLeaflet";
 import {
   addTrail,
   fetchTrailsInBbox,
+  fetchTrailGpxByIds,
   type Trail,
   type MapBbox,
 } from "@/lib/supabase";
@@ -32,15 +34,23 @@ import {
   bboxesIntersect,
 } from "@/lib/trailLayer";
 import {
-  useRouteTrails,
-  removeRouteTrail,
-  useRouteEntries,
-  removeRouteWaypoint,
-  setRouteEntries,
+  setRouteTrails as setPlannerRouteTrails,
 } from "@/lib/plannerRouteStore";
+import {
+  useMapSelection,
+  addSelectedTrail,
+  removeSelectedTrail,
+  setSelectedTrails,
+  clearSelection,
+} from "@/lib/mapSelectionStore";
 import {
   HYBRID_LABEL_TILE_URL,
   HYBRID_LABEL_TILE_ATTRIBUTION,
+  assembleMultiModalRoute,
+  orderTrailsNearestNeighbour,
+  reverseGeocode,
+  type GeoPoint,
+  type AssembledRoute,
 } from "@/lib/routing";
 import {
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
@@ -117,6 +127,7 @@ export default function MapTab() {
   const [showFilters, setShowFilters] = useState(false);
   const [showLegend, setShowLegend] = useState(true);
   const [selectedTrail, setSelectedTrail] = useState<Trail | null>(null);
+  const [highlightedTrailId, setHighlightedTrailId] = useState<string | null>(null);
   // The list the selected trail was opened from. We capture this at click
   // time so the prev/next arrows in TrailDetailSheet stay scoped to the
   // surface the rider came from (cluster list, route panel, or the visible
@@ -126,22 +137,13 @@ export default function MapTab() {
   const [currentZoom, setCurrentZoom] = useState(7);
   const [, setCurrentBbox] = useState<MapBbox | null>(null);
 
-  const [routeTrails, setRouteTrails] = useRouteTrails();
-  // Read entries to surface custom waypoint stops in the map's route panel.
-  // Trail order/management still uses `routeTrails` so the existing reorder
-  // and remove flows keep working unchanged.
-  const routeEntriesForMap = useRouteEntries();
-  const routeWaypointsForMap = useMemo(
-    () =>
-      routeEntriesForMap
-        .filter(
-          (e): e is Extract<typeof e, { kind: "waypoint" }> =>
-            e.kind === "waypoint",
-        )
-        .map((e) => e.waypoint),
-    [routeEntriesForMap],
-  );
+  const routeTrails = useMapSelection();
   const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
+  const highlightIdSet = useMemo(() => {
+    const s = new Set(routeIdSet);
+    if (highlightedTrailId) s.add(highlightedTrailId);
+    return s;
+  }, [routeIdSet, highlightedTrailId]);
   const routeConnectorsRef = useRef<import("leaflet").Polyline[]>([]);
 
   // "+ Add Trail" / contribute flows
@@ -149,6 +151,12 @@ export default function MapTab() {
   const [showUploadGpx, setShowUploadGpx] = useState(false);
   const [showDrawSave, setShowDrawSave] = useState(false);
   const [savedTrailToast, setSavedTrailToast] = useState<string | null>(null);
+
+  // Build-from-selection flow state
+  const [showStartChooser, setShowStartChooser] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [buildProgress, setBuildProgress] = useState<{ step: number; total: number; label: string } | null>(null);
+  const [buildError, setBuildError] = useState<string | null>(null);
 
   const groupFilterId = useMemo(() => {
     const params = new URLSearchParams(queryString);
@@ -640,7 +648,7 @@ export default function MapTab() {
     }
 
     const handle = renderTrailLayer(map, trailsForRender, {
-      selectedIds: routeIdSet,
+      selectedIds: highlightIdSet,
       selectedColor: "#f0a832",
       showLabels: false,
       shadow: false,
@@ -660,7 +668,7 @@ export default function MapTab() {
       showSharedGroupBadges: true,
     });
     trailLayerHandleRef.current = handle;
-  }, [trailsForRender, mapMode, routeIdSet, currentZoom, zoomToCluster]);
+  }, [trailsForRender, mapMode, highlightIdSet, currentZoom, zoomToCluster]);
 
   // Render dashed connector polylines between consecutive trails in the
   // planner route so the user can preview the order they've chosen on the
@@ -835,15 +843,179 @@ export default function MapTab() {
   const activeLayerCount = layers.filter((l) => l.visible).length;
   const filterCount = filters.difficulties.length + filters.trailTypes.length;
 
-  // Hand off the current route to the Planner tab. We navigate directly to
-  // the Planner ("/") with `?build=1` so PlannerTab's mount-effect knows to
-  // prompt for start + end addresses.
-  const handleBuildRoute = useCallback(() => {
+  const handleToggleSearchTrail = useCallback((trail: Trail) => {
+    if (routeIdSet.has(trail.id)) {
+      removeSelectedTrail(trail.id);
+    } else {
+      addSelectedTrail(trail);
+    }
+  }, [routeIdSet]);
+
+  const handleFlyToTrail = useCallback((trail: Trail) => {
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    const bbox = getTrailBbox(trail);
+    if (bbox) {
+      mapRef.current.fitBounds(
+        L.latLngBounds([bbox.minLat, bbox.minLng], [bbox.maxLat, bbox.maxLng]),
+        { padding: [60, 60], maxZoom: 14 },
+      );
+    }
+    setHighlightedTrailId(trail.id);
+    setSelectedTrailContext([trail]);
+    setSelectedTrail(trail);
+  }, []);
+
+  const handlePlanInPlanner = useCallback(() => {
     if (routeTrails.length === 0) return;
+    setPlannerRouteTrails(routeTrails);
     const params = new URLSearchParams(window.location.search);
     params.set("build", "1");
     setLocation(`/?${params.toString()}`);
-  }, [routeTrails.length, setLocation]);
+  }, [routeTrails, setLocation]);
+
+  const handleBuildRoute = useCallback(() => {
+    if (routeTrails.length === 0) return;
+    if (routeTrails.length < 2) {
+      setBuildError("Add at least 2 trails to build a route.");
+      setTimeout(() => setBuildError(null), 4000);
+      return;
+    }
+    const approx = routeTrails.find((t) => t.verification_status === "ai-approximated");
+    if (approx) {
+      setBuildError(`"${approx.name}" is AI-approximated and can't be navigated. Remove it first.`);
+      setTimeout(() => setBuildError(null), 5000);
+      return;
+    }
+    setShowStartChooser(true);
+  }, [routeTrails]);
+
+  const doBuildFromSelection = useCallback(async (useGps: boolean) => {
+    setShowStartChooser(false);
+    setBuilding(true);
+    setBuildError(null);
+    setBuildProgress({ step: 0, total: 100, label: "Preparing…" });
+
+    try {
+      let startPt: GeoPoint | null = null;
+
+      if (useGps) {
+        setBuildProgress({ step: 5, total: 100, label: "Getting your location…" });
+        try {
+          const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 10000,
+              maximumAge: 60000,
+            }),
+          );
+          const place = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
+          startPt = place ?? {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            label: `${pos.coords.latitude.toFixed(5)}, ${pos.coords.longitude.toFixed(5)}`,
+          };
+        } catch {
+          setBuildError("Couldn't get your location — using first trail as start instead.");
+        }
+      }
+
+      setBuildProgress({ step: 10, total: 100, label: "Loading trail data…" });
+      const missingGpxIds = routeTrails.filter((t) => t.gpx_data == null).map((t) => t.id);
+      let hydratedTrails = routeTrails;
+      if (missingGpxIds.length > 0) {
+        const gpxMap = await fetchTrailGpxByIds(missingGpxIds);
+        hydratedTrails = routeTrails.map((t) => {
+          if (t.gpx_data != null) return t;
+          const g = gpxMap.get(t.id);
+          if (g != null) {
+            invalidateTrailGeometryCache(t.id);
+            return { ...t, gpx_data: g };
+          }
+          return t;
+        });
+      }
+
+      let pinnedFirst: Trail | null = null;
+      if (!startPt) {
+        for (const candidate of hydratedTrails) {
+          const pts = getTrailLatLngs(candidate);
+          if (pts.length >= 2) {
+            startPt = { lat: pts[0][0], lng: pts[0][1] };
+            pinnedFirst = candidate;
+            break;
+          }
+        }
+        if (!startPt) {
+          setBuildError("None of the selected trails have GPS geometry.");
+          setBuilding(false);
+          setBuildProgress(null);
+          return;
+        }
+      }
+
+      setBuildProgress({ step: 15, total: 100, label: "Optimizing trail order…" });
+      const toOrder = pinnedFirst
+        ? hydratedTrails.filter((t) => t.id !== pinnedFirst!.id)
+        : hydratedTrails;
+      const trailExitPt = pinnedFirst
+        ? (() => {
+            const pts = getTrailLatLngs(pinnedFirst);
+            return { lat: pts[pts.length - 1][0], lng: pts[pts.length - 1][1] } as GeoPoint;
+          })()
+        : startPt;
+      const sorted = pinnedFirst
+        ? [pinnedFirst, ...orderTrailsNearestNeighbour(trailExitPt, toOrder)]
+        : orderTrailsNearestNeighbour(startPt, hydratedTrails);
+
+      const entries = sorted.map((t) => ({ kind: "trail" as const, trail: t }));
+
+      setBuildProgress({ step: 20, total: 100, label: "Building route…" });
+      const route = await assembleMultiModalRoute(
+        startPt,
+        null,
+        entries,
+        (step, total, label) => {
+          const pct = 20 + Math.round((step / total) * 75);
+          setBuildProgress({ step: pct, total: 100, label });
+        },
+      );
+
+      if (route.sections.length === 0) {
+        setBuildError("Could not build a route. Check your trails have valid GPS data.");
+        setBuilding(false);
+        setBuildProgress(null);
+        return;
+      }
+
+      const warnings: string[] = [];
+      if (route.skippedTrails.length > 0) {
+        warnings.push(`Skipped ${route.skippedTrails.length} trail${route.skippedTrails.length > 1 ? "s" : ""} with missing GPS data: ${route.skippedTrails.join(", ")}`);
+      }
+      if (route.failedRoadSegments > 0) {
+        warnings.push(`${route.failedRoadSegments} road connector${route.failedRoadSegments > 1 ? "s" : ""} could not be routed and ${route.failedRoadSegments > 1 ? "were" : "was"} omitted.`);
+      }
+      if (warnings.length > 0) {
+        setBuildError(warnings.join(" • "));
+        setTimeout(() => setBuildError(null), 8000);
+      }
+
+      const routeJson = JSON.stringify(route);
+      try {
+        sessionStorage.setItem("trailforge_selection_route", routeJson);
+      } catch {
+        // sessionStorage full or unavailable — fall through
+      }
+
+      const params = new URLSearchParams(window.location.search);
+      params.set("fromSelection", "1");
+      setLocation(`/?${params.toString()}`);
+    } catch {
+      setBuildError("Network error while building route. Please try again.");
+    }
+    setBuilding(false);
+    setBuildProgress(null);
+  }, [routeTrails, setLocation]);
 
   const handleAddChoice = (choice: AddTrailChoice) => {
     setShowAddMenu(false);
@@ -1034,6 +1206,15 @@ ${trkpts}
         </div>
       </div>
 
+      {/* Trail search (Explore mode) */}
+      {mapMode === "explore" && (
+        <MapTrailSearch
+          routeIdSet={routeIdSet}
+          onToggleTrail={handleToggleSearchTrail}
+          onFlyTo={handleFlyToTrail}
+        />
+      )}
+
       {/* Mode hints */}
       {mapMode === "draw" && (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-[1000] bg-amber-500/90 text-stone-900 text-xs font-bold px-3 py-1.5 rounded-full shadow-lg pointer-events-none whitespace-nowrap">
@@ -1079,12 +1260,12 @@ ${trkpts}
         </div>
       )}
 
-      {/* Trail status pill (Explore mode). Shifts down when the Map Route
-          Panel is showing so they don't overlap. */}
+      {/* Trail status pill (Explore mode). Shifts down when the search bar
+          and/or the Map Route Panel are showing so they don't overlap. */}
       {mapMode === "explore" && (
         <div
           className={`absolute left-1/2 -translate-x-1/2 z-[1000] pointer-events-none ${
-            routeTrails.length > 0 ? "top-24" : groupFilterId ? "top-[4.5rem]" : "top-14"
+            routeTrails.length > 0 ? "top-[7.5rem]" : groupFilterId ? "top-[5.5rem]" : "top-[3.5rem]"
           }`}
         >
           <div className="bg-black/70 backdrop-blur border border-stone-700/60 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full text-stone-200 flex items-center gap-1.5 shadow-lg">
@@ -1124,26 +1305,125 @@ ${trkpts}
       )}
 
       {/* Map Route Panel — only in Explore so it doesn't fight Draw / Record
-          stats. Lets users review, reorder, remove, and hand off the
-          tap-built route to the Planner. */}
+          stats. Positioned below the search bar. */}
       {mapMode === "explore" && (
         <MapRoutePanel
           trails={routeTrails}
-          onReorder={(next) => setRouteTrails(next)}
-          onRemove={(id) => removeRouteTrail(id)}
-          onClear={() => setRouteTrails([])}
+          onReorder={(next) => setSelectedTrails(next)}
+          onRemove={(id) => removeSelectedTrail(id)}
+          onClear={() => clearSelection()}
           onBuildRoute={handleBuildRoute}
+          onPlanInPlanner={handlePlanInPlanner}
           onSelectTrail={(trail) => {
-            // Route panel context — prev/next walks the route order so the
-            // rider can read each trail in the order they planned them.
             setSelectedTrailContext(routeTrails);
             setSelectedTrail(trail);
           }}
-          waypoints={routeWaypointsForMap}
-          onRemoveWaypoint={(id) => removeRouteWaypoint(id)}
-          entries={routeEntriesForMap}
-          onReorderEntries={setRouteEntries}
+          building={building}
+          buildError={buildError}
         />
+      )}
+
+      {/* Start chooser dialog */}
+      {showStartChooser && (
+        <div className="absolute inset-0 z-[2000] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div
+            className="mx-4 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden"
+            style={{
+              background: "hsl(22,15%,11%)",
+              border: "1.5px solid rgba(212,135,12,0.5)",
+            }}
+            data-testid="start-chooser"
+          >
+            <div className="px-4 pt-4 pb-3">
+              <h3 className="text-base font-black text-stone-100 uppercase tracking-wider">
+                Build Route
+              </h3>
+              <p className="text-[11px] text-stone-400 mt-1">
+                {routeTrails.length} trails will be auto-ordered by geography and connected with road segments.
+              </p>
+            </div>
+            <div className="px-4 pb-4 space-y-2">
+              <button
+                type="button"
+                onClick={() => void doBuildFromSelection(true)}
+                className="w-full flex items-center gap-3 px-3 py-3 rounded-xl border border-stone-700/60 bg-[hsl(22,15%,13%)] hover:border-amber-500/40 transition-colors text-left"
+                data-testid="start-chooser-gps"
+              >
+                <div className="w-9 h-9 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0">
+                  <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="3" />
+                    <line x1="12" y1="2" x2="12" y2="5" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                    <line x1="2" y1="12" x2="5" y2="12" />
+                    <line x1="19" y1="12" x2="22" y2="12" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="text-[12px] font-bold text-stone-100">Start from my location</div>
+                  <div className="text-[10px] text-stone-500">Orders trails nearest to where you are now</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => void doBuildFromSelection(false)}
+                className="w-full flex items-center gap-3 px-3 py-3 rounded-xl border border-stone-700/60 bg-[hsl(22,15%,13%)] hover:border-amber-500/40 transition-colors text-left"
+                data-testid="start-chooser-first"
+              >
+                <div className="w-9 h-9 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0">
+                  <svg viewBox="0 0 24 24" className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                    <circle cx="12" cy="10" r="3" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="text-[12px] font-bold text-stone-100">Start from first trail</div>
+                  <div className="text-[10px] text-stone-500">Route begins at the nearest trail's entry point</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowStartChooser(false)}
+                className="w-full py-2 text-[11px] font-bold uppercase tracking-wider text-stone-500 hover:text-stone-300 transition-colors"
+                data-testid="start-chooser-cancel"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Build progress overlay */}
+      {building && buildProgress && (
+        <div className="absolute inset-0 z-[2000] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div
+            className="mx-4 w-full max-w-xs rounded-2xl shadow-2xl p-5"
+            style={{
+              background: "hsl(22,15%,11%)",
+              border: "1.5px solid rgba(212,135,12,0.5)",
+            }}
+            data-testid="build-progress"
+          >
+            <div className="flex flex-col items-center gap-3">
+              <span className="w-8 h-8 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin" />
+              <div className="text-center">
+                <div className="text-[12px] font-bold text-stone-100">{buildProgress.label}</div>
+                <div className="text-[10px] text-stone-500 mt-1">
+                  {buildProgress.step} / {buildProgress.total}
+                </div>
+              </div>
+              <div className="w-full bg-stone-800 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-300"
+                  style={{
+                    width: `${Math.round((buildProgress.step / buildProgress.total) * 100)}%`,
+                    background: "linear-gradient(90deg, #d4870c, #f0a832)",
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Difficulty legend (Explore mode) */}
@@ -1331,10 +1611,12 @@ ${trkpts}
         return (
           <TrailDetailSheet
             trail={selectedTrail}
-            onClose={() => setSelectedTrail(null)}
+            onClose={() => { setSelectedTrail(null); setHighlightedTrailId(null); }}
             prevTrail={prevTrail}
             nextTrail={nextTrail}
             onNavigate={setSelectedTrail}
+            onToggleRoute={handleToggleSearchTrail}
+            routeIds={routeIdSet}
           />
         );
       })()}
@@ -1346,7 +1628,6 @@ ${trkpts}
         <ClusterTrailListSheet
           trails={clusterTrailsForSheet}
           onSelectTrail={(trail) => {
-            // Cluster context — prev/next walks the cluster member list.
             setSelectedTrailContext(clusterTrailsForSheet);
             setActiveCluster(null);
             setSelectedTrail(trail);
@@ -1357,6 +1638,8 @@ ${trkpts}
             zoomToCluster(c);
           }}
           onClose={() => setActiveCluster(null)}
+          onToggleTrail={handleToggleSearchTrail}
+          selectedIds={routeIdSet}
         />
       )}
 

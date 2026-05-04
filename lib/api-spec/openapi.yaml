@@ -16,6 +16,8 @@ tags:
     description: Authenticated user (Clerk) self endpoints.
   - name: SavedTrails
     description: Server-mediated saved-trails CRUD (ownership-enforced).
+  - name: Trails
+    description: Trail discovery and search.
   - name: Routes
     description: Public published routes — list/detail, likes, threaded comments.
   - name: SavedRoutes
@@ -486,6 +488,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /trails/search:
+    get:
+      tags: [Trails]
+      operationId: searchTrails
+      summary: Search trails by name and region
+      description: |
+        Returns trails matching a free-text query against name and
+        source_region. Public trails are always included. When the caller
+        is authenticated, group-shared trails visible to the user are
+        included as well.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: Free-text search query matched against trail name and region.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 15
+          description: Maximum number of results to return.
+      responses:
+        '200':
+          description: Matching trails.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrailSearchResponse'
   /routes:
     get:
       tags: [Routes]
@@ -1276,6 +1312,63 @@ components:
           type: string
         route:
           $ref: '#/components/schemas/PublicRouteSummary'
+    TrailSearchResult:
+      type: object
+      required: [id, name, is_public]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          nullable: true
+        difficulty:
+          type: integer
+          nullable: true
+        distance_km:
+          type: number
+          nullable: true
+        terrain:
+          type: string
+          nullable: true
+        legal_status:
+          type: string
+          nullable: true
+        source_region:
+          type: string
+          nullable: true
+        is_public:
+          type: boolean
+        verification_status:
+          type: string
+          nullable: true
+        bbox_min_lat:
+          type: number
+          nullable: true
+        bbox_max_lat:
+          type: number
+          nullable: true
+        bbox_min_lng:
+          type: number
+          nullable: true
+        bbox_max_lng:
+          type: number
+          nullable: true
+        simplified_path:
+          type: string
+          nullable: true
+        path_geojson:
+          type: object
+          nullable: true
+    TrailSearchResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrailSearchResult'
     SavedRouteDeleteResult:
       type: object
       required: [deleted]

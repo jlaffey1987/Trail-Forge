@@ -43,6 +43,8 @@ import type {
   SavedRouteDeleteResult,
   SavedRoutePatchResponse,
   SavedTrailsList,
+  SearchTrailsParams,
+  TrailSearchResponse,
   UpdateRouteCommentRequest,
   UploadFinalizeRequest,
   UploadFinalized,
@@ -1294,6 +1296,105 @@ export const useDeleteMySavedRoute = <
 > => {
   return useMutation(getDeleteMySavedRouteMutationOptions(options));
 };
+
+/**
+ * Returns trails matching a free-text query against name and
+source_region. Public trails are always included. When the caller
+is authenticated, group-shared trails visible to the user are
+included as well.
+
+ * @summary Search trails by name and region
+ */
+export const getSearchTrailsUrl = (params: SearchTrailsParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/trails/search?${stringifiedParams}`
+    : `/api/trails/search`;
+};
+
+export const searchTrails = async (
+  params: SearchTrailsParams,
+  options?: RequestInit,
+): Promise<TrailSearchResponse> => {
+  return customFetch<TrailSearchResponse>(getSearchTrailsUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getSearchTrailsQueryKey = (params?: SearchTrailsParams) => {
+  return [`/api/trails/search`, ...(params ? [params] : [])] as const;
+};
+
+export const getSearchTrailsQueryOptions = <
+  TData = Awaited<ReturnType<typeof searchTrails>>,
+  TError = ErrorType<unknown>,
+>(
+  params: SearchTrailsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof searchTrails>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getSearchTrailsQueryKey(params);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof searchTrails>>> = ({
+    signal,
+  }) => searchTrails(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof searchTrails>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type SearchTrailsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof searchTrails>>
+>;
+export type SearchTrailsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Search trails by name and region
+ */
+
+export function useSearchTrails<
+  TData = Awaited<ReturnType<typeof searchTrails>>,
+  TError = ErrorType<unknown>,
+>(
+  params: SearchTrailsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof searchTrails>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getSearchTrailsQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
 
 /**
  * Returns published routes hydrated with the trails the caller is

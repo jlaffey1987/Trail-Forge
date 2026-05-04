@@ -729,6 +729,191 @@ router.put("/me/planner-route", async (req: Request, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Map selection — lightweight cloud sync of the Map-tab trail selection.
+// Uses the same `planner_routes`-style approach but simpler: just trail IDs.
+// Table: `map_selections` with columns `user_id` (PK), `trail_ids` (jsonb),
+// `updated_at` (timestamptz). Falls back gracefully if the table doesn't
+// exist yet (migration not applied).
+// ---------------------------------------------------------------------------
+
+const MapSelectionBody = z.object({
+  trailIds: z.array(z.string().uuid()).max(PLANNER_MAX_TRAILS),
+});
+
+router.get("/me/map-selection", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("map_selections")
+      .select("trail_ids, updated_at")
+      .eq("user_id", auth.userId)
+      .maybeSingle();
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.json({ trailIds: [], trails: [], updatedAt: null });
+        return;
+      }
+      req.log.error({ err: error }, "fetchMapSelection failed");
+      res.status(500).json({ error: "Failed to fetch map selection" });
+      return;
+    }
+
+    const rawIds = (data?.trail_ids ?? []) as unknown;
+    const trailIds = Array.isArray(rawIds)
+      ? rawIds.filter((v): v is string => typeof v === "string")
+      : [];
+
+    if (trailIds.length === 0) {
+      res.json({ trailIds: [], trails: [], updatedAt: data?.updated_at ?? null });
+      return;
+    }
+
+    const { data: trailRows, error: trailErr } = await supa
+      .from("trails")
+      .select(PLANNER_TRAIL_COLUMNS)
+      .in("id", trailIds)
+      .is("deleted_at", null);
+
+    if (trailErr) {
+      req.log.error({ err: trailErr }, "map-selection trail hydrate failed");
+      res.json({ trailIds, trails: [], updatedAt: data?.updated_at ?? null });
+      return;
+    }
+
+    const fetched = (trailRows as unknown as Array<Record<string, unknown>>) ?? [];
+    const visibleIds = new Set<string>();
+    const needsGroupCheck: string[] = [];
+    for (const row of fetched) {
+      const id = typeof row.id === "string" ? row.id : null;
+      if (!id) continue;
+      if (row.is_public === true || row.owner_user_id === auth.userId) {
+        visibleIds.add(id);
+      } else {
+        needsGroupCheck.push(id);
+      }
+    }
+
+    if (needsGroupCheck.length > 0) {
+      const { data: memberships, error: mErr } = await supa
+        .from("group_members")
+        .select("group_id")
+        .eq("user_id", auth.userId);
+      if (mErr && !isMissingTableError(mErr)) {
+        req.log.warn({ err: mErr }, "map-selection group_members load failed");
+      }
+      const groupIds = ((memberships ?? []) as Array<{ group_id: string }>)
+        .map((m) => m.group_id);
+      if (groupIds.length > 0) {
+        const { data: shares, error: sErr } = await supa
+          .from("trail_shares")
+          .select("trail_id")
+          .in("trail_id", needsGroupCheck)
+          .in("group_id", groupIds);
+        if (sErr && !isMissingTableError(sErr)) {
+          req.log.warn({ err: sErr }, "map-selection trail_shares load failed");
+        }
+        for (const s of (shares ?? []) as Array<{ trail_id: string }>) {
+          visibleIds.add(s.trail_id);
+        }
+      }
+    }
+
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const row of fetched) {
+      const id = row.id as string;
+      if (visibleIds.has(id)) byId.set(id, row);
+    }
+    const orderedTrails = trailIds
+      .filter((id) => byId.has(id))
+      .map((id) => byId.get(id)!);
+
+    res.json({
+      trailIds: orderedTrails.map((t) => t.id as string),
+      trails: orderedTrails,
+      updatedAt: data?.updated_at ?? null,
+    });
+  } catch (err) {
+    req.log.error({ err }, "map-selection GET failed");
+    res.status(500).json({ error: "Failed to fetch map selection" });
+  }
+});
+
+router.put("/me/map-selection", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const parsed = MapSelectionBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid trailIds payload" });
+    return;
+  }
+
+  const seen = new Set<string>();
+  const trailIds: string[] = [];
+  for (const id of parsed.data.trailIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    trailIds.push(id);
+  }
+
+  try {
+    const supa = getSupabaseAdmin();
+    const updatedAt = new Date().toISOString();
+    const row = {
+      user_id: auth.userId,
+      trail_ids: trailIds,
+      updated_at: updatedAt,
+    };
+
+    let { error } = await supa
+      .from("map_selections")
+      .upsert(row, { onConflict: "user_id" });
+
+    if (error?.code === "23503") {
+      const { error: userErr } = await supa
+        .from("users")
+        .upsert(
+          { id: auth.userId, updated_at: updatedAt },
+          { onConflict: "id" },
+        );
+      if (!userErr) {
+        const retry = await supa
+          .from("map_selections")
+          .upsert(row, { onConflict: "user_id" });
+        error = retry.error;
+      }
+    }
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        req.log.warn(
+          "map_selections table missing — apply migration to enable cross-device selection sync",
+        );
+        res.json({ updatedAt: null, persisted: false });
+        return;
+      }
+      req.log.error({ err: error }, "map-selection upsert failed");
+      res.status(500).json({ error: "Failed to save map selection" });
+      return;
+    }
+
+    res.json({ updatedAt, persisted: true });
+  } catch (err) {
+    req.log.error({ err }, "map-selection PUT failed");
+    res.status(500).json({ error: "Failed to save map selection" });
+  }
+});
+
 // Saved routes — named library of routes (many per user).
 
 // Ride-type tag offered by the Save dialog. Kept open-ended (any short

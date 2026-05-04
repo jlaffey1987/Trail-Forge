@@ -1,5 +1,5 @@
 import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
-import { parseGPX, reverseWaypoints } from "@/lib/gpx";
+import { getTrailLatLngs } from "@/lib/trailLayer";
 
 export interface GeoPoint {
   lat: number;
@@ -465,17 +465,17 @@ export function orderTrailsNearestNeighbour(
 ): Trail[] {
   if (trails.length <= 1) return trails;
 
-  const withGpx: Trail[] = [];
-  const withoutGpx: Trail[] = [];
+  const withGeom: Trail[] = [];
+  const withoutGeom: Trail[] = [];
   for (const t of trails) {
-    const wps = parseGPX(t.gpx_data);
-    if (wps.length >= 2) withGpx.push(t);
-    else withoutGpx.push(t);
+    const pts = getTrailLatLngs(t);
+    if (pts.length >= 2) withGeom.push(t);
+    else withoutGeom.push(t);
   }
 
-  if (withGpx.length <= 1) return [...withGpx, ...withoutGpx];
+  if (withGeom.length <= 1) return [...withGeom, ...withoutGeom];
 
-  const remaining = [...withGpx];
+  const remaining = [...withGeom];
   const ordered: Trail[] = [];
   let current = start;
 
@@ -485,9 +485,9 @@ export function orderTrailsNearestNeighbour(
     let bestReversed = false;
 
     for (let i = 0; i < remaining.length; i++) {
-      const wps = parseGPX(remaining[i].gpx_data);
-      const entry: GeoPoint = { lat: wps[0].lat, lng: wps[0].lon };
-      const exit: GeoPoint = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
+      const pts = getTrailLatLngs(remaining[i]);
+      const entry: GeoPoint = { lat: pts[0][0], lng: pts[0][1] };
+      const exit: GeoPoint = { lat: pts[pts.length - 1][0], lng: pts[pts.length - 1][1] };
 
       const dEntry = haversineM(current, entry);
       const dExit = haversineM(current, exit);
@@ -502,15 +502,15 @@ export function orderTrailsNearestNeighbour(
     const picked = remaining.splice(bestIdx, 1)[0];
     ordered.push(picked);
 
-    const wps = parseGPX(picked.gpx_data);
+    const pts = getTrailLatLngs(picked);
     if (bestReversed) {
-      current = { lat: wps[0].lat, lng: wps[0].lon };
+      current = { lat: pts[0][0], lng: pts[0][1] };
     } else {
-      current = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
+      current = { lat: pts[pts.length - 1][0], lng: pts[pts.length - 1][1] };
     }
   }
 
-  return [...ordered, ...withoutGpx];
+  return [...ordered, ...withoutGeom];
 }
 
 export async function assembleMultiModalRoute(
@@ -607,21 +607,21 @@ export async function assembleMultiModalRoute(
 
     // Trail entry
     const trail = hydratedById.get(entry.trail.id) ?? entry.trail;
-    const wps = parseGPX(trail.gpx_data);
-    if (wps.length < 2) {
+    const latlngs = getTrailLatLngs(trail);
+    if (latlngs.length < 2) {
       skippedTrails.push(trail.name);
       stepNo += 2;
       continue;
     }
     trailCount++;
 
-    const dToFirst = haversineM(currentPoint, { lat: wps[0].lat, lng: wps[0].lon });
-    const dToLast = haversineM(currentPoint, { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon });
+    const dToFirst = haversineM(currentPoint, { lat: latlngs[0][0], lng: latlngs[0][1] });
+    const dToLast = haversineM(currentPoint, { lat: latlngs[latlngs.length - 1][0], lng: latlngs[latlngs.length - 1][1] });
     const useReversed = dToLast < dToFirst;
-    const orientedWps = useReversed ? reverseWaypoints(wps) : wps;
+    const orientedPts = useReversed ? [...latlngs].reverse() : latlngs;
 
-    const trailEntry: GeoPoint = { lat: orientedWps[0].lat, lng: orientedWps[0].lon };
-    const trailExit: GeoPoint = { lat: orientedWps[orientedWps.length - 1].lat, lng: orientedWps[orientedWps.length - 1].lon };
+    const trailEntry: GeoPoint = { lat: orientedPts[0][0], lng: orientedPts[0][1] };
+    const trailExit: GeoPoint = { lat: orientedPts[orientedPts.length - 1][0], lng: orientedPts[orientedPts.length - 1][1] };
 
     stepNo++;
     onProgress?.(stepNo, totalSteps, `Routing roads to ${trail.name}`);
@@ -643,7 +643,7 @@ export async function assembleMultiModalRoute(
 
     stepNo++;
     onProgress?.(stepNo, totalSteps, `Adding ${trail.name}`);
-    const trailPolyline: GeoPoint[] = orientedWps.map((w) => ({ lat: w.lat, lng: w.lon }));
+    const trailPolyline: GeoPoint[] = orientedPts.map(([lat, lng]) => ({ lat, lng }));
     const trailKm = trail.distance_km ?? 0;
     sections.push({
       kind: "trail",

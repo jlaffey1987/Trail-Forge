@@ -34,7 +34,7 @@ import type {
   SwapTrailSectionResult,
 } from "@/components/NavigationView";
 import { fetchTrailsInBbox } from "@/lib/supabase";
-import { getTrailLatLngs } from "@/lib/trailLayer";
+import { getTrailLatLngs, invalidateTrailGeometryCache } from "@/lib/trailLayer";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import { distancePointToPolylineM } from "@/lib/poi";
@@ -213,6 +213,34 @@ export default function PlannerTab() {
     const t = window.setTimeout(() => setHighlightInputs(false), 3000);
     cleanup();
     return () => window.clearTimeout(t);
+    // Run only on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("fromSelection") !== "1") return;
+    params.delete("fromSelection");
+    const qs = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+    );
+    try {
+      const raw = sessionStorage.getItem("trailforge_selection_route");
+      if (!raw) return;
+      sessionStorage.removeItem("trailforge_selection_route");
+      const route = JSON.parse(raw) as AssembledRoute;
+      if (!route || !route.sections || route.sections.length === 0) return;
+      setAssembledRoute(route);
+      setShowNav(true);
+      setShowRouteBuilder(false);
+      if (route.start?.label) setStartLocation(route.start.label);
+    } catch {
+      // Malformed JSON or missing data — silently ignore.
+    }
     // Run only on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -878,7 +906,11 @@ export default function PlannerTab() {
           hydratedTrails = trailsRaw.map((t) => {
             if (t.gpx_data != null) return t;
             const g = gpxMap.get(t.id);
-            return g != null ? { ...t, gpx_data: g } : t;
+            if (g != null) {
+              invalidateTrailGeometryCache(t.id);
+              return { ...t, gpx_data: g };
+            }
+            return t;
           });
         }
         const sorted = orderTrailsNearestNeighbour(startPt, hydratedTrails);

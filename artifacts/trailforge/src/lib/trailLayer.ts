@@ -42,6 +42,12 @@ const latLngCache = new Map<string, [number, number][]>();
 // Douglas–Peucker on every pan.
 const simplifiedCache = new Map<string, Map<number, [number, number][]>>();
 
+export function invalidateTrailGeometryCache(trailId: string): void {
+  latLngCache.delete(trailId);
+  gpxCache.delete(trailId);
+  simplifiedCache.delete(trailId);
+}
+
 /**
  * Decode a Google encoded polyline (precision 5) into `[lat, lng]` pairs.
  *

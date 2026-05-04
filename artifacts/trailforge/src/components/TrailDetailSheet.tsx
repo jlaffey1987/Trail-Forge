@@ -41,17 +41,12 @@ interface Props {
   trail: Trail;
   onClose: () => void;
   onAddedToPlanner?: (trail: Trail) => void;
-  // Lets the parent (e.g. a trail card) reflect the latest activity counts
-  // for this trail without refetching the whole feed.
   onCountsChanged?: (trailId: string, counts: TrailActivityCounts) => void;
-  // Prev/next neighbours in the surrounding context (search results, route
-  // order, cluster list, etc.) so the rider can jump trail-to-trail without
-  // closing the sheet. Either or both may be null at the start/end of the
-  // list. Arrows are hidden entirely when no neighbour is available on
-  // either side (i.e. context of one).
   prevTrail?: Trail | null;
   nextTrail?: Trail | null;
   onNavigate?: (trail: Trail) => void;
+  onToggleRoute?: (trail: Trail) => void;
+  routeIds?: Set<string>;
 }
 
 export default function TrailDetailSheet({
@@ -62,6 +57,8 @@ export default function TrailDetailSheet({
   prevTrail,
   nextTrail,
   onNavigate,
+  onToggleRoute,
+  routeIds,
 }: Props) {
   // Hold the latest callback in a ref so refreshCounts doesn't change
   // identity each render — otherwise an inline parent callback would
@@ -71,13 +68,15 @@ export default function TrailDetailSheet({
   useEffect(() => {
     onCountsChangedRef.current = onCountsChanged;
   }, [onCountsChanged]);
+  const controlled = onToggleRoute != null && routeIds != null;
   const { isSignedIn, userId } = useCurrentUser();
   const [, setLocation] = useLocation();
-  const [inPlannerRoute, setInPlannerRoute] = useState(() => isInRoute(trail.id));
-  // Tracks the live planner-route trail count so we can disable the
-  // "Add to planner" CTA (and surface a friendly explanation) once the
-  // user has hit the PLANNER_MAX_TRAILS server-side cap.
-  const [routeTrailCount, setRouteTrailCount] = useState(() => getRouteTrails().length);
+  const [inPlannerRoute, setInPlannerRoute] = useState(() =>
+    controlled ? routeIds.has(trail.id) : isInRoute(trail.id),
+  );
+  const [routeTrailCount, setRouteTrailCount] = useState(() =>
+    controlled ? routeIds.size : getRouteTrails().length,
+  );
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error" | "needsAuth">("idle");
   const [addError, setAddError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
@@ -99,12 +98,17 @@ export default function TrailDetailSheet({
   // jumps to a neighbouring trail via the prev/next arrows. (The lazy
   // initialisers above only run on mount.)
   useEffect(() => {
-    setInPlannerRoute(isInRoute(trail.id));
+    setInPlannerRoute(controlled ? routeIds.has(trail.id) : isInRoute(trail.id));
     setSaveStatus("idle");
     setAddError(null);
-  }, [trail.id]);
+  }, [trail.id, controlled, routeIds]);
 
   useEffect(() => {
+    if (controlled) {
+      setInPlannerRoute(routeIds.has(trail.id));
+      setRouteTrailCount(routeIds.size);
+      return;
+    }
     return subscribeRouteTrails((trails) => {
       setInPlannerRoute(isInRoute(trail.id));
       setRouteTrailCount(trails.length);
@@ -206,7 +210,10 @@ export default function TrailDetailSheet({
 
   const handleAddToPlanner = () => {
     if (trail.verification_status === "ai-approximated") {
-      // Approximated trails are reference-only — never used in navigation.
+      return;
+    }
+    if (controlled) {
+      onToggleRoute(trail);
       return;
     }
     if (inPlannerRoute) {
@@ -216,9 +223,6 @@ export default function TrailDetailSheet({
     }
     const result = addRouteTrail(trail);
     if (result === "atLimit") {
-      // Mirrors the server-side PUT /api/me/planner-route cap. Surface
-      // a clear inline message rather than letting the tap silently
-      // no-op or letting the cloud sync 400 later.
       setAddError(
         `Route is full — you can plan up to ${PLANNER_MAX_TRAILS} trails per route. Remove one before adding "${trail.name}".`,
       );
@@ -486,6 +490,7 @@ export default function TrailDetailSheet({
               onAdopt={handleAdopt}
               onProposeEdit={() => setActiveTab("amendments")}
               isSignedIn={Boolean(isSignedIn)}
+              controlled={controlled}
             />
           ) : null}
           {activeTab === "notes" ? (
@@ -692,6 +697,7 @@ interface OverviewProps {
   onAdopt: () => void;
   onProposeEdit: () => void;
   isSignedIn: boolean;
+  controlled: boolean;
 }
 
 function OverviewPanel({
@@ -719,6 +725,7 @@ function OverviewPanel({
   onAdopt,
   onProposeEdit,
   isSignedIn,
+  controlled,
 }: OverviewProps) {
   const canRegrade = isOwner || isSystemAdmin;
   const showAdminBootstrapHint =
@@ -1033,7 +1040,7 @@ function OverviewPanel({
                 <line x1="6" y1="6" x2="18" y2="18" />
                 <line x1="6" y1="18" x2="18" y2="6" />
               </svg>
-              <span className="group-hover:hidden">In Planner</span>
+              <span className="group-hover:hidden">{controlled ? "Selected" : "In Planner"}</span>
               <span className="hidden group-hover:inline">Remove</span>
             </>
           ) : (
@@ -1042,7 +1049,7 @@ function OverviewPanel({
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
-              Add to Planner
+              {controlled ? "Add to Selection" : "Add to Planner"}
             </>
           )}
         </button>

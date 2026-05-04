@@ -4,22 +4,10 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { useLocation } from "wouter";
 
-// ---------------------------------------------------------------------------
-// Module mocks. These are hoisted by vitest so they apply to every dynamic
-// import below — including the modules that MapTab and PlannerTab transitively
-// pull in (Clerk, Supabase, Leaflet, group fetches, etc.). The map-init
-// effect bails out as soon as `useLeaflet()` reports "not loaded", so no
-// network or browser-only API is touched on mount.
-// ---------------------------------------------------------------------------
-
 vi.mock("@clerk/react", () => ({
   useUser: () => ({ isLoaded: true, isSignedIn: false, user: null }),
 }));
 
-// Minimal stateful wouter mock so MapTab's `setLocation` actually moves the
-// shared "current path" forward. Components reading `useLocation` re-render
-// when the path changes, which is what lets the harness swap MapTab for
-// PlannerTab in response to the Build Route click.
 const wouterState = vi.hoisted(() => {
   return {
     path: "/map",
@@ -62,7 +50,7 @@ vi.mock("@/lib/supabase", () => ({
   searchTrails: vi.fn().mockResolvedValue([]),
   saveTrail: vi.fn().mockResolvedValue(true),
   fetchSavedTrails: vi.fn().mockResolvedValue([]),
-  fetchTrailGpxByIds: vi.fn().mockResolvedValue([]),
+  fetchTrailGpxByIds: vi.fn().mockResolvedValue(new Map()),
   fetchCommunityTrails: vi.fn().mockResolvedValue([]),
   fetchOwnedTrails: vi.fn().mockResolvedValue([]),
   uploadGpxToStorage: vi.fn(),
@@ -87,20 +75,54 @@ vi.mock("@/lib/users", () => ({
   syncCurrentUser: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock("@/components/NavigationView", () => ({
+  default: () => {
+    const reactMod = require("react");
+    return reactMod.createElement("div", { "data-testid": "navigation-view" }, "Navigation View");
+  },
+  formatKm: (km: number) => `${km}km`,
+  formatDurationMin: (min: number) => `${min}min`,
+}));
+
+const GPX_A = `<?xml version="1.0"?><gpx><trk><trkseg><trkpt lat="51" lon="-1"/><trkpt lat="51.1" lon="-0.9"/></trkseg></trk></gpx>`;
+const GPX_B = `<?xml version="1.0"?><gpx><trk><trkseg><trkpt lat="52" lon="-1"/><trkpt lat="52.1" lon="-0.9"/></trkseg></trk></gpx>`;
+
+const mockAssemble = vi.fn().mockResolvedValue({
+  start: { lat: 51, lng: -1, label: "Start" },
+  end: null,
+  sections: [
+    { kind: "trail", index: 0, trail: { id: "a", name: "A" }, polyline: [], distanceKm: 5, entry: { lat: 51, lng: -1 }, exit: { lat: 51.1, lng: -0.9 } },
+    { kind: "road", index: 1, from: { lat: 51.1, lng: -0.9 }, to: { lat: 52, lng: -1 }, route: { polyline: [], distanceKm: 100, durationMin: 60, steps: [] }, label: "Road" },
+    { kind: "trail", index: 2, trail: { id: "b", name: "B" }, polyline: [], distanceKm: 5, entry: { lat: 52, lng: -1 }, exit: { lat: 52.1, lng: -0.9 } },
+  ],
+  totalDistanceKm: 110,
+  totalDurationMin: 120,
+  totalRoadKm: 100,
+  totalTrailKm: 10,
+  totalRoadDurationMin: 60,
+  totalTrailDurationMin: 60,
+  skippedTrails: [],
+  failedRoadSegments: 0,
+});
+
 vi.mock("@/lib/routing", () => ({
   geocode: vi.fn().mockResolvedValue(null),
-  assembleMultiModalRoute: vi.fn(),
+  reverseGeocode: vi.fn().mockResolvedValue(null),
+  assembleMultiModalRoute: (...args: unknown[]) => mockAssemble(...args),
+  orderTrailsNearestNeighbour: (_start: unknown, trails: unknown[]) => trails,
   formatDistance: (m: number) => `${m}m`,
   formatKm: (km: number) => `${km}km`,
   formatDurationMin: (min: number) => `${min}min`,
   haversineM: () => 0,
   maneuverArrow: () => "→",
+  HYBRID_LABEL_TILE_URL: "",
+  HYBRID_LABEL_TILE_ATTRIBUTION: "",
 }));
 
 const TRAIL_1 = "11111111-1111-4111-8111-111111111111";
 const TRAIL_2 = "22222222-2222-4222-8222-222222222222";
 
-function makeTrail(id: string, name: string) {
+function makeTrail(id: string, name: string, gpx: string, coords: [number, number][]) {
   return {
     id,
     user_id: null,
@@ -114,18 +136,11 @@ function makeTrail(id: string, name: string) {
     created_at: new Date().toISOString(),
     source: "user",
     verification_status: "verified",
+    gpx_data: gpx,
+    path_geojson: { type: "LineString", coordinates: coords.map(([lat, lng]) => [lng, lat]) },
   };
 }
 
-/**
- * Mirrors how MainShell picks the active tab from the URL: when MapTab calls
- * `setLocation("/?build=1")` directly (the new behaviour after the cross-tab
- * event bridge was removed), our mocked wouter updates `wouterState.path` and
- * notifies subscribers, so `useLocation` here re-renders with the new path
- * and the harness swaps MapTab for PlannerTab. Keeps the test focused on the
- * handoff contract without dragging in ClerkProvider or the rest of
- * MainShell.
- */
 function Harness({
   MapTab,
   PlannerTab,
@@ -149,8 +164,8 @@ beforeEach(() => {
     JSON.stringify({
       ownerId: null,
       trails: [
-        makeTrail(TRAIL_1, "Test Trail A"),
-        makeTrail(TRAIL_2, "Test Trail B"),
+        makeTrail(TRAIL_1, "Test Trail A", GPX_A, [[51, -1], [51.1, -0.9]]),
+        makeTrail(TRAIL_2, "Test Trail B", GPX_B, [[52, -1], [52.1, -0.9]]),
       ],
     }),
   );
@@ -158,11 +173,12 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  mockAssemble.mockClear();
 });
 
-describe("Map → Planner Build Route handoff", () => {
+describe("Map → Auto-Route from selection handoff", () => {
   it(
-    "shows the route panel from the seeded localStorage route, then on Build Route lands on the Planner with the start address focused and ?build=1 stripped",
+    "clicking Auto-Route opens start chooser, picking 'first trail' assembles the route and navigates to PlannerTab with fromSelection",
     async () => {
       const user = userEvent.setup();
 
@@ -174,38 +190,76 @@ describe("Map → Planner Build Route handoff", () => {
       const { setMapSelectionUserId } = await import(
         "@/lib/mapSelectionStore"
       );
-
       setPlannerRouteUserId(null);
       setMapSelectionUserId(null);
 
       render(<Harness MapTab={MapTab} PlannerTab={PlannerTab} />);
 
-      // 1. Route panel renders because the seeded route has 2 trails.
       const panel = await screen.findByTestId("map-route-panel");
       expect(
         within(panel).getByTestId("map-route-panel-summary").textContent,
       ).toMatch(/2 Trails/);
 
-      // 2. Expand the panel so the action buttons are reachable.
       await user.click(screen.getByTestId("map-route-panel-toggle"));
-      const planButton = await screen.findByTestId("map-route-panel-plan");
+      const buildButton = await screen.findByTestId("map-route-panel-build");
 
-      // 3. Click Plan — navigates to the Planner via the legacy /?build=1 path.
-      await user.click(planButton);
+      await user.click(buildButton);
 
-      // 4. Planner is now mounted: the start input is in the DOM and focused.
-      const startInput = await screen.findByTestId("planner-start-address");
-      await waitFor(() =>
-        expect(document.activeElement).toBe(startInput),
+      const chooser = await screen.findByTestId("start-chooser");
+      expect(chooser).toBeInTheDocument();
+
+      const firstTrailBtn = within(chooser).getByTestId("start-chooser-first");
+      await user.click(firstTrailBtn);
+
+      await waitFor(() => {
+        expect(mockAssemble).toHaveBeenCalled();
+      });
+
+      expect(mockAssemble).toHaveBeenCalledWith(
+        expect.objectContaining({ lat: expect.any(Number), lng: expect.any(Number) }),
+        null,
+        expect.any(Array),
+        expect.any(Function),
       );
 
-      // 5. The mount-effect on PlannerTab strips the build flag from the URL.
-      await waitFor(() =>
-        expect(window.location.search).not.toContain("build=1"),
-      );
+      await waitFor(() => {
+        expect(wouterState.path).toBe("/");
+      });
+    },
+  );
 
-      // The Map tab's panel is gone now that we've left the Map tab.
-      expect(screen.queryByTestId("map-route-panel")).not.toBeInTheDocument();
+  it(
+    "start chooser cancel button closes the dialog without building",
+    async () => {
+      const user = userEvent.setup();
+
+      const MapTab = (await import("@/pages/MapTab")).default;
+      const PlannerTab = (await import("@/pages/PlannerTab")).default;
+      const { setPlannerRouteUserId } = await import(
+        "@/lib/plannerRouteStore"
+      );
+      const { setMapSelectionUserId } = await import(
+        "@/lib/mapSelectionStore"
+      );
+      setPlannerRouteUserId(null);
+      setMapSelectionUserId(null);
+
+      render(<Harness MapTab={MapTab} PlannerTab={PlannerTab} />);
+
+      await screen.findByTestId("map-route-panel");
+      await user.click(screen.getByTestId("map-route-panel-toggle"));
+      await user.click(screen.getByTestId("map-route-panel-build"));
+
+      const chooser = await screen.findByTestId("start-chooser");
+      const cancelBtn = within(chooser).getByTestId("start-chooser-cancel");
+      await user.click(cancelBtn);
+
+      await waitFor(() => {
+        expect(screen.queryByTestId("start-chooser")).not.toBeInTheDocument();
+      });
+
+      expect(mockAssemble).not.toHaveBeenCalled();
+      expect(wouterState.path).toBe("/map");
     },
   );
 });

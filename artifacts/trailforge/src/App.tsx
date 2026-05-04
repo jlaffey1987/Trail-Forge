@@ -31,6 +31,7 @@ import IntroSplash from "@/components/IntroSplash";
 import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
 import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
+import { setMapSelectionUserId } from "@/lib/mapSelectionStore";
 import { loadCompletions, clearCompletions } from "@/lib/completionsStore";
 import { useOnlineStatus } from "@/hooks/useOnlineStatus";
 import { useInstallPrompt } from "@/hooks/useInstallPrompt";
@@ -491,6 +492,7 @@ function ClerkUserSync() {
   useEffect(() => {
     if (!isLoaded) return;
     setPlannerRouteUserId(isSignedIn && user ? user.id : null);
+    setMapSelectionUserId(isSignedIn && user ? user.id : null);
   }, [isLoaded, isSignedIn, user]);
 
   // Hydrate the completions ("ridden") store on sign-in so every trail

@@ -9,29 +9,14 @@ interface Props {
   onRemove: (id: string) => void;
   onClear: () => void;
   onBuildRoute: () => void;
-  // Tapping a row opens the parent's TrailDetailSheet so the rider can read
-  // the route's trails in order (and use the sheet's prev/next arrows to
-  // jump between them). Optional — when not provided, rows are still
-  // reorderable/removable but not tappable.
+  onPlanInPlanner?: () => void;
   onSelectTrail?: (trail: Trail) => void;
-  /** Custom POI/waypoint stops the rider has added to the planner route. */
   waypoints?: RouteWaypoint[];
   onRemoveWaypoint?: (waypointId: string) => void;
-  /**
-   * Interleaved trail+waypoint list in the rider's chosen order. When
-   * provided, the panel renders rows inline (mirrors `RouteBuilder`) so a
-   * fuel stop can sit between trail 1 and trail 2 instead of in a fixed
-   * "Stops" group at the top. Falls back to the legacy split layout when
-   * absent — keeps existing tests and any caller that hasn't migrated yet
-   * working unchanged.
-   */
   entries?: RouteEntry[];
-  /**
-   * Replace the full ordered list — used when the rider taps a row's
-   * up/down arrow to swap with an adjacent stop. Required to enable the
-   * reorder buttons on waypoint rows in interleaved mode.
-   */
   onReorderEntries?: (entries: RouteEntry[]) => void;
+  building?: boolean;
+  buildError?: string | null;
 }
 
 const WAYPOINT_KIND_COLOR: Record<RouteWaypoint["kind"], string> = {
@@ -83,11 +68,14 @@ function MapRoutePanelInner({
   onRemove,
   onClear,
   onBuildRoute,
+  onPlanInPlanner,
   onSelectTrail,
   waypoints,
   onRemoveWaypoint,
   entries,
   onReorderEntries,
+  building,
+  buildError,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   const wps = waypoints ?? [];
@@ -138,7 +126,7 @@ function MapRoutePanelInner({
 
   return (
     <div
-      className="absolute top-12 left-1/2 -translate-x-1/2 z-[1100] pointer-events-auto"
+      className="absolute top-[3.25rem] left-1/2 -translate-x-1/2 z-[1100] pointer-events-auto"
       style={{ width: "calc(100% - 24px)", maxWidth: "360px" }}
       data-testid="map-route-panel"
     >
@@ -553,6 +541,12 @@ function MapRoutePanelInner({
               )}
             </div>
 
+            {buildError && (
+              <div className="mx-2 mb-1.5 px-2 py-1.5 rounded-lg bg-red-900/30 border border-red-500/30 text-[10px] text-red-300 font-medium" data-testid="map-route-panel-error">
+                {buildError}
+              </div>
+            )}
+
             {/* Action row */}
             <div className="grid grid-cols-[auto_1fr] gap-1.5 px-2 pb-2 pt-1">
               <button
@@ -586,27 +580,54 @@ function MapRoutePanelInner({
                   <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
                 </svg>
               </button>
-              <button
-                type="button"
-                onClick={onBuildRoute}
-                data-testid="map-route-panel-build"
-                className="py-2 rounded-lg text-[11px] font-black uppercase tracking-wider text-stone-900 shadow-lg shadow-amber-900/30 flex items-center justify-center gap-1.5"
-                style={{
-                  background:
-                    "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)",
-                }}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  className="w-3.5 h-3.5"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
+              <div className={`grid gap-1.5 ${onPlanInPlanner ? "grid-cols-2" : "grid-cols-1"}`}>
+                {onPlanInPlanner && (
+                  <button
+                    type="button"
+                    onClick={onPlanInPlanner}
+                    disabled={!!building || trails.length < 1}
+                    data-testid="map-route-panel-plan"
+                    className="py-2 rounded-lg text-[11px] font-bold uppercase tracking-wider text-amber-400 flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed border border-amber-500/40 bg-amber-900/15 hover:bg-amber-900/30 transition-colors"
+                  >
+                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                    </svg>
+                    Plan
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onBuildRoute}
+                  disabled={!!building || trails.length < 2}
+                  data-testid="map-route-panel-build"
+                  className="py-2 rounded-lg text-[11px] font-black uppercase tracking-wider text-stone-900 shadow-lg shadow-amber-900/30 flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    background:
+                      "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)",
+                  }}
                 >
-                  <polygon points="3 11 22 2 13 21 11 13 3 11" />
-                </svg>
-                Build Route
-              </button>
+                  {building ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border border-stone-900/50 border-t-stone-900 rounded-full animate-spin" />
+                      Building…
+                    </>
+                  ) : trails.length < 2 ? (
+                    <>
+                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <polygon points="3 11 22 2 13 21 11 13 3 11" />
+                      </svg>
+                      Add {2 - trails.length} more trail{trails.length === 0 ? "s" : ""}
+                    </>
+                  ) : (
+                    <>
+                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <polygon points="3 11 22 2 13 21 11 13 3 11" />
+                      </svg>
+                      Auto-Route
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         )}

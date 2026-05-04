@@ -277,6 +277,31 @@ export interface SavedRoutePatchResponse {
   route?: PublicRouteSummary;
 }
 
+export type TrailSearchResultPathGeojson = { [key: string]: unknown } | null;
+
+export interface TrailSearchResult {
+  id: string;
+  name: string;
+  type?: string | null;
+  difficulty?: number | null;
+  distance_km?: number | null;
+  terrain?: string | null;
+  legal_status?: string | null;
+  source_region?: string | null;
+  is_public: boolean;
+  verification_status?: string | null;
+  bbox_min_lat?: number | null;
+  bbox_max_lat?: number | null;
+  bbox_min_lng?: number | null;
+  bbox_max_lng?: number | null;
+  simplified_path?: string | null;
+  path_geojson?: TrailSearchResultPathGeojson;
+}
+
+export interface TrailSearchResponse {
+  results: TrailSearchResult[];
+}
+
 export interface SavedRouteDeleteResult {
   deleted: boolean;
 }
@@ -290,6 +315,20 @@ export type ListMySavedTrailsParams = {
 
 export type CountSessionSavedTrailsParams = {
   sessionId: string;
+};
+
+export type SearchTrailsParams = {
+  /**
+   * Free-text search query matched against trail name and region.
+   * @minLength 1
+   */
+  q: string;
+  /**
+   * Maximum number of results to return.
+   * @minimum 1
+   * @maximum 50
+   */
+  limit?: number;
 };
 
 export type ListPublicRoutesParams = {

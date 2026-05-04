@@ -466,6 +466,54 @@ export const DeleteMySavedRouteResponse = zod.object({
 });
 
 /**
+ * Returns trails matching a free-text query against name and
+source_region. Public trails are always included. When the caller
+is authenticated, group-shared trails visible to the user are
+included as well.
+
+ * @summary Search trails by name and region
+ */
+
+export const searchTrailsQueryLimitDefault = 15;
+export const searchTrailsQueryLimitMax = 50;
+
+export const SearchTrailsQueryParams = zod.object({
+  q: zod.coerce
+    .string()
+    .min(1)
+    .describe("Free-text search query matched against trail name and region."),
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(searchTrailsQueryLimitMax)
+    .default(searchTrailsQueryLimitDefault)
+    .describe("Maximum number of results to return."),
+});
+
+export const SearchTrailsResponse = zod.object({
+  results: zod.array(
+    zod.object({
+      id: zod.string(),
+      name: zod.string(),
+      type: zod.string().nullish(),
+      difficulty: zod.number().nullish(),
+      distance_km: zod.number().nullish(),
+      terrain: zod.string().nullish(),
+      legal_status: zod.string().nullish(),
+      source_region: zod.string().nullish(),
+      is_public: zod.boolean(),
+      verification_status: zod.string().nullish(),
+      bbox_min_lat: zod.number().nullish(),
+      bbox_max_lat: zod.number().nullish(),
+      bbox_min_lng: zod.number().nullish(),
+      bbox_max_lng: zod.number().nullish(),
+      simplified_path: zod.string().nullish(),
+      path_geojson: zod.object({}).passthrough().nullish(),
+    }),
+  ),
+});
+
+/**
  * Returns published routes hydrated with the trails the caller is
 permitted to see (private trails are stripped and counted in
 `hiddenTrailCount`). Supports filtering by ride type, free-text

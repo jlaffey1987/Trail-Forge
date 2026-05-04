@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { getAuth } from "@clerk/express";
 import { z } from "zod";
-import { CreateTrailBody, CreateTrailResponse } from "@workspace/api-zod";
+import { CreateTrailBody, CreateTrailResponse, SearchTrailsQueryParams, SearchTrailsResponse } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import { mintGpxUploadTicket, consumeGpxUploadTicket } from "../lib/uploadTickets";
@@ -189,6 +189,172 @@ async function tryDeleteGpxObject(rawPath: string | null | undefined, log: { err
     log.error({ err, rawPath }, "failed to delete gpx object from storage");
   }
 }
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+const SEARCH_COLUMNS = [
+  "id",
+  "name",
+  "type",
+  "difficulty",
+  "distance_km",
+  "terrain",
+  "legal_status",
+  "source_region",
+  "is_public",
+  "verification_status",
+  "bbox_min_lat",
+  "bbox_max_lat",
+  "bbox_min_lng",
+  "bbox_max_lng",
+  "simplified_path",
+  "path_geojson",
+].join(",");
+
+router.get("/trails/search", async (req: Request, res: Response) => {
+  const parsed = SearchTrailsQueryParams.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Missing or invalid query parameter 'q'" });
+    return;
+  }
+  const { q, limit } = parsed.data;
+  const escaped = q.replace(/[%_\\]/g, (ch) => `\\${ch}`);
+  const pattern = `%${escaped}%`;
+  const supa = getSupabaseAdmin();
+
+  const stripDeleted = (rows: unknown[]): unknown[] =>
+    (rows as Array<Record<string, unknown> & { deleted_at?: string | null }>)
+      .filter((r) => r.deleted_at == null);
+
+  const buildPublicQuery = (cols: string) =>
+    supa
+      .from("trails")
+      .select(cols)
+      .eq("is_public", true)
+      .is("deleted_at", null)
+      .neq("verification_status", "ai-approximated")
+      .or(`name.ilike.${pattern},source_region.ilike.${pattern}`)
+      .order("distance_km", { ascending: false, nullsFirst: false })
+      .limit(limit);
+
+  let { data: publicResults, error } = await buildPublicQuery(SEARCH_COLUMNS);
+  if (error && isMissingColumnError(error)) {
+    ({ data: publicResults, error } = await buildPublicQuery("*"));
+  }
+  if (error) {
+    req.log.error({ err: error }, "trail search public query failed");
+    res.status(500).json({ error: "Search failed" });
+    return;
+  }
+
+  let results: unknown[] = stripDeleted((publicResults as unknown[]) ?? []);
+  const publicIds = new Set(
+    (results as Array<{ id: string }>).map((r) => r.id),
+  );
+
+  const auth = getAuth(req);
+  if (auth.userId) {
+    const buildOwnedQuery = (cols: string) =>
+      supa
+        .from("trails")
+        .select(cols)
+        .eq("owner_user_id", auth.userId)
+        .eq("is_public", false)
+        .is("deleted_at", null)
+        .neq("verification_status", "ai-approximated")
+        .or(`name.ilike.${pattern},source_region.ilike.${pattern}`)
+        .order("distance_km", { ascending: false, nullsFirst: false })
+        .limit(limit);
+
+    let { data: ownedResults, error: oErr } =
+      await buildOwnedQuery(SEARCH_COLUMNS);
+    if (oErr && isMissingColumnError(oErr)) {
+      ({ data: ownedResults, error: oErr } = await buildOwnedQuery("*"));
+    }
+    if (!oErr && ownedResults) {
+      for (const row of stripDeleted(ownedResults as unknown[])) {
+        const id = (row as { id: string }).id;
+        if (!publicIds.has(id)) {
+          publicIds.add(id);
+          results.push(row);
+        }
+      }
+    }
+
+    const { data: memberships } = await supa
+      .from("group_members")
+      .select("group_id")
+      .eq("user_id", auth.userId);
+
+    if (memberships && memberships.length > 0) {
+      const groupIds = (memberships as Array<{ group_id: string }>).map(
+        (m) => m.group_id,
+      );
+      const { data: shares } = await supa
+        .from("trail_shares")
+        .select("trail_id")
+        .in("group_id", groupIds);
+
+      if (shares && shares.length > 0) {
+        const sharedTrailIds = [
+          ...new Set(
+            (shares as Array<{ trail_id: string }>).map((s) => s.trail_id),
+          ),
+        ];
+        const extraIds = sharedTrailIds.filter((id) => !publicIds.has(id));
+
+        if (extraIds.length > 0) {
+          const buildGroupQuery = (cols: string) =>
+            supa
+              .from("trails")
+              .select(cols)
+              .in("id", extraIds)
+              .is("deleted_at", null)
+              .neq("verification_status", "ai-approximated")
+              .or(`name.ilike.${pattern},source_region.ilike.${pattern}`)
+              .order("distance_km", { ascending: false, nullsFirst: false })
+              .limit(limit);
+
+          let { data: groupResults, error: gErr } =
+            await buildGroupQuery(SEARCH_COLUMNS);
+          if (gErr && isMissingColumnError(gErr)) {
+            ({ data: groupResults, error: gErr } = await buildGroupQuery("*"));
+          }
+          if (!gErr && groupResults) {
+            for (const row of stripDeleted(groupResults as unknown[])) {
+              const id = (row as { id: string }).id;
+              if (!publicIds.has(id)) {
+                publicIds.add(id);
+                results.push(row);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  type RowWithName = Record<string, unknown> & { name?: string; distance_km?: number | null };
+  const qLower = q.toLowerCase();
+  results = (results as RowWithName[])
+    .sort((a, b) => {
+      const aName = (a.name ?? "").toLowerCase();
+      const bName = (b.name ?? "").toLowerCase();
+      const aExact = aName === qLower ? 0 : aName.startsWith(qLower) ? 1 : 2;
+      const bExact = bName === qLower ? 0 : bName.startsWith(qLower) ? 1 : 2;
+      if (aExact !== bExact) return aExact - bExact;
+      return (b.distance_km ?? 0) - (a.distance_km ?? 0);
+    })
+    .slice(0, limit);
+
+  const validated = SearchTrailsResponse.safeParse({ results });
+  if (!validated.success) {
+    req.log.warn({ err: validated.error }, "trail search response validation failed");
+  }
+  res.json(validated.success ? validated.data : { results });
+});
 
 // ---------------------------------------------------------------------------
 // Issue a signed PUT URL for uploading a GPX file to object storage. The

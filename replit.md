@@ -48,6 +48,15 @@ The project is structured as a pnpm monorepo.
 - **Notifications:** In-app and OS-level push notifications for group activities (trail shares, new members). Per-group push preferences let users silence individual groups without disabling all notifications.
 - **Trail Adoption & Amendments:** Users can adopt unowned trails and propose edits with categorized reasons.
 - **Cloud-synced Planner Route:** Planner route syncs across devices for signed-in users, with localStorage fallback for guests.
+- **Search, Select & Auto-Route Trails on Map:**
+    - Server endpoint `GET /api/trails/search?q=...&limit=N` in `trails.ts` — visibility-aware: always searches public trails by name and `source_region`; for authenticated users also includes group-shared trails via `trail_shares` + `group_members` joins.
+    - OpenAPI spec updated with `/trails/search` path, `TrailSearchResult`/`TrailSearchResponse` schemas, and `Trails` tag. Codegen produces `useSearchTrails` hook and `SearchTrailsQueryParams`/`SearchTrailsResponse` Zod schemas.
+    - `MapTrailSearch` component: debounced search bar on Map tab (Explore mode) uses generated `searchTrails()` client. Results show difficulty dot, name, distance, region (`source_region`), and an Add/Added toggle. Fly-to on click.
+    - Users add multiple trails to their route from search results or by tapping trails on the map.
+    - "Build Route" button in `MapRoutePanel` (disabled when < 2 trails) opens a start chooser dialog: "Start from my location" (GPS) or "Start from first trail".
+    - `doBuildFromSelection` in `MapTab.tsx` hydrates GPX data, auto-orders trails via `orderTrailsNearestNeighbour`, assembles the route with OSRM road connectors via `assembleMultiModalRoute`, then hands off to PlannerTab via `sessionStorage` + `?fromSelection=1` query param.
+    - PlannerTab detects `?fromSelection=1`, reads the pre-assembled route from sessionStorage, and displays it in navigation view — no start/end address entry required.
+    - Edge cases: geolocation denied falls back to first-trail start, missing geometry shows error, OSRM failure shows warning, column-missing DB schemas handled with `select("*")` fallback.
 - **In-app Chat:** Group and direct messaging with real-time updates, read receipts, and user blocking.
 
 **Backend (api-server):**

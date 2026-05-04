@@ -493,6 +493,7 @@ export async function searchTrails(opts: {
   return data || [];
 }
 
+
 export interface SaveOwner {
   userId: string | null;
   sessionId: string | null;
