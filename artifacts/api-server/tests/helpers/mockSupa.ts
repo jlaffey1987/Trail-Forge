@@ -34,6 +34,7 @@ type Filter =
   | { type: "neq"; col: string; val: unknown }
   | { type: "gt"; col: string; val: unknown }
   | { type: "lt"; col: string; val: unknown }
+  | { type: "lte"; col: string; val: unknown }
   | { type: "is"; col: string; val: unknown }
   | { type: "not_is"; col: string; val: unknown }
   | { type: "in"; col: string; vals: unknown[] }
@@ -135,8 +136,22 @@ export class MockSupa {
         if (f.type === "eq") {
           if (row[f.col] !== f.val) return false;
         } else if (f.type === "is") {
-          // Supabase `is(col, null)` matches null/undefined.
-          if (f.val === null) {
+          const dotIdx = f.col.indexOf(".");
+          if (dotIdx >= 0) {
+            const refTable = f.col.slice(0, dotIdx);
+            const refCol = f.col.slice(dotIdx + 1);
+            const fkCol = `${refTable.replace(/s$/, "")}_id`;
+            const fkVal = row[fkCol];
+            const refRows = this.tables[refTable] ?? [];
+            const refRow = fkVal != null ? refRows.find(r => r.id === fkVal) : null;
+            if (!refRow) return false;
+            const refVal = refRow[refCol];
+            if (f.val === null) {
+              if (refVal != null) return false;
+            } else {
+              if (refVal !== f.val) return false;
+            }
+          } else if (f.val === null) {
             if (row[f.col] != null) return false;
           } else {
             if (row[f.col] !== f.val) return false;
@@ -149,6 +164,9 @@ export class MockSupa {
         } else if (f.type === "lt") {
           const rv = row[f.col];
           if (rv == null || rv >= f.val) return false;
+        } else if (f.type === "lte") {
+          const rv = row[f.col];
+          if (rv == null || rv > f.val) return false;
         } else if (f.type === "not_is") {
           if (f.val === null) {
             if (row[f.col] == null) return false;
@@ -424,6 +442,11 @@ class QueryBuilder implements PromiseLike<QueryResult> {
 
   lt(col: string, val: unknown): this {
     this.state.filters.push({ type: "lt", col, val });
+    return this;
+  }
+
+  lte(col: string, val: unknown): this {
+    this.state.filters.push({ type: "lte", col, val });
     return this;
   }
 
