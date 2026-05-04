@@ -23,7 +23,8 @@
  *   - one `trails` row tagged `__rls_test__: …` in the name
  *   - one `trail_notes` row attached to that trail
  *   - one `trail_photos` row attached to that trail
- * Trail deletion cascades to the notes and photos via the FK
+ *   - one `trail_amendments` row attached to that trail
+ * Trail deletion cascades to the notes, photos, and amendments via the FK
  * `ON DELETE CASCADE` declared in `0004_trail_content.sql`, and the user
  * is removed last so the FKs unwind cleanly.
  */
@@ -46,6 +47,7 @@ const TEST_TAG = "__rls_test__";
 const trailId = randomUUID();
 const noteId = randomUUID();
 const photoId = randomUUID();
+const amendmentId = randomUUID();
 const userId = `user_${TEST_TAG}_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 
 let admin: SupabaseClient;
@@ -101,6 +103,16 @@ describeIfSupabase("trails soft-delete RLS (migration 0005)", () => {
       caption: `${TEST_TAG} caption`,
     });
     if (photoIns.error) throw new Error(`seed trail_photos failed: ${photoIns.error.message}`);
+
+    const amendIns = await admin.from("trail_amendments").insert({
+      id: amendmentId,
+      trail_id: trailId,
+      author_user_id: userId,
+      proposed_changes: { difficulty: 5 },
+      reason: `${TEST_TAG} amendment reason`,
+      status: "pending",
+    });
+    if (amendIns.error) throw new Error(`seed trail_amendments failed: ${amendIns.error.message}`);
   }, 30_000);
 
   afterAll(async () => {
@@ -110,7 +122,7 @@ describeIfSupabase("trails soft-delete RLS (migration 0005)", () => {
     await admin.from("users").delete().eq("id", userId);
   }, 30_000);
 
-  it("baseline: anon can see the public trail and its note + photo while alive", async () => {
+  it("baseline: anon can see the public trail and its note + photo + amendment while alive", async () => {
     const t = await anon.from("trails").select("id, deleted_at").eq("id", trailId).maybeSingle();
     expect(t.error).toBeNull();
     expect(t.data?.id).toBe(trailId);
@@ -123,9 +135,13 @@ describeIfSupabase("trails soft-delete RLS (migration 0005)", () => {
     const p = await anon.from("trail_photos").select("id").eq("id", photoId).maybeSingle();
     expect(p.error).toBeNull();
     expect(p.data?.id).toBe(photoId);
+
+    const a = await anon.from("trail_amendments").select("id").eq("id", amendmentId).maybeSingle();
+    expect(a.error).toBeNull();
+    expect(a.data?.id).toBe(amendmentId);
   });
 
-  it("after soft-delete: anon cannot see the trail or its note + photo", async () => {
+  it("after soft-delete: anon cannot see the trail or its note + photo + amendment", async () => {
     const upd = await admin
       .from("trails")
       .update({ deleted_at: new Date().toISOString() })
@@ -143,9 +159,13 @@ describeIfSupabase("trails soft-delete RLS (migration 0005)", () => {
     const p = await anon.from("trail_photos").select("id").eq("id", photoId).maybeSingle();
     expect(p.error).toBeNull();
     expect(p.data).toBeNull();
+
+    const a = await anon.from("trail_amendments").select("id").eq("id", amendmentId).maybeSingle();
+    expect(a.error).toBeNull();
+    expect(a.data).toBeNull();
   });
 
-  it("after soft-delete: service role still sees the trail + note + photo", async () => {
+  it("after soft-delete: service role still sees the trail + note + photo + amendment", async () => {
     const t = await admin
       .from("trails")
       .select("id, deleted_at")
@@ -172,6 +192,15 @@ describeIfSupabase("trails soft-delete RLS (migration 0005)", () => {
     expect(p.error).toBeNull();
     expect(p.data?.id).toBe(photoId);
     expect(p.data?.trail_id).toBe(trailId);
+
+    const a = await admin
+      .from("trail_amendments")
+      .select("id, trail_id")
+      .eq("id", amendmentId)
+      .maybeSingle();
+    expect(a.error).toBeNull();
+    expect(a.data?.id).toBe(amendmentId);
+    expect(a.data?.trail_id).toBe(trailId);
   });
 });
 
