@@ -84,6 +84,8 @@ export default function TrailDetailSheet({
   const [counts, setCounts] = useState<TrailActivityCounts>({ notes: 0, photos: 0, pending: 0 });
   const [perms, setPerms] = useState<TrailPermissions>({ isOwner: false, isModerator: false, canModerate: false, isUnowned: false, adoptedAt: null, adopter: null });
   const [isSystemAdmin, setIsSystemAdmin] = useState(false);
+  type AdminWhoamiState = "migration-missing" | "no-admins" | "not-admin" | "admin" | "signed-out";
+  const [adminWhoamiState, setAdminWhoamiState] = useState<AdminWhoamiState | null>(null);
   const [adoptBusy, setAdoptBusy] = useState(false);
   // Trails coming from the slim Map-tab fetch don't carry `gpx_data`. Kick
   // off a background fetch as soon as the sheet opens so the wait between
@@ -161,15 +163,22 @@ export default function TrailDetailSheet({
     let cancelled = false;
     if (!isSignedIn) {
       setIsSystemAdmin(false);
+      setAdminWhoamiState(null);
       return;
     }
     fetch("/api/admin/whoami", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((j: { isAdmin?: boolean } | null) => {
-        if (!cancelled) setIsSystemAdmin(Boolean(j?.isAdmin));
+      .then((j: { isAdmin?: boolean; state?: AdminWhoamiState } | null) => {
+        if (!cancelled) {
+          setIsSystemAdmin(Boolean(j?.isAdmin));
+          setAdminWhoamiState(j?.state ?? null);
+        }
       })
       .catch(() => {
-        if (!cancelled) setIsSystemAdmin(false);
+        if (!cancelled) {
+          setIsSystemAdmin(false);
+          setAdminWhoamiState(null);
+        }
       });
     return () => {
       cancelled = true;
@@ -466,6 +475,7 @@ export default function TrailDetailSheet({
               setLocation={setLocation}
               isOwner={perms.isOwner}
               isSystemAdmin={isSystemAdmin}
+              adminWhoamiState={adminWhoamiState}
               isExternalSource={Boolean(isExternalSource)}
               isApproximated={isApproximated}
               isUnverified={isUnverified}
@@ -671,6 +681,7 @@ interface OverviewProps {
   setLocation: (path: string) => void;
   isOwner: boolean;
   isSystemAdmin: boolean;
+  adminWhoamiState: "migration-missing" | "no-admins" | "not-admin" | "admin" | "signed-out" | null;
   isExternalSource: boolean;
   isApproximated: boolean;
   isUnverified: boolean;
@@ -697,6 +708,7 @@ function OverviewPanel({
   setLocation,
   isOwner,
   isSystemAdmin,
+  adminWhoamiState,
   isExternalSource,
   isApproximated,
   isUnverified,
@@ -708,9 +720,11 @@ function OverviewPanel({
   onProposeEdit,
   isSignedIn,
 }: OverviewProps) {
-  // Re-grade is allowed for the trail's owner OR a system admin —
-  // mirrors the backend permission check at POST /api/trails/:id/grade-ai.
   const canRegrade = isOwner || isSystemAdmin;
+  const showAdminBootstrapHint =
+    isSignedIn &&
+    !isOwner &&
+    (adminWhoamiState === "migration-missing" || adminWhoamiState === "no-admins");
   const [regradeStatus, setRegradeStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [regradeError, setRegradeError] = useState<string | null>(null);
   const [regradeResult, setRegradeResult] = useState<{ grade: number; rationale: string } | null>(
@@ -854,7 +868,7 @@ function OverviewPanel({
 
       <TrailElevationChart trail={trail} />
 
-      {(regradeResult || canRegrade) ? (
+      {(regradeResult || canRegrade || showAdminBootstrapHint) ? (
         <div className="px-4 pb-2">
           <div
             className="rounded-lg border border-[hsl(30,12%,18%)] bg-[hsl(22,15%,12%)] px-3 py-2"
@@ -901,6 +915,30 @@ function OverviewPanel({
                 data-testid="trail-detail-regrade-error"
               >
                 {regradeError}
+              </div>
+            ) : null}
+            {showAdminBootstrapHint ? (
+              <div
+                className="mt-2 flex items-start gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-200 leading-snug"
+                data-testid="trail-detail-admin-bootstrap-hint"
+              >
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>
+                  Admin features are waiting to be turned on.{" "}
+                  <a
+                    href="/admin"
+                    onClick={(e) => { e.preventDefault(); setLocation("/admin"); }}
+                    className="font-bold text-amber-300 underline hover:text-amber-200"
+                    data-testid="trail-detail-admin-bootstrap-link"
+                  >
+                    Go to Admin
+                  </a>{" "}
+                  to get started.
+                </span>
               </div>
             ) : null}
           </div>
