@@ -9,8 +9,6 @@ import {
   maneuverArrow,
   haversineM,
   getRoadRoute,
-  HYBRID_LABEL_TILE_URL,
-  HYBRID_LABEL_TILE_ATTRIBUTION,
 } from "@/lib/routing";
 import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
 import type { Trail } from "@/lib/supabase";
@@ -227,17 +225,9 @@ export default function NavigationView({
     const map = L.map(mapContainerRef.current, { center: [54, -3], zoom: 6, zoomControl: false });
     L.control.zoom({ position: "topright" }).addTo(map);
     L.tileLayer(
-      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      { attribution: "Tiles © Esri", maxZoom: 19 }
+      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      { attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>', maxZoom: 20, subdomains: "abcd" }
     ).addTo(map);
-    // Hybrid place-label overlay so the rider can read town/road names
-    // while navigating on the satellite base layer.
-    L.tileLayer(HYBRID_LABEL_TILE_URL, {
-      attribution: HYBRID_LABEL_TILE_ATTRIBUTION,
-      opacity: 0.95,
-      maxZoom: 19,
-      pane: "shadowPane",
-    }).addTo(map);
     mapRef.current = map;
 
     map.on("dragstart", () => {
@@ -364,7 +354,8 @@ export default function NavigationView({
       let diff = target - current;
       if (diff > 180) diff -= 360;
       if (diff < -180) diff += 360;
-      const next = current + diff * 0.12;
+      if (Math.abs(diff) < 1.5) { raf = requestAnimationFrame(animate); return; }
+      const next = current + diff * 0.04;
       mapRotationRef.current = ((next % 360) + 360) % 360;
       el.style.transform = `rotate(${mapRotationRef.current}deg)`;
 
@@ -404,7 +395,7 @@ export default function NavigationView({
     }
 
     const bikeHeadingDeg = smoothedHeading;
-    const bikeHtml = `<div data-bike-rotate style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;transform:rotate(${bikeHeadingDeg}deg);transition:transform 0.15s linear;">
+    const bikeHtml = `<div data-bike-rotate style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;transform:rotate(${bikeHeadingDeg}deg);transition:transform 0.5s ease-out;">
       <div style="position:absolute;inset:2px;background:rgba(59,130,246,0.25);border-radius:50%;animation:pulse 1.6s ease-out infinite;"></div>
       <svg viewBox="0 0 40 40" width="40" height="40" style="position:relative;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.7));">
         <polygon points="20,4 28,18 26,20 22,20 22,30 18,30 18,20 14,20 12,18" fill="#3b82f6" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
@@ -430,24 +421,25 @@ export default function NavigationView({
       }
     }
 
-    const mapSize = map.getSize();
-    const targetPoint = L.point(mapSize.x / 2, mapSize.y * 0.65);
-    const targetLatLng = map.containerPointToLatLng(targetPoint);
-    const offsetLat = userPos.lat - targetLatLng.lat;
-    const offsetLng = userPos.lng - targetLatLng.lng;
-    const panTarget: [number, number] = [userPos.lat + offsetLat * 0.25, userPos.lng + offsetLng * 0.25];
-
     if (mapLock === "locked") {
       const center = map.getCenter();
       const dist = haversineM({ lat: center.lat, lng: center.lng }, userPos);
-      if (dist > 100) {
+      if (dist > 5) {
+        const desiredZoom = Math.max(map.getZoom(), 16);
+        let panLat = userPos.lat;
+        let panLng = userPos.lng;
+        if (mapMode === "heading-up") {
+          const mapSize = map.getSize();
+          const targetPoint = L.point(mapSize.x / 2, mapSize.y * 0.65);
+          const targetLatLng = map.containerPointToLatLng(targetPoint);
+          const offsetLat = userPos.lat - targetLatLng.lat;
+          const offsetLng = userPos.lng - targetLatLng.lng;
+          panLat = userPos.lat + offsetLat * 0.3;
+          panLng = userPos.lng + offsetLng * 0.3;
+        }
         programmaticPanRef.current = true;
-        map.setView(
-          mapMode === "heading-up" ? panTarget : [userPos.lat, userPos.lng],
-          Math.max(map.getZoom(), 15),
-          { animate: true },
-        );
-        setTimeout(() => { programmaticPanRef.current = false; }, 500);
+        map.setView([panLat, panLng], desiredZoom, { animate: true, duration: 0.6 });
+        setTimeout(() => { programmaticPanRef.current = false; }, 700);
       }
     }
   }, [userPos, riding, mapMode, mapLock, smoothedHeading]);

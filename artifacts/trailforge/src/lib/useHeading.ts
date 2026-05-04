@@ -7,7 +7,8 @@ interface HeadingState {
   source: HeadingSource;
 }
 
-const LOW_PASS_ALPHA = 0.15;
+const LOW_PASS_ALPHA = 0.05;
+const DEAD_ZONE_DEG = 3;
 
 function normalizeAngle(deg: number): number {
   return ((deg % 360) + 360) % 360;
@@ -21,6 +22,7 @@ function angleDiff(a: number, b: number): number {
 
 function smoothAngle(current: number, target: number, alpha: number): number {
   const diff = angleDiff(current, target);
+  if (Math.abs(diff) < DEAD_ZONE_DEG) return current;
   return normalizeAngle(current + diff * alpha);
 }
 
@@ -114,7 +116,11 @@ export function useHeading(
 
       if (rawHeading !== null) {
         smoothedRef.current = smoothAngle(smoothedRef.current, rawHeading, LOW_PASS_ALPHA);
-        setState({ heading: Math.round(smoothedRef.current), source });
+        const rounded = Math.round(smoothedRef.current);
+        setState((prev) => {
+          if (prev.heading === rounded && prev.source === source) return prev;
+          return { heading: rounded, source };
+        });
       }
 
       raf = requestAnimationFrame(tick);
