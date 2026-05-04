@@ -11,8 +11,9 @@
 >
 > The ledger was backfilled with the rows recorded below for migrations
 > 0001–0009 (which were already in place when the script was introduced).
-> No new entries should be appended here — `db:migrate` writes to the
-> ledger automatically.
+> New migrations are recorded in the ledger automatically by `db:migrate`.
+> Rows may still be appended here as an operational audit trail when
+> migrations are applied (e.g. backfill stats, verification notes).
 
 This file records when each Supabase migration in this directory was
 applied to the live project (`qgzbppzlwydammxxjyct`). The legacy
@@ -34,17 +35,20 @@ log was the only audit trail we had.
 | 0008_trail_simplified_path.sql | (status not verified by task 23) | — | re-check next time it matters |
 | 0009_act_imports.sql | (status not verified by task 23) | — | re-check next time it matters |
 | 0010_group_notifications.sql | (status not verified by task 23) | — | re-check next time it matters |
-| 0011_trail_elevation_profile.sql | (pending — apply manually) | task-27 / agent | Adds `elevation_profile jsonb`, `elevation_gain_m int`, `elevation_loss_m int` to `trails`. Two new helper fns (`trailforge_extract_elevations`, `trailforge_build_elevation`), one new BEFORE INSERT/UPDATE OF gpx_data trigger (`trails_elevation_profile_trigger`), and a LATERAL backfill for existing rows. Same shape as 0008 — safe to re-run (uses `CREATE OR REPLACE` + `ADD COLUMN IF NOT EXISTS` + `DROP TRIGGER IF EXISTS`). The TrailDetailSheet hides the chart gracefully when columns are absent or `elevation_profile` is NULL, so the UI is forward-compatible with un-applied DBs. |
+| 0011_trail_elevation_profile.sql | 2026-05-04 ~01:44 UTC | task-84 / agent | Applied via `pnpm --filter @workspace/trailforge run db:migrate 0011_trail_elevation_profile.sql`. Adds `elevation_profile jsonb`, `elevation_gain_m int`, `elevation_loss_m int` to `trails`. Two helper fns (`trailforge_extract_elevations`, `trailforge_build_elevation`), one BEFORE INSERT/UPDATE OF gpx_data trigger (`trails_elevation_profile_trigger`), and a LATERAL backfill. Backfill populated 563 of 575 existing trails (12 without usable `<ele>` data remain NULL). Verified: `db:migrate:status` shows `[x]`, sample trails carry gain/loss/profile data, TrailElevationChart renders on the Trail Detail sheet. |
 
 ## How to apply a new migration
 
-1. Open the Supabase SQL editor for project
-   `qgzbppzlwydammxxjyct` (URL in `SUPABASE_URL`).
-2. Paste the migration file contents in order; run it.
-3. Append a new row above with the UTC timestamp, who applied it, and any
-   notable side effects (e.g. backfills, env vars to set).
-4. If the migration introduces a new admin / service-role-only table,
-   verify RLS denies anon (use the anon key) before announcing it ready.
+Use the `db:migrate` script (canonical workflow since task 39):
+
+```bash
+pnpm --filter @workspace/trailforge run db:migrate <file>
+pnpm --filter @workspace/trailforge run db:migrate:status
+```
+
+See `replit.md` → "Applying Supabase migrations" for full usage, flags,
+and environment variable details. Optionally append a row to the table
+above with backfill stats or verification notes for the audit trail.
 
 ## Bootstrap notes for migration 0007
 
