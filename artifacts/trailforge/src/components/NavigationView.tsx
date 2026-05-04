@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   type AssembledRoute,
   type RouteSection,
@@ -8,6 +8,7 @@ import {
   formatDurationMin,
   maneuverArrow,
   haversineM,
+  getRoadRoute,
   HYBRID_LABEL_TILE_URL,
   HYBRID_LABEL_TILE_ATTRIBUTION,
 } from "@/lib/routing";
@@ -18,6 +19,25 @@ import {
   unmarkCompleted,
   useCompletionState,
 } from "@/lib/completionsStore";
+import { useHeading } from "@/lib/useHeading";
+import {
+  type RerouteState,
+  initialRerouteState,
+  isOffRoute,
+  shouldAutoReroute,
+  canAttemptReroute,
+  findRerouteTarget,
+  attemptReroute,
+  spliceReroutedSection,
+  updateRerouteStateOnAttempt,
+  updateRerouteStateOnSuccess,
+  updateRerouteStateOnFailure,
+  OFF_ROUTE_THRESHOLD_M,
+} from "@/lib/navigationReroute";
+
+type MapMode = "heading-up" | "north-up";
+type LockState = "locked" | "unlocked";
+const MAP_MODE_KEY = "trailforge-nav-map-mode";
 
 // Find nearest section to a user position; returns { section, distanceM }
 function findNearestSection(route: AssembledRoute, user: GeoPoint): { section: RouteSection; distanceM: number } | null {
@@ -173,8 +193,35 @@ export default function NavigationView({
   } | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
 
+  const [mapMode, setMapMode] = useState<MapMode>(() => {
+    try {
+      const stored = localStorage.getItem(MAP_MODE_KEY);
+      if (stored === "north-up" || stored === "heading-up") return stored;
+    } catch { /* ignore */ }
+    return "heading-up";
+  });
+  const [mapLock, setMapLock] = useState<LockState>("locked");
+  const mapRotationRef = useRef(0);
+  const programmaticPanRef = useRef(false);
+
+  const [rerouteState, setRerouteState] = useState<RerouteState>(initialRerouteState);
+  const [rerouteToast, setRerouteToast] = useState<string | null>(null);
+  const rerouteToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [liveRoute, setLiveRoute] = useState<AssembledRoute>(route);
+  useEffect(() => {
+    setLiveRoute(route);
+    setRerouteState(initialRerouteState());
+  }, [route]);
+
+  const activeRoute = liveRoute;
+
+  const { heading: smoothedHeading, requestCompassPermission } = useHeading(
+    userPos?.headingDeg ?? null,
+    riding,
+  );
+
   // Computed nav state from current user position
-  const nearestInfo = userPos ? findNearestSection(route, userPos) : null;
+  const nearestInfo = userPos ? findNearestSection(activeRoute, userPos) : null;
   const currentSection = nearestInfo?.section ?? null;
   const offRouteM = nearestInfo?.distanceM ?? null;
   const nextRoadStepInfo = currentSection?.kind === "road" && userPos
@@ -214,6 +261,12 @@ export default function NavigationView({
       pane: "shadowPane",
     }).addTo(map);
     mapRef.current = map;
+
+    map.on("dragstart", () => {
+      if (!programmaticPanRef.current) {
+        setMapLock("unlocked");
+      }
+    });
   }, [leafletLoaded]);
 
   // Cleanup map on unmount
@@ -230,6 +283,10 @@ export default function NavigationView({
       sectionLayersRef.current.clear();
       userMarkerRef.current = null;
       userAccuracyRef.current = null;
+      if (rerouteToastTimerRef.current) {
+        clearTimeout(rerouteToastTimerRef.current);
+        rerouteToastTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -280,20 +337,79 @@ export default function NavigationView({
     };
   }, [riding]);
 
+  const handleCompassTap = useCallback(() => {
+    if (mapMode === "heading-up" && mapLock === "unlocked") {
+      setMapLock("locked");
+      if (userPos && mapRef.current) {
+        programmaticPanRef.current = true;
+        mapRef.current.setView([userPos.lat, userPos.lng], mapRef.current.getZoom(), { animate: true });
+        setTimeout(() => { programmaticPanRef.current = false; }, 500);
+      }
+      return;
+    }
+
+    const next: MapMode = mapMode === "heading-up" ? "north-up" : "heading-up";
+    setMapMode(next);
+    setMapLock("locked");
+    try { localStorage.setItem(MAP_MODE_KEY, next); } catch { /* ignore */ }
+    if (next === "north-up" && mapContainerRef.current) {
+      mapRotationRef.current = 0;
+      mapContainerRef.current.style.transform = "rotate(0deg)";
+    }
+    if (next === "heading-up" && userPos && mapRef.current) {
+      programmaticPanRef.current = true;
+      mapRef.current.setView([userPos.lat, userPos.lng], mapRef.current.getZoom(), { animate: true });
+      setTimeout(() => { programmaticPanRef.current = false; }, 500);
+    }
+  }, [mapMode, mapLock, userPos]);
+
+  useEffect(() => {
+    if (!riding || !mapContainerRef.current) return;
+    if (mapMode !== "heading-up" || mapLock !== "locked") {
+      if (mapMode === "north-up") {
+        mapRotationRef.current = 0;
+        mapContainerRef.current.style.transform = "rotate(0deg)";
+      }
+      return;
+    }
+
+    let raf: number;
+    let running = true;
+    const el = mapContainerRef.current;
+
+    const animate = () => {
+      if (!running) return;
+      const target = -smoothedHeading;
+      const current = mapRotationRef.current;
+      let diff = target - current;
+      if (diff > 180) diff -= 360;
+      if (diff < -180) diff += 360;
+      const next = current + diff * 0.12;
+      mapRotationRef.current = ((next % 360) + 360) % 360;
+      el.style.transform = `rotate(${mapRotationRef.current}deg)`;
+
+      raf = requestAnimationFrame(animate);
+    };
+
+    raf = requestAnimationFrame(animate);
+    return () => {
+      running = false;
+      cancelAnimationFrame(raf);
+    };
+  }, [riding, mapMode, mapLock, smoothedHeading]);
+
   // Update user marker and auto-pan map when riding
   useEffect(() => {
     if (!mapRef.current || !window.L) return;
     const L = window.L;
     const map = mapRef.current;
 
-    // Remove if not riding or no position
     if (!riding || !userPos) {
       if (userMarkerRef.current) { userMarkerRef.current.remove(); userMarkerRef.current = null; }
       if (userAccuracyRef.current) { userAccuracyRef.current.remove(); userAccuracyRef.current = null; }
       return;
     }
 
-    // Accuracy circle
     if (!userAccuracyRef.current) {
       userAccuracyRef.current = L.circle([userPos.lat, userPos.lng], {
         radius: userPos.accuracyM,
@@ -307,36 +423,104 @@ export default function NavigationView({
       userAccuracyRef.current.setRadius(userPos.accuracyM);
     }
 
-    // Pulsing user marker
-    const heading = userPos.headingDeg ?? 0;
-    const html = `<div style="position:relative;width:32px;height:32px;display:flex;align-items:center;justify-content:center;">
-      <div style="position:absolute;inset:0;background:#3b82f6;border-radius:50%;opacity:0.3;animation:pulse 1.6s ease-out infinite;"></div>
-      <div style="position:relative;width:18px;height:18px;background:#3b82f6;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.6);"></div>
-      ${userPos.headingDeg != null ? `<div style="position:absolute;top:-2px;left:50%;transform:translateX(-50%) rotate(${heading}deg);transform-origin:50% 18px;width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:10px solid #3b82f6;"></div>` : ""}
+    const bikeHeadingDeg = smoothedHeading;
+    const bikeHtml = `<div data-bike-rotate style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;transform:rotate(${bikeHeadingDeg}deg);transition:transform 0.15s linear;">
+      <div style="position:absolute;inset:2px;background:rgba(59,130,246,0.25);border-radius:50%;animation:pulse 1.6s ease-out infinite;"></div>
+      <svg viewBox="0 0 40 40" width="40" height="40" style="position:relative;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.7));">
+        <polygon points="20,4 28,18 26,20 22,20 22,30 18,30 18,20 14,20 12,18" fill="#3b82f6" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+        <circle cx="18" cy="32" r="3.5" fill="#1d4ed8" stroke="#fff" stroke-width="1.5"/>
+        <circle cx="22" cy="32" r="3.5" fill="#1d4ed8" stroke="#fff" stroke-width="1.5"/>
+        <rect x="17" y="10" width="6" height="4" rx="1" fill="#60a5fa"/>
+      </svg>
     </div>
     <style>@keyframes pulse{0%{transform:scale(0.8);opacity:0.6}100%{transform:scale(2.2);opacity:0}}</style>`;
 
     if (!userMarkerRef.current) {
       userMarkerRef.current = L.marker([userPos.lat, userPos.lng], {
         icon: L.divIcon({
-          html, iconSize: [32, 32], iconAnchor: [16, 16], className: "user-marker",
+          html: bikeHtml, iconSize: [40, 40], iconAnchor: [20, 20], className: "user-marker-bike",
         }),
         zIndexOffset: 1000,
       }).addTo(map);
     } else {
       userMarkerRef.current.setLatLng([userPos.lat, userPos.lng]);
-      userMarkerRef.current.setIcon(L.divIcon({
-        html, iconSize: [32, 32], iconAnchor: [16, 16], className: "user-marker",
-      }));
+      const existingRotateEl = userMarkerRef.current.getElement()?.querySelector("[data-bike-rotate]") as HTMLElement | null;
+      if (existingRotateEl) {
+        existingRotateEl.style.transform = `rotate(${bikeHeadingDeg}deg)`;
+      }
     }
 
-    // Auto-pan if user is far from map center
-    const center = map.getCenter();
-    const dist = haversineM({ lat: center.lat, lng: center.lng }, userPos);
-    if (dist > 200) {
-      map.setView([userPos.lat, userPos.lng], Math.max(map.getZoom(), 15), { animate: true });
+    const mapSize = map.getSize();
+    const targetPoint = L.point(mapSize.x / 2, mapSize.y * 0.65);
+    const targetLatLng = map.containerPointToLatLng(targetPoint);
+    const offsetLat = userPos.lat - targetLatLng.lat;
+    const offsetLng = userPos.lng - targetLatLng.lng;
+    const panTarget: [number, number] = [userPos.lat + offsetLat * 0.25, userPos.lng + offsetLng * 0.25];
+
+    if (mapLock === "locked") {
+      const center = map.getCenter();
+      const dist = haversineM({ lat: center.lat, lng: center.lng }, userPos);
+      if (dist > 100) {
+        programmaticPanRef.current = true;
+        map.setView(
+          mapMode === "heading-up" ? panTarget : [userPos.lat, userPos.lng],
+          Math.max(map.getZoom(), 15),
+          { animate: true },
+        );
+        setTimeout(() => { programmaticPanRef.current = false; }, 500);
+      }
     }
-  }, [userPos, riding]);
+  }, [userPos, riding, mapMode, mapLock, smoothedHeading]);
+
+  const showRerouteToast = useCallback((msg: string, durationMs = 3000) => {
+    if (rerouteToastTimerRef.current) clearTimeout(rerouteToastTimerRef.current);
+    setRerouteToast(msg);
+    rerouteToastTimerRef.current = setTimeout(() => setRerouteToast(null), durationMs);
+  }, []);
+
+  useEffect(() => {
+    if (!riding || !userPos) return;
+
+    const { offRoute, nearestSection } = isOffRoute(userPos, activeRoute);
+    if (!offRoute) {
+      if (rerouteState.consecutiveFailures > 0 || rerouteState.givenUp) {
+        setRerouteState(initialRerouteState());
+      }
+      return;
+    }
+
+    const { shouldReroute } = shouldAutoReroute(nearestSection, offRoute);
+    if (!shouldReroute) return;
+
+    if (!canAttemptReroute(rerouteState, Date.now())) return;
+
+    const roadSection = nearestSection as Extract<RouteSection, { kind: "road" }>;
+    const target = findRerouteTarget(roadSection, activeRoute);
+    if (!target) return;
+
+    setRerouteState((prev) => updateRerouteStateOnAttempt(prev, Date.now()));
+    showRerouteToast("Recalculating…", 15000);
+
+    void (async () => {
+      const result = await attemptReroute(userPos, target, getRoadRoute);
+      if (result.success && result.newRoute) {
+        const updated = spliceReroutedSection(activeRoute, roadSection, result.newRoute, userPos);
+        setLiveRoute(updated);
+        setRerouteState((prev) => updateRerouteStateOnSuccess(prev));
+        showRerouteToast("Re-routed", 3000);
+      } else {
+        setRerouteState((prev) => {
+          const next = updateRerouteStateOnFailure(prev);
+          if (next.givenUp) {
+            showRerouteToast("Couldn't recalculate — check signal", 6000);
+          } else {
+            showRerouteToast("Re-route failed — retrying soon", 3000);
+          }
+          return next;
+        });
+      }
+    })();
+  }, [userPos, riding, activeRoute, rerouteState, showRerouteToast]);
 
   // Render route sections
   useEffect(() => {
@@ -344,20 +528,18 @@ export default function NavigationView({
     const L = window.L;
     const map = mapRef.current;
 
-    // Clear existing
     sectionLayersRef.current.forEach((layer) => layer.remove());
     sectionLayersRef.current = new Map();
 
     const allBounds: [number, number][] = [];
 
-    // Add markers for start and end
-    const startMarker = L.marker([route.start.lat, route.start.lng], {
+    const startMarker = L.marker([activeRoute.start.lat, activeRoute.start.lng], {
       icon: L.divIcon({
         html: `<div style="background:#10b981;width:24px;height:24px;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#fff;">A</div>`,
         iconSize: [24, 24], iconAnchor: [12, 12], className: "",
       }),
     }).addTo(map);
-    const endMarker = L.marker([route.end.lat, route.end.lng], {
+    const endMarker = L.marker([activeRoute.end.lat, activeRoute.end.lng], {
       icon: L.divIcon({
         html: `<div style="background:#dc2626;width:24px;height:24px;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#fff;">B</div>`,
         iconSize: [24, 24], iconAnchor: [12, 12], className: "",
@@ -365,11 +547,10 @@ export default function NavigationView({
     }).addTo(map);
     sectionLayersRef.current.set(-1, startMarker);
     sectionLayersRef.current.set(-2, endMarker);
-    allBounds.push([route.start.lat, route.start.lng]);
-    allBounds.push([route.end.lat, route.end.lng]);
+    allBounds.push([activeRoute.start.lat, activeRoute.start.lng]);
+    allBounds.push([activeRoute.end.lat, activeRoute.end.lng]);
 
-    // Render each section
-    route.sections.forEach((sec) => {
+    activeRoute.sections.forEach((sec) => {
       const isActive = activeSection === sec.index;
       if (sec.kind === "road") {
         const latlngs = sec.route.polyline.map((p) => [p.lat, p.lng] as [number, number]);
@@ -439,7 +620,7 @@ export default function NavigationView({
         sectionLayersRef.current.set(sec.index * 10, shadow);
         sectionLayersRef.current.set(sec.index * 10 + 1, main);
         // Trail entry marker (numbered)
-        const trailNum = route.sections.filter((s) => s.kind === "trail" && s.index <= sec.index).length;
+        const trailNum = activeRoute.sections.filter((s) => s.kind === "trail" && s.index <= sec.index).length;
         const entryMarker = L.marker([sec.entry.lat, sec.entry.lng], {
           icon: L.divIcon({
             html: `<div style="background:#f97316;width:22px;height:22px;border:2.5px solid #fff;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#000;">${trailNum}</div>`,
@@ -456,7 +637,7 @@ export default function NavigationView({
     if (allBounds.length > 0) {
       try {
         if (activeSection != null) {
-          const sec = route.sections.find((s) => s.index === activeSection);
+          const sec = activeRoute.sections.find((s) => s.index === activeSection);
           if (sec) {
             let pts: GeoPoint[];
             if (sec.kind === "road") pts = sec.route.polyline;
@@ -472,7 +653,7 @@ export default function NavigationView({
         // ignore bounds errors
       }
     }
-  }, [route, leafletLoaded, activeSection]);
+  }, [activeRoute, leafletLoaded, activeSection]);
 
   // Kick off in-place removal of a trail section. Pauses live GPS while
   // the route is recomputed and resumes it against the new route on
@@ -611,7 +792,7 @@ export default function NavigationView({
     // Waypoint sections are zero-length stops, so we skip them in the GPX
     // export — the surrounding road sections already include the path that
     // passes through the waypoint coordinate.
-    const trailRoutes: TrailRoute[] = route.sections
+    const trailRoutes: TrailRoute[] = activeRoute.sections
       .map((sec, i): TrailRoute | null => {
         if (sec.kind === "road") {
           return {
@@ -639,8 +820,8 @@ export default function NavigationView({
     downloadGPX(gpx, filename);
   };
 
-  const trailSections = route.sections.filter((s): s is Extract<RouteSection, { kind: "trail" }> => s.kind === "trail");
-  const roadSections = route.sections.filter((s): s is Extract<RouteSection, { kind: "road" }> => s.kind === "road");
+  const trailSections = activeRoute.sections.filter((s): s is Extract<RouteSection, { kind: "trail" }> => s.kind === "trail");
+  const roadSections = activeRoute.sections.filter((s): s is Extract<RouteSection, { kind: "road" }> => s.kind === "road");
 
   return (
     <div className="fixed inset-0 z-[2000] flex flex-col bg-[hsl(22,15%,7%)]">
@@ -659,12 +840,18 @@ export default function NavigationView({
           <div className="text-center">
             <div className="text-[10px] text-stone-500 uppercase tracking-widest">Trip Navigation</div>
             <div className="text-xs font-bold text-amber-400">
-              {route.start.label?.split(",")[0] || "Start"} → {route.end.label?.split(",")[0] || "End"}
+              {activeRoute.start.label?.split(",")[0] || "Start"} → {activeRoute.end.label?.split(",")[0] || "End"}
             </div>
           </div>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => setRiding((v) => !v)}
+              onClick={() => {
+                if (!riding) {
+                  void requestCompassPermission();
+                  setMapLock("locked");
+                }
+                setRiding((v) => !v);
+              }}
               className={`px-2.5 py-1.5 rounded-lg border transition-all flex items-center gap-1.5 ${
                 riding
                   ? "bg-red-500/25 border-red-500/60 text-red-300 hover:bg-red-500/35"
@@ -701,19 +888,19 @@ export default function NavigationView({
         {/* Stats row */}
         <div className="grid grid-cols-4 divide-x divide-[hsl(30,12%,16%)] border-t border-[hsl(30,12%,14%)]">
           <div className="py-2 text-center">
-            <div className="text-sm font-bold text-amber-400">{formatKm(route.totalDistanceKm)}</div>
+            <div className="text-sm font-bold text-amber-400">{formatKm(activeRoute.totalDistanceKm)}</div>
             <div className="text-[9px] text-stone-500 uppercase tracking-wider">Total</div>
           </div>
           <div className="py-2 text-center">
-            <div className="text-sm font-bold text-blue-400">{formatKm(route.totalRoadKm)}</div>
+            <div className="text-sm font-bold text-blue-400">{formatKm(activeRoute.totalRoadKm)}</div>
             <div className="text-[9px] text-stone-500 uppercase tracking-wider">Road</div>
           </div>
           <div className="py-2 text-center">
-            <div className="text-sm font-bold text-orange-400">{formatKm(route.totalTrailKm)}</div>
+            <div className="text-sm font-bold text-orange-400">{formatKm(activeRoute.totalTrailKm)}</div>
             <div className="text-[9px] text-stone-500 uppercase tracking-wider">Trail</div>
           </div>
           <div className="py-2 text-center">
-            <div className="text-sm font-bold text-stone-200">{formatDurationMin(route.totalDurationMin)}</div>
+            <div className="text-sm font-bold text-stone-200">{formatDurationMin(activeRoute.totalDurationMin)}</div>
             <div className="text-[9px] text-stone-500 uppercase tracking-wider">Est. Time</div>
           </div>
         </div>
@@ -809,7 +996,6 @@ export default function NavigationView({
                   </>
                 )}
               </div>
-              {/* Speed + off-route */}
               <div className="shrink-0 flex flex-col items-end justify-center text-right">
                 {userPos.speedMs != null && userPos.speedMs > 0 && (
                   <div>
@@ -817,12 +1003,40 @@ export default function NavigationView({
                     <div className="text-[8px] text-stone-400 uppercase">km/h</div>
                   </div>
                 )}
-                {offRouteM != null && offRouteM > 50 && (
-                  <div className="mt-1 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40">
-                    <div className="text-[8px] text-amber-300 font-bold uppercase">Off-route</div>
-                    <div className="text-[9px] text-amber-200">{formatDistance(offRouteM)}</div>
-                  </div>
-                )}
+                {offRouteM != null && offRouteM > OFF_ROUTE_THRESHOLD_M && (() => {
+                  const isTrailOff = currentSection?.kind === "trail";
+                  if (rerouteState.status === "recalculating") {
+                    return (
+                      <div className="mt-1 px-1.5 py-0.5 rounded bg-blue-500/20 border border-blue-500/40">
+                        <div className="text-[8px] text-blue-300 font-bold uppercase">Recalculating…</div>
+                      </div>
+                    );
+                  }
+                  if (isTrailOff) {
+                    return (
+                      <div className="mt-1 px-1.5 py-0.5 rounded bg-orange-500/20 border border-orange-500/40 max-w-[120px]">
+                        <div className="text-[8px] text-orange-300 font-bold uppercase">Off-trail</div>
+                        <div className="text-[9px] text-orange-200">{formatDistance(offRouteM)}</div>
+                        <div className="text-[8px] text-orange-200/70 leading-tight mt-0.5">Return to the marked path. Trail sections aren't recalculated.</div>
+                      </div>
+                    );
+                  }
+                  if (rerouteState.givenUp) {
+                    return (
+                      <div className="mt-1 px-1.5 py-0.5 rounded bg-red-500/20 border border-red-500/40 max-w-[120px]">
+                        <div className="text-[8px] text-red-300 font-bold uppercase">Off-route</div>
+                        <div className="text-[9px] text-red-200">{formatDistance(offRouteM)}</div>
+                        <div className="text-[8px] text-red-200/70 leading-tight mt-0.5">Couldn't recalculate — check signal</div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="mt-1 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40">
+                      <div className="text-[8px] text-amber-300 font-bold uppercase">Off-route</div>
+                      <div className="text-[9px] text-amber-200">{formatDistance(offRouteM)}</div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
             );
@@ -831,26 +1045,33 @@ export default function NavigationView({
       )}
 
       {/* Warnings if any */}
-      {(route.skippedTrails.length > 0 || route.failedRoadSegments > 0) && (
+      {(activeRoute.skippedTrails.length > 0 || activeRoute.failedRoadSegments > 0) && (
         <div className="shrink-0 bg-amber-900/30 border-b border-amber-600/40 px-3 py-2 flex items-start gap-2">
           <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
             <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
           </svg>
           <div className="flex-1 text-[11px] text-amber-200 leading-tight">
-            {route.skippedTrails.length > 0 && (
-              <p>Skipped {route.skippedTrails.length} trail{route.skippedTrails.length !== 1 ? "s" : ""} with missing GPX: {route.skippedTrails.join(", ")}</p>
+            {activeRoute.skippedTrails.length > 0 && (
+              <p>Skipped {activeRoute.skippedTrails.length} trail{activeRoute.skippedTrails.length !== 1 ? "s" : ""} with missing GPX: {activeRoute.skippedTrails.join(", ")}</p>
             )}
-            {route.failedRoadSegments > 0 && (
-              <p>Could not compute {route.failedRoadSegments} road segment{route.failedRoadSegments !== 1 ? "s" : ""} (try again — public OSRM may be busy)</p>
+            {activeRoute.failedRoadSegments > 0 && (
+              <p>Could not compute {activeRoute.failedRoadSegments} road segment{activeRoute.failedRoadSegments !== 1 ? "s" : ""} (try again — public OSRM may be busy)</p>
             )}
           </div>
         </div>
       )}
 
       {/* Map */}
-      <div className="relative" style={{ height: "45vh" }}>
-        <div ref={mapContainerRef} className="absolute inset-0 bg-stone-900" />
+      <div className="relative overflow-hidden" style={{ height: "45vh" }}>
+        <div ref={mapContainerRef} className="bg-stone-900" style={{
+          position: "absolute",
+          inset: "-15%",
+          width: "130%",
+          height: "130%",
+          transformOrigin: "center center",
+          transition: mapMode === "north-up" ? "transform 0.3s ease" : undefined,
+        }} />
         {!leafletLoaded && (
           <div className="absolute inset-0 flex items-center justify-center bg-[hsl(22,15%,8%)]">
             <div className="text-center">
@@ -860,12 +1081,44 @@ export default function NavigationView({
           </div>
         )}
 
+        {riding && (
+          <button
+            onClick={handleCompassTap}
+            className={`absolute top-3 left-3 z-[700] w-10 h-10 rounded-full border backdrop-blur flex items-center justify-center shadow-lg transition-colors ${
+              mapMode === "heading-up" && mapLock === "unlocked"
+                ? "bg-blue-900/80 border-blue-400 hover:bg-blue-800/90"
+                : "bg-stone-900/80 border-stone-600 hover:bg-stone-800/90"
+            }`}
+            title={
+              mapMode === "heading-up" && mapLock === "unlocked"
+                ? "Re-centre on rider"
+                : mapMode === "heading-up"
+                  ? "Switch to north-up"
+                  : "Switch to heading-up"
+            }
+            aria-label="Compass: toggle map orientation"
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" style={{
+              transform: mapMode === "heading-up" ? `rotate(${-smoothedHeading}deg)` : "rotate(0deg)",
+              transition: "transform 0.2s ease",
+            }}>
+              <polygon points="12,2 8,14 12,12 16,14" fill="#ef4444" stroke="#fff" strokeWidth="0.8"/>
+              <polygon points="12,22 8,14 12,12 16,14" fill="#94a3b8" stroke="#fff" strokeWidth="0.8"/>
+              <text x="12" y="7" textAnchor="middle" fontSize="5" fontWeight="bold" fill="#fff">N</text>
+            </svg>
+          </button>
+        )}
+
+        {rerouteToast && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[700] px-3 py-1.5 rounded-full bg-stone-900/90 border border-blue-500/50 backdrop-blur shadow-lg">
+            <span className="text-[11px] font-bold text-blue-200">{rerouteToast}</span>
+          </div>
+        )}
+
         {/* Active section overlay */}
         {activeSection != null && (() => {
-          const sec = route.sections.find((s) => s.index === activeSection);
+          const sec = activeRoute.sections.find((s) => s.index === activeSection);
           if (!sec) return null;
-          // Per-kind chrome — colours, badge, title and subtitle so the
-          // overlay reads correctly for road / trail / waypoint sections.
           let bg: string;
           let badge: string;
           let title: string;
@@ -1204,7 +1457,7 @@ export default function NavigationView({
             bottomTab === "sections" ? "text-amber-400 border-b-2 border-amber-400" : "text-stone-500"
           }`}
         >
-          Sections ({route.sections.length})
+          Sections ({activeRoute.sections.length})
         </button>
         <button
           onClick={() => setBottomTab("turns")}
@@ -1220,17 +1473,14 @@ export default function NavigationView({
       <div className="flex-1 overflow-y-auto bg-[hsl(22,15%,8%)]">
         {bottomTab === "sections" ? (
           <SectionsList
-            route={route}
+            route={activeRoute}
             activeSection={activeSection}
             onSelect={setActiveSection}
             canRemoveTrails={!!onRemoveTrailSection && !removing && !swapping}
             removingTrailId={removing?.trailId ?? null}
             onRequestRemoveTrail={(trailId, trailName) => {
               if (removing || swapping) return;
-              // Open the section in the overlay so the rider sees the
-              // confirm prompt in the same place whether they tapped
-              // the row's remove button or the polyline.
-              const trailSec = route.sections.find(
+              const trailSec = activeRoute.sections.find(
                 (s) => s.kind === "trail" && s.trail.id === trailId,
               );
               if (trailSec) setActiveSection(trailSec.index);
@@ -1238,7 +1488,7 @@ export default function NavigationView({
             }}
           />
         ) : (
-          <TurnByTurnList route={route} onSelectSection={setActiveSection} />
+          <TurnByTurnList route={activeRoute} onSelectSection={setActiveSection} />
         )}
       </div>
     </div>
