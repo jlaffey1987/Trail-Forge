@@ -172,7 +172,7 @@ router.get(
           .is("deleted_at", null)
           .order("created_at", { ascending: false })
           .limit(1),
-        ((): Promise<{ count: number | null }> => {
+        ((): PromiseLike<{ count: number | null }> => {
           let q = supa
             .from("chat_messages")
             .select("id", { count: "exact", head: true })

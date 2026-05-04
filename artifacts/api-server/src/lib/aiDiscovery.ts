@@ -796,7 +796,7 @@ export async function findExistingTrailMatch(
     from: (table: string) => {
       select: (cols: string) => {
         ilike: (col: string, val: string) => {
-          limit: (n: number) => Promise<{ data: unknown[] | null; error: unknown }>;
+          limit: (n: number) => PromiseLike<{ data: unknown[] | null; error: unknown }>;
         };
       };
     };
