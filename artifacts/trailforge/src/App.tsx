@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ClerkProvider,
   SignIn,
@@ -30,6 +30,7 @@ import { autoAcceptEmailInvites } from "@/lib/groups";
 import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
 import { loadCompletions, clearCompletions } from "@/lib/completionsStore";
 import { useOnlineStatus } from "@/hooks/useOnlineStatus";
+import { useInstallPrompt } from "@/hooks/useInstallPrompt";
 import { replayQueue, registerOfflineHandler } from "@/lib/offlineQueue";
 
 registerOfflineHandler("mark-ridden", async (action) => {
@@ -211,16 +212,103 @@ function TabContent({ tab }: { tab: Tab }) {
 function OfflineReplayBridge() {
   const online = useOnlineStatus();
   const didReplay = useRef(false);
+  const [replayResult, setReplayResult] = useState<{ failed: number; remaining: number } | null>(null);
 
   useEffect(() => {
     if (online && !didReplay.current) {
       didReplay.current = true;
-      void replayQueue();
+      void replayQueue().then((result) => {
+        if (result.failed > 0 || result.remaining > 0) {
+          setReplayResult({ failed: result.failed, remaining: result.remaining });
+        }
+      });
     }
-    if (!online) didReplay.current = false;
+    if (!online) {
+      didReplay.current = false;
+      setReplayResult(null);
+    }
   }, [online]);
 
-  return null;
+  const handleRetry = () => {
+    setReplayResult(null);
+    void replayQueue().then((result) => {
+      if (result.failed > 0 || result.remaining > 0) {
+        setReplayResult({ failed: result.failed, remaining: result.remaining });
+      }
+    });
+  };
+
+  const handleDismiss = () => setReplayResult(null);
+
+  if (!replayResult) return null;
+
+  return (
+    <div
+      className="fixed top-16 left-1/2 -translate-x-1/2 z-[2500] w-[90%] max-w-sm bg-[hsl(22,15%,12%)] border border-amber-500/40 rounded-xl p-3 shadow-lg"
+      data-testid="offline-replay-toast"
+    >
+      <p className="text-xs text-amber-300 font-semibold mb-1">
+        {replayResult.failed} offline action{replayResult.failed !== 1 ? "s" : ""} failed to sync
+      </p>
+      <p className="text-[10px] text-stone-400 mb-2">
+        {replayResult.remaining} action{replayResult.remaining !== 1 ? "s" : ""} still queued.
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={handleRetry}
+          className="flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-amber-300 border border-amber-500/40 hover:bg-amber-500/10"
+          data-testid="offline-replay-retry"
+        >
+          Retry
+        </button>
+        <button
+          type="button"
+          onClick={handleDismiss}
+          className="flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-stone-400 border border-stone-700 hover:bg-stone-700/30"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InstallBanner() {
+  const { canInstall, isInstalled, promptInstall } = useInstallPrompt();
+  const [dismissed, setDismissed] = useState(false);
+
+  if (!canInstall || isInstalled || dismissed) return null;
+
+  return (
+    <div
+      className="shrink-0 flex items-center justify-between gap-2 px-3 py-2 bg-amber-900/30 border-b border-amber-500/30"
+      data-testid="install-banner"
+    >
+      <p className="text-[11px] text-amber-300 font-medium">
+        Install TrailForge for the best offline experience
+      </p>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={() => void promptInstall()}
+          className="px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider text-stone-900"
+          style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+          data-testid="install-banner-install"
+        >
+          Install
+        </button>
+        <button
+          type="button"
+          onClick={() => setDismissed(true)}
+          className="px-1.5 py-1 text-[10px] text-stone-500 hover:text-stone-300"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function MainShell() {
@@ -282,6 +370,7 @@ function MainShell() {
 
   return (
     <div className="flex flex-col h-full w-full mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "560px" }}>
+      <InstallBanner />
       <header
         className="tf-header safe-top shrink-0 flex items-center justify-between pb-3.5 border-b border-[hsl(30,12%,14%)]"
       >
