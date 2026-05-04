@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useUser } from "@clerk/react";
+import { useLocation } from "wouter";
 import {
   type MyInvite,
   acceptMyInvite,
@@ -15,6 +16,7 @@ interface Props {
 
 export default function InvitesInbox({ onClose, onChanged }: Props) {
   const { isSignedIn } = useUser();
+  const [, setLocation] = useLocation();
   const [items, setItems] = useState<MyInvite[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -48,7 +50,8 @@ export default function InvitesInbox({ onClose, onChanged }: Props) {
       return;
     }
     onChanged?.();
-    await refresh();
+    onClose();
+    setLocation(`/trails?group=${res.group_id}`);
   };
 
   const handleDecline = async (inv: MyInvite) => {

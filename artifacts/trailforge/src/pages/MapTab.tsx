@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import GpsRecorder from "@/components/GpsRecorder";
 import LayersPanel, { type MapLayer, type BaseMap } from "@/components/LayersPanel";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
@@ -79,6 +79,7 @@ const TILE_ATTRS: Record<BaseMap, string> = {
 
 export default function MapTab() {
   const [, setLocation] = useLocation();
+  const queryString = useSearch();
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const markersRef = useRef<import("leaflet").Marker[]>([]);
@@ -148,6 +149,27 @@ export default function MapTab() {
   const [showUploadGpx, setShowUploadGpx] = useState(false);
   const [showDrawSave, setShowDrawSave] = useState(false);
   const [savedTrailToast, setSavedTrailToast] = useState<string | null>(null);
+
+  const groupFilterId = useMemo(() => {
+    const params = new URLSearchParams(queryString);
+    return params.get("group") ?? null;
+  }, [queryString]);
+
+  const groupFilterName = useMemo(() => {
+    if (!groupFilterId) return null;
+    for (const t of allTrails) {
+      const g = t.shared_groups?.find((g) => g.id === groupFilterId);
+      if (g) return g.name;
+    }
+    return null;
+  }, [groupFilterId, allTrails]);
+
+  const clearGroupFilter = useCallback(() => {
+    const params = new URLSearchParams(queryString);
+    params.delete("group");
+    const qs = params.toString();
+    setLocation(`/map${qs ? `?${qs}` : ""}`, { replace: true });
+  }, [queryString, setLocation]);
 
   const mapModeRef = useRef(mapMode);
   const waypointsRef = useRef(waypoints);
@@ -491,7 +513,11 @@ export default function MapTab() {
   // ---------------------------------------------------------------------------
   const visibleTrails = useMemo(() => {
     let trails = allTrails;
-    // Apply client-side filters (cheap second pass — also covers fallback fetch).
+    if (groupFilterId) {
+      trails = trails.filter(
+        (t) => t.shared_groups?.some((g) => g.id === groupFilterId),
+      );
+    }
     if (filters.difficulties.length > 0) {
       trails = trails.filter((t) => t.difficulty != null && filters.difficulties.includes(t.difficulty));
     }
@@ -499,7 +525,7 @@ export default function MapTab() {
       trails = trails.filter((t) => t.legal_status != null && filters.trailTypes.includes(t.legal_status));
     }
     return trails;
-  }, [allTrails, filters.difficulties, filters.trailTypes]);
+  }, [allTrails, groupFilterId, filters.difficulties, filters.trailTypes]);
 
   // Trails actually visible in viewport (always client-side bbox filter as safety net)
   const trailsForRender = useMemo(() => {
@@ -1021,12 +1047,44 @@ ${trkpts}
         </div>
       )}
 
+      {/* Group filter banner */}
+      {groupFilterId && (
+        <div
+          className="absolute top-12 left-1/2 -translate-x-1/2 z-[1001] pointer-events-auto"
+          data-testid="map-group-filter-banner"
+        >
+          <div className="flex items-center gap-2 bg-amber-900/90 backdrop-blur border border-amber-500/50 text-amber-100 text-[11px] font-bold px-3 py-1.5 rounded-full shadow-lg">
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+            <span className="truncate max-w-[180px]">
+              {groupFilterName ?? "Group"} trails only
+            </span>
+            <button
+              type="button"
+              onClick={clearGroupFilter}
+              className="shrink-0 w-4 h-4 rounded-full bg-amber-200/30 hover:bg-amber-200/50 flex items-center justify-center text-amber-100 transition-colors"
+              aria-label="Clear group filter"
+              data-testid="map-group-filter-clear"
+            >
+              <svg viewBox="0 0 24 24" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="3">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Trail status pill (Explore mode). Shifts down when the Map Route
           Panel is showing so they don't overlap. */}
       {mapMode === "explore" && (
         <div
           className={`absolute left-1/2 -translate-x-1/2 z-[1000] pointer-events-none ${
-            routeTrails.length > 0 ? "top-24" : "top-14"
+            routeTrails.length > 0 ? "top-24" : groupFilterId ? "top-[4.5rem]" : "top-14"
           }`}
         >
           <div className="bg-black/70 backdrop-blur border border-stone-700/60 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full text-stone-200 flex items-center gap-1.5 shadow-lg">

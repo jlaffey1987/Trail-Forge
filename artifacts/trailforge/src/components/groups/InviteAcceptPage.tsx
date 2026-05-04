@@ -107,12 +107,12 @@ export default function InviteAcceptPage({ token }: Props) {
               You've joined <span className="text-amber-300 font-bold">{lookup.group?.name ?? "the group"}</span>.
             </p>
             <button
-              onClick={() => setLocation("/")}
+              onClick={() => setLocation(`/trails?group=${result.group_id}`)}
               className="w-full py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900"
               style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
               data-testid="invite-success-continue"
             >
-              Continue
+              View Group Trails
             </button>
           </div>
         ) : (

@@ -7,10 +7,12 @@ import {
   type TrailActivityCounts,
 } from "@/lib/trailContent";
 import {
+  type Group,
   GROUPS_MEMBERSHIP_CHANGED_EVENT,
   fetchGroupTrails,
   groupCoverPhotoUrl,
   listDiscoverableGroups,
+  listMyGroups,
   requestToJoinGroup,
   type DiscoverableGroup,
   type SharedTrail,
@@ -96,6 +98,18 @@ export default function DiscoverTab() {
   const [joinMessage, setJoinMessage] = useState("");
   const completedIds = useCompletionIds();
 
+  const [myGroups, setMyGroups] = useState<Group[]>([]);
+  const [groupFilterId, setGroupFilterId] = useState<string | null>(() => {
+    const params = new URLSearchParams(queryString);
+    return params.get("group") ?? null;
+  });
+
+  useEffect(() => {
+    const params = new URLSearchParams(queryString);
+    const fromUrl = params.get("group") ?? null;
+    setGroupFilterId((prev) => (fromUrl !== prev ? fromUrl : prev));
+  }, [queryString]);
+
   const [publishedRoutes, setPublishedRoutes] = useState<SavedRouteSummary[]>(
     [],
   );
@@ -164,6 +178,9 @@ export default function DiscoverTab() {
   const refresh = useCallback(() => {
     setLoading(true);
     void refreshDiscoverableGroups();
+    if (isSignedIn) {
+      void listMyGroups().then((res) => setMyGroups(res.items));
+    }
     void Promise.all([fetchCommunityTrails(), fetchGroupTrails()]).then(
       ([community, groupTrails]) => {
         const seen = new Set<string>();
@@ -187,7 +204,7 @@ export default function DiscoverTab() {
         }
       },
     );
-  }, [refreshDiscoverableGroups]);
+  }, [refreshDiscoverableGroups, isSignedIn]);
 
   useEffect(() => {
     refresh();
@@ -224,6 +241,9 @@ export default function DiscoverTab() {
   };
 
   const filtered = trails.filter((t) => {
+    if (groupFilterId) {
+      if (!t.shared_groups?.some((g) => g.id === groupFilterId)) return false;
+    }
     if (search && !t.name.toLowerCase().includes(search.toLowerCase())) return false;
     if (activeFilter === "BOATs") return t.legal_status === "BOAT";
     if (activeFilter === "Green Lanes") return t.legal_status === "Green Lane";
@@ -340,6 +360,50 @@ export default function DiscoverTab() {
             ?
           </button>
         </div>
+
+        {isSignedIn && myGroups.length > 0 && (
+          <div className="px-4 mt-1.5">
+            <div
+              className="flex gap-1.5 overflow-x-auto pb-0.5"
+              style={{ scrollbarWidth: "none" }}
+              data-testid="discover-group-filter"
+            >
+              <button
+                type="button"
+                onClick={() => setGroupFilterId(null)}
+                className={
+                  "shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-colors " +
+                  (groupFilterId === null
+                    ? "bg-amber-500/20 border-amber-500/60 text-amber-300"
+                    : "border-stone-700 text-stone-400 hover:border-amber-500/40")
+                }
+                data-testid="discover-group-filter-all"
+              >
+                All Groups
+              </button>
+              {myGroups.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => setGroupFilterId(g.id)}
+                  className={
+                    "shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-colors flex items-center gap-1 " +
+                    (groupFilterId === g.id
+                      ? "bg-amber-500/20 border-amber-500/60 text-amber-300"
+                      : "border-stone-700 text-stone-400 hover:border-amber-500/40")
+                  }
+                  data-testid={`discover-group-filter-${g.id}`}
+                >
+                  <svg viewBox="0 0 24 24" className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                  </svg>
+                  <span className="truncate max-w-[120px]">{g.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <GlossaryDialog
         open={showGlossary}

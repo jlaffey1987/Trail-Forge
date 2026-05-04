@@ -356,11 +356,13 @@ function MainShell() {
     const trailId = params.get("trail");
     const groupId = params.get("group");
     if (!trailId && !groupId) return;
+    const curPath = window.location.pathname.replace(/\/$/, "") || "/";
+    const stripped = stripBase(curPath);
     if (trailId) {
       const next = new URLSearchParams(window.location.search);
       next.set("trail", trailId);
       setLocation(`${TAB_PATHS.discover}?${next.toString()}`);
-    } else if (groupId) {
+    } else if (groupId && stripped !== "/map" && stripped !== "/discover") {
       window.dispatchEvent(
         new CustomEvent("trailforge:open-group", { detail: { groupId } }),
       );

@@ -3,12 +3,14 @@ import { useLocation } from "wouter";
 import {
   type GroupDetail,
   type GroupInvite,
+  type SharedTrail,
   approveJoinRequest,
   buildInviteUrl,
   createInvite,
   declineJoinRequest,
   deleteGroup,
   fetchGroupDetail,
+  fetchGroupTrails,
   finalizeGroupCover,
   formatExpiry,
   groupCoverPhotoUrl,
@@ -53,6 +55,8 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const [coverError, setCoverError] = useState<string | null>(null);
   const [discoverableToggling, setDiscoverableToggling] = useState(false);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
+  const [groupTrails, setGroupTrails] = useState<SharedTrail[]>([]);
+  const [trailsLoading, setTrailsLoading] = useState(false);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleOpenDm = async (targetUserId: string) => {
@@ -68,9 +72,19 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const refresh = useCallback(async () => {
     if (!groupId) return;
     setLoading(true);
-    const d = await fetchGroupDetail(groupId);
+    setTrailsLoading(true);
+    const [d, allGroupTrails] = await Promise.all([
+      fetchGroupDetail(groupId),
+      fetchGroupTrails(),
+    ]);
     setDetail(d);
     setLoading(false);
+    setGroupTrails(
+      allGroupTrails.filter(
+        (t) => t.shared_groups?.some((g) => g.id === groupId),
+      ),
+    );
+    setTrailsLoading(false);
   }, [groupId]);
 
   useEffect(() => {
@@ -80,9 +94,11 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
       setConfirmLeave(false);
       setCopiedToken(null);
       setCoverError(null);
+      setGroupTrails([]);
       void refresh();
     } else {
       setDetail(null);
+      setGroupTrails([]);
     }
   }, [groupId, refresh]);
 
@@ -371,6 +387,81 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                   canModerate={canManage}
                 />
               )}
+
+              {/* Group trails */}
+              <div className="space-y-2" data-testid="group-trails-section">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-[11px] font-bold uppercase tracking-widest text-stone-400">
+                    Shared Trails ({groupTrails.length})
+                  </h3>
+                  {groupTrails.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        setLocation(`/map?group=${groupId}`);
+                      }}
+                      className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-400 hover:text-amber-300"
+                      data-testid="group-view-on-map"
+                    >
+                      <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/>
+                        <line x1="8" y1="2" x2="8" y2="18"/>
+                        <line x1="16" y1="6" x2="16" y2="22"/>
+                      </svg>
+                      View on Map
+                    </button>
+                  )}
+                </div>
+                {trailsLoading ? (
+                  <div className="text-xs text-stone-500 py-3 text-center">Loading trails…</div>
+                ) : groupTrails.length === 0 ? (
+                  <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,20%)] rounded-lg px-3 py-3 text-center">
+                    <p className="text-[11px] text-stone-500">No trails shared with this group yet.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1" data-testid="group-trails-list">
+                    {groupTrails.map((trail) => {
+                      const diff = trail.difficulty ?? 0;
+                      const diffColors: Record<number, string> = {
+                        1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
+                        6: "#fb923c", 7: "#f97316", 8: "#ef4444", 9: "#dc2626", 10: "#7f1d1d",
+                      };
+                      return (
+                        <button
+                          key={trail.id}
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            setLocation(`/discover?trail=${trail.id}`);
+                          }}
+                          className="w-full text-left flex items-center gap-2.5 bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,20%)] rounded-lg px-3 py-2 hover:border-amber-500/40 transition-colors"
+                          data-testid={`group-trail-row-${trail.id}`}
+                        >
+                          {diff > 0 && (
+                            <div
+                              className="w-5 h-5 rounded flex items-center justify-center text-[10px] font-bold text-black shrink-0"
+                              style={{ backgroundColor: diffColors[diff] ?? "#fbbf24" }}
+                            >
+                              {diff}
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs text-stone-200 truncate">{trail.name}</div>
+                            <div className="text-[10px] text-stone-500">
+                              {trail.distance_km != null ? `${trail.distance_km.toFixed(1)} km` : "—"}
+                              {trail.terrain ? ` · ${trail.terrain}` : ""}
+                            </div>
+                          </div>
+                          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-stone-600 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="9 18 15 12 9 6"/>
+                          </svg>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
               {/* Discoverability — owner / admin only */}
               {canManage && (
