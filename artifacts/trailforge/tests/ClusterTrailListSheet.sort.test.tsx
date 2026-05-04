@@ -8,10 +8,25 @@ vi.mock("@/lib/plannerRouteStore", () => ({
   subscribeRouteTrails: () => () => {},
   addRouteTrail: vi.fn(),
   removeRouteTrail: vi.fn(),
+  PLANNER_MAX_TRAILS: 10,
 }));
 
 vi.mock("@/lib/trailLayer", () => ({
   getDifficultyColor: () => "#888",
+}));
+
+vi.mock("@/hooks/useCurrentUser", () => ({
+  useCurrentUser: () => ({ isLoaded: true, isSignedIn: false, user: null, userId: null, isModerator: false }),
+}));
+
+vi.mock("@/lib/completionsStore", () => ({
+  markCompleted: vi.fn(),
+  unmarkCompleted: vi.fn(),
+  useCompletionIds: () => new Set<string>(),
+}));
+
+vi.mock("wouter", () => ({
+  useLocation: () => ["/", vi.fn()],
 }));
 
 import ClusterTrailListSheet from "@/components/ClusterTrailListSheet";
@@ -71,6 +86,13 @@ function rowOrder(): string[] {
     .map((id) => ID_TO_NAME[id.replace("cluster-trail-row-", "")] ?? id);
 }
 
+const defaultProps = {
+  trails: TRAILS,
+  onSelectTrail: () => {},
+  onZoomToArea: () => {},
+  onClose: () => {},
+};
+
 describe("ClusterTrailListSheet sort", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
@@ -82,14 +104,7 @@ describe("ClusterTrailListSheet sort", () => {
   });
 
   it("defaults to sorting by difficulty ascending with unrated at the end", () => {
-    render(
-      <ClusterTrailListSheet
-        trails={TRAILS}
-        onSelectTrail={() => {}}
-        onZoomToArea={() => {}}
-        onClose={() => {}}
-      />,
-    );
+    render(<ClusterTrailListSheet {...defaultProps} />);
 
     expect(rowOrder()).toEqual(["Bravo", "Charlie", "Alpha", "Delta"]);
     expect(
@@ -99,14 +114,7 @@ describe("ClusterTrailListSheet sort", () => {
 
   it("re-sorts the list when the user picks Distance", async () => {
     const user = userEvent.setup();
-    render(
-      <ClusterTrailListSheet
-        trails={TRAILS}
-        onSelectTrail={() => {}}
-        onZoomToArea={() => {}}
-        onClose={() => {}}
-      />,
-    );
+    render(<ClusterTrailListSheet {...defaultProps} />);
 
     await user.click(screen.getByTestId("cluster-trail-list-sort-distance"));
 
@@ -115,14 +123,7 @@ describe("ClusterTrailListSheet sort", () => {
 
   it("re-sorts the list when the user picks Name", async () => {
     const user = userEvent.setup();
-    render(
-      <ClusterTrailListSheet
-        trails={TRAILS}
-        onSelectTrail={() => {}}
-        onZoomToArea={() => {}}
-        onClose={() => {}}
-      />,
-    );
+    render(<ClusterTrailListSheet {...defaultProps} />);
 
     await user.click(screen.getByTestId("cluster-trail-list-sort-name"));
 
@@ -131,14 +132,7 @@ describe("ClusterTrailListSheet sort", () => {
 
   it("remembers the chosen sort across remounts via sessionStorage", async () => {
     const user = userEvent.setup();
-    const { unmount } = render(
-      <ClusterTrailListSheet
-        trails={TRAILS}
-        onSelectTrail={() => {}}
-        onZoomToArea={() => {}}
-        onClose={() => {}}
-      />,
-    );
+    const { unmount } = render(<ClusterTrailListSheet {...defaultProps} />);
 
     await user.click(screen.getByTestId("cluster-trail-list-sort-distance"));
     expect(window.sessionStorage.getItem("trailforge:clusterTrailListSort")).toBe(
@@ -147,18 +141,116 @@ describe("ClusterTrailListSheet sort", () => {
 
     unmount();
 
-    render(
-      <ClusterTrailListSheet
-        trails={TRAILS}
-        onSelectTrail={() => {}}
-        onZoomToArea={() => {}}
-        onClose={() => {}}
-      />,
-    );
+    render(<ClusterTrailListSheet {...defaultProps} />);
 
     expect(
       screen.getByTestId("cluster-trail-list-sort-distance"),
     ).toHaveAttribute("aria-checked", "true");
     expect(rowOrder()).toEqual(["Alpha", "Bravo", "Charlie", "Delta"]);
+  });
+});
+
+describe("ClusterTrailListSheet sort direction toggle", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    window.sessionStorage.clear();
+  });
+
+  it("shows the direction toggle button defaulting to ascending", () => {
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    const btn = screen.getByTestId("cluster-trail-list-sort-direction");
+    expect(btn).toBeInTheDocument();
+    expect(btn.textContent).toContain("↑");
+  });
+
+  it("reverses difficulty order when toggled to descending — hardest first, unrated still at end", async () => {
+    const user = userEvent.setup();
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    expect(rowOrder()).toEqual(["Bravo", "Charlie", "Alpha", "Delta"]);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+
+    expect(rowOrder()).toEqual(["Alpha", "Charlie", "Bravo", "Delta"]);
+
+    const btn = screen.getByTestId("cluster-trail-list-sort-direction");
+    expect(btn.textContent).toContain("↓");
+  });
+
+  it("reverses distance order when toggled to descending — longest first, missing still at end", async () => {
+    const user = userEvent.setup();
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-distance"));
+    expect(rowOrder()).toEqual(["Alpha", "Bravo", "Charlie", "Delta"]);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+    expect(rowOrder()).toEqual(["Charlie", "Bravo", "Alpha", "Delta"]);
+  });
+
+  it("reverses name order when toggled to descending", async () => {
+    const user = userEvent.setup();
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-name"));
+    expect(rowOrder()).toEqual(["Alpha", "Bravo", "Charlie", "Delta"]);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+    expect(rowOrder()).toEqual(["Delta", "Charlie", "Bravo", "Alpha"]);
+  });
+
+  it("toggles back to ascending on second click", async () => {
+    const user = userEvent.setup();
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+    expect(rowOrder()).toEqual(["Alpha", "Charlie", "Bravo", "Delta"]);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+    expect(rowOrder()).toEqual(["Bravo", "Charlie", "Alpha", "Delta"]);
+
+    const btn = screen.getByTestId("cluster-trail-list-sort-direction");
+    expect(btn.textContent).toContain("↑");
+  });
+
+  it("persists direction in sessionStorage and restores on remount", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ClusterTrailListSheet {...defaultProps} />);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+    expect(window.sessionStorage.getItem("trailforge:clusterTrailListSortDir")).toBe(
+      "desc",
+    );
+
+    unmount();
+
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    expect(rowOrder()).toEqual(["Alpha", "Charlie", "Bravo", "Delta"]);
+    const btn = screen.getByTestId("cluster-trail-list-sort-direction");
+    expect(btn.textContent).toContain("↓");
+  });
+
+  it("persists both sort key and direction independently", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ClusterTrailListSheet {...defaultProps} />);
+
+    await user.click(screen.getByTestId("cluster-trail-list-sort-distance"));
+    await user.click(screen.getByTestId("cluster-trail-list-sort-direction"));
+    expect(rowOrder()).toEqual(["Charlie", "Bravo", "Alpha", "Delta"]);
+
+    unmount();
+
+    render(<ClusterTrailListSheet {...defaultProps} />);
+
+    expect(
+      screen.getByTestId("cluster-trail-list-sort-distance"),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(rowOrder()).toEqual(["Charlie", "Bravo", "Alpha", "Delta"]);
   });
 });

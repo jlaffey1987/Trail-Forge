@@ -22,8 +22,10 @@ const DIFFICULTY_LABELS: Record<number, string> = {
 };
 
 type SortKey = "difficulty" | "distance" | "name";
+type SortDirection = "asc" | "desc";
 
 const SORT_STORAGE_KEY = "trailforge:clusterTrailListSort";
+const SORT_DIR_STORAGE_KEY = "trailforge:clusterTrailListSortDir";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "difficulty", label: "Difficulty" },
@@ -49,6 +51,22 @@ function writeStoredSort(sort: SortKey): void {
   } catch {
     // Ignore storage failures — the in-memory state still works.
   }
+}
+
+function readStoredDirection(): SortDirection {
+  if (typeof window === "undefined") return "asc";
+  try {
+    const v = window.sessionStorage.getItem(SORT_DIR_STORAGE_KEY);
+    if (v === "asc" || v === "desc") return v;
+  } catch {}
+  return "asc";
+}
+
+function writeStoredDirection(dir: SortDirection): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(SORT_DIR_STORAGE_KEY, dir);
+  } catch {}
 }
 
 interface Props {
@@ -94,26 +112,37 @@ function compareNullable(
   return a - b;
 }
 
-function sortTrails(trails: Trail[], sort: SortKey): Trail[] {
+function sortTrails(trails: Trail[], sort: SortKey, dir: SortDirection): Trail[] {
   const copy = [...trails];
+  const flip = dir === "desc" ? -1 : 1;
   switch (sort) {
     case "difficulty":
       copy.sort((a, b) => {
-        const cmp = compareNullable(a.difficulty, b.difficulty);
-        if (cmp !== 0) return cmp;
+        const av = a.difficulty;
+        const bv = b.difficulty;
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        const cmp = av - bv;
+        if (cmp !== 0) return cmp * flip;
         return a.name.localeCompare(b.name);
       });
       return copy;
     case "distance":
       copy.sort((a, b) => {
-        const cmp = compareNullable(toNum(a.distance_km), toNum(b.distance_km));
-        if (cmp !== 0) return cmp;
+        const av = toNum(a.distance_km);
+        const bv = toNum(b.distance_km);
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        const cmp = av - bv;
+        if (cmp !== 0) return cmp * flip;
         return a.name.localeCompare(b.name);
       });
       return copy;
     case "name":
     default:
-      copy.sort((a, b) => a.name.localeCompare(b.name));
+      copy.sort((a, b) => a.name.localeCompare(b.name) * flip);
       return copy;
   }
 }
@@ -138,11 +167,18 @@ export default function ClusterTrailListSheet({
   selectedIds,
 }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>(() => readStoredSort());
-  const sorted = useMemo(() => sortTrails(trails, sortKey), [trails, sortKey]);
+  const [sortDir, setSortDir] = useState<SortDirection>(() => readStoredDirection());
+  const sorted = useMemo(() => sortTrails(trails, sortKey, sortDir), [trails, sortKey, sortDir]);
 
   const handleSortChange = (next: SortKey) => {
     setSortKey(next);
     writeStoredSort(next);
+  };
+
+  const handleToggleDirection = () => {
+    const next: SortDirection = sortDir === "asc" ? "desc" : "asc";
+    setSortDir(next);
+    writeStoredDirection(next);
   };
 
   // Two ways to drive the per-row "in route" state:
@@ -289,6 +325,16 @@ export default function ClusterTrailListSheet({
               );
             })}
           </div>
+          <button
+            type="button"
+            onClick={handleToggleDirection}
+            data-testid="cluster-trail-list-sort-direction"
+            aria-label={sortDir === "asc" ? "Sorted ascending — click to sort descending" : "Sorted descending — click to sort ascending"}
+            title={sortDir === "asc" ? "Ascending — click to reverse" : "Descending — click to reverse"}
+            className="ml-auto shrink-0 px-1.5 py-1 rounded-md text-[10px] font-bold border border-stone-700 text-stone-400 hover:border-stone-500 hover:text-stone-200 transition-colors"
+          >
+            {sortDir === "asc" ? "↑ A→Z" : "↓ Z→A"}
+          </button>
         </div>
 
         {capError ? (
