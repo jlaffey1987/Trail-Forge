@@ -170,25 +170,16 @@ export default function PlannerMap({
   const onToggleRef = useRef(onToggle);
   onToggleRef.current = onToggle;
 
-  // Load Leaflet
   useEffect(() => {
     if (window.L) { setLeafletLoaded(true); return undefined; }
-    if (!document.getElementById("leaflet-script")) {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-      document.head.appendChild(link);
-      const script = document.createElement("script");
-      script.id = "leaflet-script";
-      script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-      script.onload = () => setLeafletLoaded(true);
-      document.head.appendChild(script);
-      return undefined;
-    }
-    const check = setInterval(() => {
-      if (window.L) { setLeafletLoaded(true); clearInterval(check); }
-    }, 100);
-    return () => clearInterval(check);
+    let cancelled = false;
+    void (async () => {
+      await import("leaflet/dist/leaflet.css");
+      const L = await import("leaflet");
+      window.L = L.default ?? L;
+      if (!cancelled) setLeafletLoaded(true);
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Init map — also tears down when the container unmounts (e.g. parent's
