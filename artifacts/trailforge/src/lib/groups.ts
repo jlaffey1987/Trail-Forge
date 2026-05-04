@@ -160,15 +160,19 @@ export type GroupNotification =
       unread: boolean;
     }
   | {
+      type: "photo_shared";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
       type: "invite_declined";
       id: string;
       occurred_at: string;
       group: { id: string; name: string };
-      // Actor here is the user that declined the invite. `email` falls
-      // back to the address the invite was bound to.
       actor: NotificationActor;
-      // Pre-computed display label (display name → email local-part →
-      // generic) so the UI doesn't have to re-do the fallback logic.
       decliner_label: string;
       unread: boolean;
     };

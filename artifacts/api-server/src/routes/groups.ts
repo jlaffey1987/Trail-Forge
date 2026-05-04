@@ -14,6 +14,7 @@ import {
   notifyTrailShared,
   notifyTrailUnshared,
   notifyInviteDeclined,
+  notifyPhotoShared,
 } from "../lib/pushNotifications";
 
 const objectStorage = new ObjectStorageService();
@@ -957,6 +958,8 @@ router.post(
       return;
     }
     res.json(data);
+
+    void notifyPhotoShared(idParse.data, userId, req.log);
   }),
 );
 
@@ -1973,6 +1976,17 @@ router.get(
       .limit(fetchLimit);
     if (beforeIso) eventsQ = eventsQ.lte("occurred_at", beforeIso);
 
+    // Group photos — every member sees when someone else shares a photo.
+    let photosQ = supa
+      .from("group_photos")
+      .select("id, group_id, uploader_user_id, created_at")
+      .in("group_id", groupIds)
+      .neq("uploader_user_id", userId)
+      .is("hidden_at", null)
+      .order("created_at", { ascending: false })
+      .limit(fetchLimit);
+    if (beforeIso) photosQ = photosQ.lte("created_at", beforeIso);
+
     // Declined invites — only owners/admins of the host group should see
     // these (they're administrative signal, not general activity). When
     // the caller has no admin'd groups we skip the query entirely and
@@ -1999,10 +2013,11 @@ router.get(
       return q;
     })();
 
-    const [sharesRes, joinsRes, eventsRes, declinesRes] = await Promise.all([
+    const [sharesRes, joinsRes, eventsRes, photosRes, declinesRes] = await Promise.all([
       sharesQ,
       joinsQ,
       eventsQ,
+      photosQ,
       declinesQ,
     ]);
 
@@ -2026,6 +2041,12 @@ router.get(
       req.log.warn(
         { err: eventsRes.error },
         "notifications group_activity_events load failed",
+      );
+    }
+    if (photosRes.error && !isMissingTableError(photosRes.error)) {
+      req.log.warn(
+        { err: photosRes.error },
+        "notifications group_photos load failed",
       );
     }
     if (declinesRes.error && !isMissingTableError(declinesRes.error)) {
@@ -2057,6 +2078,12 @@ router.get(
       subject_user_id: string | null;
       occurred_at: string;
     }
+    interface PhotoRow {
+      id: string;
+      group_id: string;
+      uploader_user_id: string;
+      created_at: string;
+    }
     interface DeclinedInviteRow {
       id: string;
       group_id: string;
@@ -2069,6 +2096,7 @@ router.get(
     const shareRows = (sharesRes.data ?? []) as ShareRow[];
     const joinRows = (joinsRes.data ?? []) as JoinRow[];
     const eventRows = (eventsRes.data ?? []) as ActivityEventRow[];
+    const photoRows = (photosRes.data ?? []) as PhotoRow[];
     const declineRows = (declinesRes.data ?? []) as DeclinedInviteRow[];
 
     // Hydrate referenced trails / groups / users in three parallel batches.
@@ -2084,6 +2112,7 @@ router.get(
     shareRows.forEach((r) => groupSet.add(r.group_id));
     joinRows.forEach((r) => groupSet.add(r.group_id));
     eventRows.forEach((r) => groupSet.add(r.group_id));
+    photoRows.forEach((r) => groupSet.add(r.group_id));
     declineRows.forEach((r) => groupSet.add(r.group_id));
     const userIdSet = new Set<string>();
     shareRows.forEach((r) => userIdSet.add(r.shared_by_user_id));
@@ -2092,6 +2121,7 @@ router.get(
       userIdSet.add(r.actor_user_id);
       if (r.subject_user_id) userIdSet.add(r.subject_user_id);
     });
+    photoRows.forEach((r) => userIdSet.add(r.uploader_user_id));
     declineRows.forEach((r) => userIdSet.add(r.declined_by_user_id));
 
     const [trailsRes, groupsRes, usersRes] = await Promise.all([
@@ -2185,10 +2215,9 @@ router.get(
           // has been hard-deleted since the unshare.
           trail: { id: string | null; name: string };
         })
+      | (NotifBase & { type: "photo_shared" })
       | (NotifBase & {
           type: "invite_declined";
-          // Best-effort label for the invitee — falls back to the email the
-          // invite was bound to when no display_name is available.
           decliner_label: string;
         });
 
@@ -2286,6 +2315,24 @@ router.get(
         });
       }
     }
+    for (const r of photoRows) {
+      const g = groups.get(r.group_id);
+      if (!g) continue;
+      const u = users.get(r.uploader_user_id);
+      items.push({
+        id: `photo:${r.id}`,
+        type: "photo_shared",
+        occurred_at: r.created_at,
+        group: { id: g.id, name: g.name },
+        actor: {
+          id: r.uploader_user_id,
+          display_name: u?.display_name ?? null,
+          email: u?.email ?? null,
+          avatar_url: u?.avatar_url ?? null,
+        },
+        unread: isUnread(r.created_at),
+      });
+    }
     for (const r of declineRows) {
       const g = groups.get(r.group_id);
       if (!g) continue;
@@ -2348,6 +2395,7 @@ router.get(
       unreadSharesRes,
       unreadJoinsRes,
       unreadEventsRes,
+      unreadPhotosRes,
       unreadDeclinesRes,
     ] = await Promise.all([
       supa
@@ -2372,6 +2420,13 @@ router.get(
         .in("group_id", groupIds)
         .neq("actor_user_id", userId)
         .gt("occurred_at", cutoff),
+      supa
+        .from("group_photos")
+        .select("id", { head: true, count: "exact" })
+        .in("group_id", groupIds)
+        .neq("uploader_user_id", userId)
+        .is("hidden_at", null)
+        .gt("created_at", cutoff),
       adminGroupIds.length > 0
         ? supa
             .from("group_invites")
@@ -2386,6 +2441,7 @@ router.get(
       (unreadSharesRes.count ?? 0) +
       (unreadJoinsRes.count ?? 0) +
       (unreadEventsRes.count ?? 0) +
+      (unreadPhotosRes.count ?? 0) +
       (unreadDeclinesRes.count ?? 0);
 
     res.json({ items: page, unreadCount, lastReadAt, nextBefore });

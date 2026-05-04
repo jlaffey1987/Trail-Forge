@@ -79,6 +79,12 @@ function renderNotificationBody(n: GroupNotification): ReactNode {
           {groupBadge}
         </>
       );
+    case "photo_shared":
+      return (
+        <>
+          shared a new photo in {groupBadge}
+        </>
+      );
     case "invite_declined":
       return (
         <>
@@ -253,8 +259,8 @@ function NotificationsPanel({ onClose, onUnreadChanged }: PanelProps) {
       return;
     }
     // member_joined / member_left / trail_unshared(deleted) /
-    // invite_declined → open the group detail dialog inline so the rider
-    // lands on the relevant group.
+    // photo_shared / invite_declined → open the group detail dialog
+    // inline so the rider lands on the relevant group.
     setOpenGroupId(n.group.id);
   };
 

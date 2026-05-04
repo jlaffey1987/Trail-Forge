@@ -455,6 +455,41 @@ export async function notifyTrailUnshared(
 }
 
 /**
+ * Notify every member of the group (except the uploader) that a new photo
+ * was shared in the gallery. Fire-and-forget — never throws.
+ */
+export async function notifyPhotoShared(
+  groupId: string,
+  uploaderUserId: string,
+  log: MinimalLogger,
+): Promise<void> {
+  if (!isPushConfigured()) return;
+  try {
+    const supa = getSupabaseAdmin();
+    const [groupRes, uploaderLabel, recipients] = await Promise.all([
+      supa.from("groups").select("name").eq("id", groupId).maybeSingle(),
+      lookupActorLabel(uploaderUserId),
+      pushEnabledMembersOfGroup(groupId, uploaderUserId, log),
+    ]);
+    if (recipients.length === 0) return;
+    const groupName =
+      ((groupRes.data as { name?: string | null } | null)?.name ?? "your group").toString();
+    await sendPushToUsers(
+      recipients,
+      {
+        title: `New photo in ${groupName}`,
+        body: `${uploaderLabel} shared a new photo`,
+        url: `/?group=${encodeURIComponent(groupId)}`,
+        tag: `photo-shared:${groupId}:${uploaderUserId}`,
+      },
+      log,
+    );
+  } catch (err) {
+    log.warn({ err, groupId }, "push: notifyPhotoShared failed");
+  }
+}
+
+/**
  * Notify owners/admins of the group (not the decliner) that an invite was
  * declined. Regular members do not see this — it's an administrative
  * signal only. Fire-and-forget — never throws.
