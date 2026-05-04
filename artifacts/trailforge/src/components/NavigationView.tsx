@@ -14,6 +14,7 @@ import {
 } from "@/lib/routing";
 import { buildCombinedGPX, downloadGPX, type TrailRoute } from "@/lib/gpx";
 import type { Trail } from "@/lib/supabase";
+import { getTrailLatLngs } from "@/lib/trailLayer";
 import {
   markCompleted,
   unmarkCompleted,
@@ -100,37 +101,12 @@ export type SwapTrailSectionResult =
 interface Props {
   route: AssembledRoute;
   onClose: () => void;
-  /**
-   * Drop the given trail from the planner selection and rebuild the
-   * assembled route in place. The implementation MUST recompute the
-   * route off `route.start` / `route.end` with the trail removed and,
-   * on success, push the new `AssembledRoute` back via the same channel
-   * NavigationView's `route` prop is fed from. Progress callbacks
-   * mirror the planner's initial-plan progress contract.
-   *
-   * Returning `{ ok: false }` signals re-routing failed end-to-end —
-   * the previous route stays on screen and the trail is NOT removed
-   * from the planner store.
-   */
+  nearbyTrails?: Trail[];
   onRemoveTrailSection?: (
     trailId: string,
     onProgress: (step: number, total: number, label: string) => void,
   ) => Promise<RemoveTrailSectionResult>;
-  /**
-   * Find candidate trails the rider could swap the given trail for —
-   * typically nearby, similar-difficulty trails the rider hasn't already
-   * added to the route. Called when the rider opens the swap picker.
-   * Returning `[]` means "no alternates found" — the picker shows an
-   * empty-state. The picker shows a loading spinner while the promise
-   * is in flight.
-   */
   onFetchSwapAlternates?: (trailId: string) => Promise<Trail[]>;
-  /**
-   * Substitute the given trail with the chosen alternate and rebuild
-   * the assembled route in place. Same success/failure contract as
-   * `onRemoveTrailSection` — on `ok:false` the previous route stays
-   * on screen and the planner selection is untouched.
-   */
   onSwapTrailSection?: (
     oldTrailId: string,
     newTrail: Trail,
@@ -141,6 +117,7 @@ interface Props {
 export default function NavigationView({
   route,
   onClose,
+  nearbyTrails,
   onRemoveTrailSection,
   onFetchSwapAlternates,
   onSwapTrailSection,
@@ -148,6 +125,7 @@ export default function NavigationView({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("leaflet").Map | null>(null);
   const sectionLayersRef = useRef<Map<number, import("leaflet").Polyline | import("leaflet").Marker>>(new Map());
+  const nearbyLayersRef = useRef<import("leaflet").Polyline[]>([]);
   const userMarkerRef = useRef<import("leaflet").Marker | null>(null);
   const userAccuracyRef = useRef<import("leaflet").Circle | null>(null);
   const watchIdRef = useRef<number | null>(null);
@@ -281,6 +259,8 @@ export default function NavigationView({
         mapRef.current = null;
       }
       sectionLayersRef.current.clear();
+      nearbyLayersRef.current.forEach((layer) => { try { layer.remove(); } catch { /* ignore */ } });
+      nearbyLayersRef.current = [];
       userMarkerRef.current = null;
       userAccuracyRef.current = null;
       if (rerouteToastTimerRef.current) {
@@ -654,6 +634,52 @@ export default function NavigationView({
       }
     }
   }, [activeRoute, leafletLoaded, activeSection]);
+
+  useEffect(() => {
+    if (!mapRef.current || !window.L || !leafletLoaded) return;
+    const L = window.L;
+    const map = mapRef.current;
+
+    nearbyLayersRef.current.forEach((layer) => layer.remove());
+    nearbyLayersRef.current = [];
+
+    if (!nearbyTrails || nearbyTrails.length === 0) return;
+
+    const NEARBY_COLOR = "#f97316";
+
+    for (const trail of nearbyTrails) {
+      const latlngs = getTrailLatLngs(trail);
+      if (latlngs.length < 2) continue;
+
+      const line = L.polyline(latlngs, {
+        color: NEARBY_COLOR,
+        weight: 3,
+        opacity: 0.25,
+        dashArray: "6 8",
+        interactive: true,
+      }).addTo(map);
+
+      const popupEl = document.createElement("div");
+      const nameEl = document.createElement("b");
+      nameEl.style.color = "#f97316";
+      nameEl.textContent = trail.name;
+      popupEl.appendChild(nameEl);
+      const infoEl = document.createElement("span");
+      infoEl.style.fontSize = "11px";
+      infoEl.style.color = "#aaa";
+      const parts: string[] = [];
+      if (trail.distance_km) parts.push(trail.distance_km.toFixed(1) + " km");
+      if (trail.difficulty) parts.push("Diff " + trail.difficulty);
+      if (parts.length > 0) {
+        popupEl.appendChild(document.createElement("br"));
+        infoEl.textContent = parts.join(" · ");
+        popupEl.appendChild(infoEl);
+      }
+      line.bindPopup(popupEl);
+
+      nearbyLayersRef.current.push(line);
+    }
+  }, [nearbyTrails, leafletLoaded]);
 
   // Kick off in-place removal of a trail section. Pauses live GPS while
   // the route is recomputed and resumes it against the new route on

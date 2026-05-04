@@ -32,6 +32,7 @@ import type {
   SwapTrailSectionResult,
 } from "@/components/NavigationView";
 import { fetchTrailsInBbox } from "@/lib/supabase";
+import { getTrailLatLngs } from "@/lib/trailLayer";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import { distancePointToPolylineM } from "@/lib/poi";
@@ -96,6 +97,8 @@ export default function PlannerTab() {
   const [planError, setPlanError] = useState<string | null>(null);
   const [assembledRoute, setAssembledRoute] = useState<AssembledRoute | null>(null);
   const [showNav, setShowNav] = useState(false);
+  const [nearbyTrails, setNearbyTrails] = useState<Trail[]>([]);
+  const nearbyFetchIdRef = useRef(0);
   const [highlightInputs, setHighlightInputs] = useState(false);
   // Cache geocoded points so we don't re-geocode if unchanged
   const [geocodedStart, setGeocodedStart] = useState<{ q: string; pt: GeoPoint } | null>(null);
@@ -808,11 +811,6 @@ export default function PlannerTab() {
       return;
     }
 
-    if (routeTrails.length === 0) {
-      setPlanError("Add at least one trail to your route before planning navigation.");
-      return;
-    }
-
     // Hard block: AI-approximated routes are reference-only — never let
     // them slip into a turn-by-turn route. (toggleRouteTrail already
     // refuses, but defend in depth in case a trail's verification status
@@ -889,6 +887,50 @@ export default function PlannerTab() {
       setAssembledRoute(route);
       setShowNav(true);
       setShowRouteBuilder(false);
+
+      setNearbyTrails([]);
+      const routeTrailIds = new Set(routeTrails.map((t) => t.id));
+      const allPts: { lat: number; lng: number }[] = [];
+      for (const sec of route.sections) {
+        if (sec.kind === "road") {
+          for (const p of sec.route.polyline) allPts.push(p);
+        } else if (sec.kind === "trail") {
+          for (const p of sec.polyline) allPts.push(p);
+        } else {
+          allPts.push(sec.point);
+        }
+      }
+      if (allPts.length > 0) {
+        const fetchId = ++nearbyFetchIdRef.current;
+        const CORRIDOR = 0.15;
+        const corridorBbox = {
+          minLat: Math.min(...allPts.map((p) => p.lat)) - CORRIDOR,
+          maxLat: Math.max(...allPts.map((p) => p.lat)) + CORRIDOR,
+          minLng: Math.min(...allPts.map((p) => p.lng)) - CORRIDOR,
+          maxLng: Math.max(...allPts.map((p) => p.lng)) + CORRIDOR,
+        };
+        const CORRIDOR_M = 3000;
+        const routePolyline = allPts;
+        fetchTrailsInBbox(corridorBbox, { limit: 200 })
+          .then(({ trails }) => {
+            if (nearbyFetchIdRef.current !== fetchId) return;
+            const nearby = trails
+              .filter((t) => !routeTrailIds.has(t.id))
+              .filter((t) => {
+                const pts = getTrailLatLngs(t);
+                if (pts.length === 0) return false;
+                const mid = pts[Math.floor(pts.length / 2)];
+                return distancePointToPolylineM(
+                  { lat: mid[0], lng: mid[1] },
+                  routePolyline,
+                ) <= CORRIDOR_M;
+              });
+            setNearbyTrails(nearby);
+          })
+          .catch(() => {
+            if (nearbyFetchIdRef.current === fetchId) setNearbyTrails([]);
+          });
+      }
     } catch (e) {
       setPlanError("Network error while planning trip. Please try again.");
     }
@@ -1143,19 +1185,41 @@ export default function PlannerTab() {
             </div>
           </div>
 
-          {/* Find Trails Button */}
-          <button
-            onClick={handleSearch}
-            className="w-full py-4 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2"
-            style={{ background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)", color: "#1a0e05" }}
-          >
-            {searching ? (
-              <>
-                <span className="w-4 h-4 border-2 border-stone-900/50 border-t-stone-900 rounded-full animate-spin"></span>
-                Searching Supabase...
-              </>
-            ) : "Find Trails"}
-          </button>
+          {/* Find Trails + Build Navigation Buttons */}
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={handleSearch}
+              className="py-4 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+              style={{ background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)", color: "#1a0e05" }}
+            >
+              {searching ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-stone-900/50 border-t-stone-900 rounded-full animate-spin"></span>
+                  Searching...
+                </>
+              ) : "Find Trails"}
+            </button>
+            <button
+              onClick={handlePlanTrip}
+              disabled={planningTrip || !startLocation.trim() || !endLocation.trim()}
+              className="py-4 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+              style={{ background: "linear-gradient(135deg, #1d4ed8 0%, #3b82f6 50%, #1d4ed8 100%)", color: "#fff" }}
+            >
+              {planningTrip ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/50 border-t-white rounded-full animate-spin"></span>
+                  Building...
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+                  </svg>
+                  Build Nav
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* In-flight search backdrop — shows beneath the controls so the page
@@ -1323,6 +1387,30 @@ export default function PlannerTab() {
                 );
               })}
             </div>
+
+            {/* Build Navigation button at the bottom of results */}
+            <button
+              onClick={handlePlanTrip}
+              disabled={planningTrip || !startLocation.trim() || !endLocation.trim()}
+              className="w-full mt-4 py-3.5 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+              style={{ background: "linear-gradient(135deg, #1d4ed8 0%, #3b82f6 50%, #1d4ed8 100%)", color: "#fff" }}
+            >
+              {planningTrip ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/50 border-t-white rounded-full animate-spin"></span>
+                  Building Navigation...
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <polygon points="3 11 22 2 13 21 11 13 3 11"/>
+                  </svg>
+                  {routeTrails.length > 0
+                    ? `Build Navigation · ${routeTrails.length} Trail${routeTrails.length !== 1 ? "s" : ""}`
+                    : "Build Road Navigation"}
+                </>
+              )}
+            </button>
           </div>
         )}
 
@@ -1386,7 +1474,9 @@ export default function PlannerTab() {
                   </>
                 ) : (
                   <>
-                    {routeWaypoints.length} Stop{routeWaypoints.length !== 1 ? "s" : ""} · Add a trail to plan
+                    {routeWaypoints.length > 0
+                      ? `${routeWaypoints.length} Stop${routeWaypoints.length !== 1 ? "s" : ""} · Road navigation`
+                      : "Road navigation ready"}
                   </>
                 )}
               </div>
@@ -1464,8 +1554,8 @@ export default function PlannerTab() {
             </button>
             <button
               onClick={handlePlanTrip}
-              disabled={planningTrip || routeTrails.length === 0}
-              title={routeTrails.length === 0 ? "Add a trail to plan a navigable trip" : undefined}
+              disabled={planningTrip || (!startLocation.trim() || !endLocation.trim())}
+              title={!startLocation.trim() || !endLocation.trim() ? "Enter start and end addresses to plan navigation" : undefined}
               className="py-2.5 rounded-lg text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 text-stone-900 disabled:opacity-50 shadow-lg shadow-amber-900/30"
               style={{ background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" }}
             >
@@ -1579,6 +1669,7 @@ export default function PlannerTab() {
         <NavigationView
           route={assembledRoute}
           onClose={() => setShowNav(false)}
+          nearbyTrails={nearbyTrails}
           onRemoveTrailSection={handleRemoveTrailSection}
           onFetchSwapAlternates={handleFetchSwapAlternates}
           onSwapTrailSection={handleSwapTrailSection}
