@@ -110,6 +110,21 @@ export default function DiscoverTab() {
     setGroupFilterId((prev) => (fromUrl !== prev ? fromUrl : prev));
   }, [queryString]);
 
+  const applyGroupFilter = useCallback(
+    (id: string | null) => {
+      setGroupFilterId(id);
+      const params = new URLSearchParams(queryString);
+      if (id) {
+        params.set("group", id);
+      } else {
+        params.delete("group");
+      }
+      const qs = params.toString();
+      setLocation(`/discover${qs ? `?${qs}` : ""}`, { replace: true });
+    },
+    [queryString, setLocation],
+  );
+
   const [publishedRoutes, setPublishedRoutes] = useState<SavedRouteSummary[]>(
     [],
   );
@@ -370,7 +385,7 @@ export default function DiscoverTab() {
             >
               <button
                 type="button"
-                onClick={() => setGroupFilterId(null)}
+                onClick={() => applyGroupFilter(null)}
                 className={
                   "shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-colors " +
                   (groupFilterId === null
@@ -385,7 +400,7 @@ export default function DiscoverTab() {
                 <button
                   key={g.id}
                   type="button"
-                  onClick={() => setGroupFilterId(g.id)}
+                  onClick={() => applyGroupFilter(g.id)}
                   className={
                     "shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-colors flex items-center gap-1 " +
                     (groupFilterId === g.id
