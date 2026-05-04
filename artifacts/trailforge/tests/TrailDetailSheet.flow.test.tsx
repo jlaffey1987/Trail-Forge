@@ -48,6 +48,8 @@ vi.mock("@/lib/plannerRouteStore", () => ({
   addRouteTrail: vi.fn(),
   removeRouteTrail: vi.fn(),
   subscribeRouteTrails: () => () => {},
+  getRouteTrails: () => [],
+  PLANNER_MAX_TRAILS: 20,
 }));
 
 interface NoteRow {
