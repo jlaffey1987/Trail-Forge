@@ -13,6 +13,7 @@ import groupsRouter from "../../src/routes/groups";
 import pushRouter from "../../src/routes/push";
 import aiRouter from "../../src/routes/ai";
 import meRouter from "../../src/routes/me";
+import trailsRouter from "../../src/routes/trails";
 
 export function makeApp(authUserId: string | null = null): Express {
   const app = express();
@@ -21,7 +22,6 @@ export function makeApp(authUserId: string | null = null): Express {
     (req as express.Request & { __auth?: { userId: string | null } }).__auth = {
       userId: authUserId,
     };
-    // Stub a logger — pino-http isn't mounted here.
     (req as express.Request & { log?: unknown }).log = {
       error: () => {},
       warn: () => {},
@@ -35,5 +35,6 @@ export function makeApp(authUserId: string | null = null): Express {
   app.use("/api", pushRouter);
   app.use("/api", aiRouter);
   app.use("/api", meRouter);
+  app.use("/api", trailsRouter);
   return app;
 }

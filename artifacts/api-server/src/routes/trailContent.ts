@@ -45,18 +45,27 @@ const CreatePhotoBody = z.object({
   caption: z.string().max(500).optional(),
 });
 
+const ReasonCategorySchema = z.enum([
+  "route_change",
+  "difficulty_change",
+  "request_removal",
+  "other",
+]);
+
 const AmendmentChangeable = z.object({
   name: z.string().min(1).max(200).optional(),
   difficulty: z.number().int().min(1).max(10).nullable().optional(),
   type: z.string().max(100).nullable().optional(),
   legal_status: z.string().max(100).nullable().optional(),
   terrain: z.string().max(100).nullable().optional(),
+  action: z.literal("remove").optional(),
 });
 
 const CreateAmendmentBody = z.object({
   proposedChanges: AmendmentChangeable,
   reason: z.string().trim().min(1).max(2000),
   replacementGpxStorageKey: z.string().min(1).optional(),
+  reasonCategory: ReasonCategorySchema.optional(),
 });
 
 const AmendmentGpxUploadBody = z.object({
@@ -140,19 +149,98 @@ router.get(
   async (req: Request, res: Response) => {
     const trailId = getTrailId(req, res);
     if (!trailId) return;
+
+    const supa = getSupabaseAdmin();
+    const { data: trail } = await supa
+      .from("trails")
+      .select("owner_user_id, adopted_at")
+      .eq("id", trailId)
+      .maybeSingle();
+    const isUnowned = trail != null && trail.owner_user_id == null;
+    const adoptedAt = (trail as { adopted_at?: string | null } | null)?.adopted_at ?? null;
+
+    let adopterInfo: { id: string; display_name: string | null; avatar_url: string | null } | null = null;
+    if (adoptedAt && trail?.owner_user_id) {
+      const { data: owner } = await supa
+        .from("users")
+        .select("id, display_name, avatar_url")
+        .eq("id", trail.owner_user_id)
+        .maybeSingle();
+      adopterInfo = owner ?? null;
+    }
+
     const auth = getAuth(req);
     if (!auth.userId) {
-      res.json({ isOwner: false, isModerator: false, canModerate: false });
+      res.json({ isOwner: false, isModerator: false, canModerate: false, isUnowned, adoptedAt, adopter: adopterInfo });
       return;
     }
     try {
       const { isOwner, isModerator } = await isModeratorOrOwner(auth.userId, trailId);
-      res.json({ isOwner, isModerator, canModerate: isOwner || isModerator });
+      res.json({ isOwner, isModerator, canModerate: isOwner || isModerator, isUnowned, adoptedAt, adopter: adopterInfo });
     } catch (err) {
       req.log.error({ err }, "permissions check failed");
-      res.json({ isOwner: false, isModerator: false, canModerate: false });
+      res.json({ isOwner: false, isModerator: false, canModerate: false, isUnowned, adoptedAt, adopter: adopterInfo });
     }
   },
+);
+
+// ===========================================================================
+// ADOPT TRAIL
+// ===========================================================================
+
+router.post(
+  "/trails/:trailId/adopt",
+  requireAuth(async (req, res, userId) => {
+    const trailId = getTrailId(req, res);
+    if (!trailId) return;
+
+    const supa = getSupabaseAdmin();
+
+    const { count: existsCount } = await supa
+      .from("trails")
+      .select("id", { count: "exact", head: true })
+      .eq("id", trailId);
+    if (!existsCount) {
+      res.status(404).json({ error: "Trail not found" });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const { data: updated, error: updateErr } = await supa
+      .from("trails")
+      .update({ owner_user_id: userId, adopted_at: now })
+      .eq("id", trailId)
+      .is("owner_user_id", null)
+      .select("id");
+    if (updateErr) {
+      req.log.error({ err: updateErr }, "adopt trail update failed");
+      res.status(500).json({ error: "Failed to adopt trail" });
+      return;
+    }
+    if (!updated || updated.length === 0) {
+      res.status(409).json({ error: "This trail already has an owner" });
+      return;
+    }
+
+    const { error: auditErr } = await supa
+      .from("trail_adoptions")
+      .insert({ trail_id: trailId, adopted_by: userId, adopted_at: now });
+    if (auditErr) {
+      req.log.warn({ err: auditErr }, "adopt trail audit insert failed");
+    }
+
+    const { data: adopter } = await supa
+      .from("users")
+      .select("id, display_name, avatar_url")
+      .eq("id", userId)
+      .maybeSingle();
+
+    res.json({
+      ok: true,
+      adoptedAt: now,
+      adopter: adopter ?? { id: userId, display_name: null, avatar_url: null },
+    });
+  }),
 );
 
 // ===========================================================================
@@ -518,7 +606,7 @@ router.get(
       const { data, error } = await supa
         .from("trail_amendments")
         .select(
-          "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, status, decided_by, decided_at, decision_reason, created_at, users!trail_amendments_author_user_id_fkey(id, display_name, avatar_url)",
+          "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, reason_category, status, decided_by, decided_at, decision_reason, created_at, users!trail_amendments_author_user_id_fkey(id, display_name, avatar_url)",
         )
         .eq("trail_id", trailId)
         .order("created_at", { ascending: false })
@@ -577,6 +665,7 @@ router.post(
       return;
     }
     const proposed = parsed.data.proposedChanges;
+    const isRemoval = proposed.action === "remove";
     const hasField = Object.values(proposed).some((v) => v !== undefined);
     if (!hasField && !parsed.data.replacementGpxStorageKey) {
       res.status(400).json({
@@ -608,17 +697,21 @@ router.post(
     }
 
     const supa = getSupabaseAdmin();
+    const insertRow: Record<string, unknown> = {
+      trail_id: trailId,
+      author_user_id: userId,
+      proposed_changes: proposed,
+      reason: parsed.data.reason,
+      replacement_gpx_storage_key: parsed.data.replacementGpxStorageKey ?? null,
+    };
+    if (parsed.data.reasonCategory) {
+      insertRow.reason_category = parsed.data.reasonCategory;
+    }
     const { data, error } = await supa
       .from("trail_amendments")
-      .insert({
-        trail_id: trailId,
-        author_user_id: userId,
-        proposed_changes: proposed,
-        reason: parsed.data.reason,
-        replacement_gpx_storage_key: parsed.data.replacementGpxStorageKey ?? null,
-      })
+      .insert(insertRow)
       .select(
-        "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, status, decided_by, decided_at, decision_reason, created_at, users!trail_amendments_author_user_id_fkey(id, display_name, avatar_url)",
+        "id, trail_id, author_user_id, proposed_changes, replacement_gpx_storage_key, reason, reason_category, status, decided_by, decided_at, decision_reason, created_at, users!trail_amendments_author_user_id_fkey(id, display_name, avatar_url)",
       )
       .single();
     if (error) {
@@ -688,6 +781,8 @@ router.post(
     }
 
     const proposed = (amendment.proposed_changes ?? {}) as Record<string, unknown>;
+    const isRemoval = proposed.action === "remove";
+
     const update: Record<string, unknown> = {};
     const previous: Record<string, unknown> = {};
     for (const field of AMENDABLE_FIELDS) {
@@ -697,7 +792,17 @@ router.post(
       }
     }
 
-    if (Object.keys(update).length > 0) {
+    if (isRemoval) {
+      const { error: delErr } = await supa
+        .from("trails")
+        .update({ deleted_at: new Date().toISOString(), is_public: false })
+        .eq("id", trailId);
+      if (delErr) {
+        req.log.error({ err: delErr }, "removal amendment soft-delete failed");
+        res.status(500).json({ error: "Failed to remove trail" });
+        return;
+      }
+    } else if (Object.keys(update).length > 0) {
       const { error: trailErr } = await supa
         .from("trails")
         .update(update)
@@ -725,14 +830,13 @@ router.post(
       return;
     }
 
-    // Always write the audit row, even when the field-level update was a no-op
-    // (e.g. only a replacement GPX was attached) so the decision itself is logged.
+    const auditPrevious = isRemoval ? { action: "remove", trail_was_visible: true } : previous;
     const { error: histErr } = await supa
       .from("trail_amendment_history")
       .insert({
         trail_id: trailId,
         amendment_id: amendmentId.data,
-        previous_values: previous,
+        previous_values: auditPrevious,
         applied_at: decidedAt,
         applied_by: userId,
       });
@@ -740,7 +844,7 @@ router.post(
       req.log.warn({ err: histErr }, "amendment audit insert failed");
     }
 
-    res.json({ ok: true, applied: update });
+    res.json({ ok: true, applied: isRemoval ? { action: "remove" } : update });
   }),
 );
 

@@ -6,6 +6,7 @@ import {
   requestAmendmentGpxUploadUrl,
   type TrailAmendment,
   type AmendmentChanges,
+  type ReasonCategory,
 } from "@/lib/trailContent";
 import { type Trail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -13,7 +14,6 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 interface Props {
   trail: Trail;
   onCountsChanged?: () => void;
-  /** True when the viewer can approve/reject (owner or moderator). */
   canModerate: boolean;
 }
 
@@ -24,12 +24,27 @@ const STATUS_STYLES: Record<TrailAmendment["status"], string> = {
   archived: "bg-stone-700/40 text-stone-400 border-stone-600/40",
 };
 
+const CATEGORY_STYLES: Record<ReasonCategory, { label: string; cls: string }> = {
+  route_change: { label: "Route change", cls: "bg-sky-700/40 text-sky-300 border-sky-600/40" },
+  difficulty_change: { label: "Difficulty", cls: "bg-violet-700/40 text-violet-300 border-violet-600/40" },
+  request_removal: { label: "Removal", cls: "bg-red-700/40 text-red-300 border-red-600/40" },
+  other: { label: "Other", cls: "bg-stone-700/40 text-stone-300 border-stone-600/40" },
+};
+
+const REASON_CATEGORIES: { value: ReasonCategory; label: string; description: string }[] = [
+  { value: "route_change", label: "Route change", description: "Closure, diversion, new path" },
+  { value: "difficulty_change", label: "Difficulty change", description: "Weather, wear, conditions" },
+  { value: "request_removal", label: "Request removal", description: "No longer lawful to ride" },
+  { value: "other", label: "Other", description: "Any other correction" },
+];
+
 const FIELD_LABELS: Record<keyof AmendmentChanges, string> = {
   name: "Name",
   difficulty: "Difficulty",
   type: "Type",
   legal_status: "Legal status",
   terrain: "Terrain",
+  action: "Action",
 };
 
 function timeAgo(iso: string): string {
@@ -57,7 +72,7 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
 
-  // Form state (only the most useful fields are exposed for v1).
+  const [reasonCategory, setReasonCategory] = useState<ReasonCategory>("other");
   const [name, setName] = useState<string>(trail.name ?? "");
   const [difficulty, setDifficulty] = useState<string>(
     trail.difficulty != null ? String(trail.difficulty) : "",
@@ -72,6 +87,9 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
   const [rejectReason, setRejectReason] = useState("");
   const [deciding, setDeciding] = useState(false);
   const [decideError, setDecideError] = useState<string | null>(null);
+  const [confirmingRemoval, setConfirmingRemoval] = useState<TrailAmendment | null>(null);
+
+  const isRemoval = reasonCategory === "request_removal";
 
   const initial = useMemo(
     () => ({
@@ -99,26 +117,31 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
   const submit = async () => {
     setError(null);
     const proposed: AmendmentChanges = {};
-    if (name.trim() && name.trim() !== initial.name) proposed.name = name.trim();
-    if (difficulty !== initial.difficulty) {
-      if (difficulty === "") proposed.difficulty = null;
-      else {
-        const n = Number(difficulty);
-        if (!Number.isInteger(n) || n < 1 || n > 10) {
-          setError("Difficulty must be an integer 1-10");
-          return;
+
+    if (isRemoval) {
+      proposed.action = "remove";
+    } else {
+      if (name.trim() && name.trim() !== initial.name) proposed.name = name.trim();
+      if (difficulty !== initial.difficulty) {
+        if (difficulty === "") proposed.difficulty = null;
+        else {
+          const n = Number(difficulty);
+          if (!Number.isInteger(n) || n < 1 || n > 10) {
+            setError("Difficulty must be an integer 1-10");
+            return;
+          }
+          proposed.difficulty = n;
         }
-        proposed.difficulty = n;
       }
+      if (legalStatus !== initial.legalStatus)
+        proposed.legal_status = legalStatus.trim() === "" ? null : legalStatus.trim();
+      if (terrain !== initial.terrain)
+        proposed.terrain = terrain.trim() === "" ? null : terrain.trim();
     }
-    if (legalStatus !== initial.legalStatus)
-      proposed.legal_status = legalStatus.trim() === "" ? null : legalStatus.trim();
-    if (terrain !== initial.terrain)
-      proposed.terrain = terrain.trim() === "" ? null : terrain.trim();
 
     const hasChange = Object.keys(proposed).length > 0;
     if (!hasChange && !gpxFile) {
-      setError("Edit at least one field or attach a replacement GPX");
+      setError(isRemoval ? "Select the removal reason" : "Edit at least one field or attach a replacement GPX");
       return;
     }
     if (reason.trim().length === 0) {
@@ -144,12 +167,14 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
         proposedChanges: proposed,
         reason: reason.trim(),
         replacementGpxStorageKey: gpxKey,
+        reasonCategory,
       });
       if (!created) throw new Error("Could not submit amendment");
       setItems((prev) => [created, ...prev]);
       setShowForm(false);
       setReason("");
       setGpxFile(null);
+      setReasonCategory("other");
       onCountsChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Submit failed");
@@ -175,7 +200,6 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
         );
         return false;
       }
-      // Refetch to pick up server-side state (status + decided_by/at).
       const rows = await fetchTrailAmendments(trail.id);
       setItems(rows);
       onCountsChanged?.();
@@ -186,7 +210,20 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
   };
 
   const onApprove = (am: TrailAmendment) => {
+    const isRemovalAm = am.proposed_changes?.action === "remove";
+    if (isRemovalAm) {
+      setConfirmingRemoval(am);
+      return;
+    }
     void runDecision(am, "approve");
+  };
+
+  const confirmRemovalApproval = async () => {
+    if (!confirmingRemoval) return;
+    const ok = await runDecision(confirmingRemoval, "approve");
+    if (ok) {
+      setConfirmingRemoval(null);
+    }
   };
 
   const onRejectClick = (am: TrailAmendment) => {
@@ -250,54 +287,84 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
 
       {showForm ? (
         <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg p-3 space-y-2">
-          <FormField label="Name">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              maxLength={200}
-              className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
-              data-testid="amendment-name"
-            />
+          <FormField label="What kind of change?">
+            <div className="grid grid-cols-2 gap-1.5 mt-1">
+              {REASON_CATEGORIES.map((cat) => (
+                <button
+                  key={cat.value}
+                  type="button"
+                  onClick={() => setReasonCategory(cat.value)}
+                  className={`text-left px-2.5 py-2 rounded-lg border text-[11px] transition-colors ${
+                    reasonCategory === cat.value
+                      ? "border-amber-500/60 bg-amber-500/15 text-amber-300"
+                      : "border-stone-700 bg-stone-900/40 text-stone-400 hover:border-stone-600"
+                  }`}
+                  data-testid={`amendment-category-${cat.value}`}
+                >
+                  <div className="font-bold">{cat.label}</div>
+                  <div className="text-[10px] opacity-70">{cat.description}</div>
+                </button>
+              ))}
+            </div>
           </FormField>
-          <div className="grid grid-cols-2 gap-2">
-            <FormField label="Difficulty (1-10)">
-              <input
-                value={difficulty}
-                onChange={(e) => setDifficulty(e.target.value)}
-                inputMode="numeric"
-                className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
-                data-testid="amendment-difficulty"
-              />
-            </FormField>
-            <FormField label="Legal status">
-              <input
-                value={legalStatus}
-                onChange={(e) => setLegalStatus(e.target.value)}
-                maxLength={100}
-                className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
-                data-testid="amendment-legal"
-              />
-            </FormField>
-          </div>
-          <FormField label="Terrain">
-            <input
-              value={terrain}
-              onChange={(e) => setTerrain(e.target.value)}
-              maxLength={100}
-              className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
-              data-testid="amendment-terrain"
-            />
-          </FormField>
-          <FormField label="Replacement GPX (optional)">
-            <input
-              type="file"
-              accept=".gpx,application/gpx+xml,application/xml,text/xml"
-              onChange={(e) => setGpxFile(e.target.files?.[0] ?? null)}
-              className="text-xs text-stone-300"
-              data-testid="amendment-gpx"
-            />
-          </FormField>
-          <FormField label="Reason for change">
+
+          {!isRemoval ? (
+            <>
+              <FormField label="Name">
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  maxLength={200}
+                  className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
+                  data-testid="amendment-name"
+                />
+              </FormField>
+              <div className="grid grid-cols-2 gap-2">
+                <FormField label="Difficulty (1-10)">
+                  <input
+                    value={difficulty}
+                    onChange={(e) => setDifficulty(e.target.value)}
+                    inputMode="numeric"
+                    className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
+                    data-testid="amendment-difficulty"
+                  />
+                </FormField>
+                <FormField label="Legal status">
+                  <input
+                    value={legalStatus}
+                    onChange={(e) => setLegalStatus(e.target.value)}
+                    maxLength={100}
+                    className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
+                    data-testid="amendment-legal"
+                  />
+                </FormField>
+              </div>
+              <FormField label="Terrain">
+                <input
+                  value={terrain}
+                  onChange={(e) => setTerrain(e.target.value)}
+                  maxLength={100}
+                  className="w-full bg-stone-900 border border-stone-700 rounded p-1.5 text-sm text-stone-200"
+                  data-testid="amendment-terrain"
+                />
+              </FormField>
+              <FormField label="Replacement GPX (optional)">
+                <input
+                  type="file"
+                  accept=".gpx,application/gpx+xml,application/xml,text/xml"
+                  onChange={(e) => setGpxFile(e.target.files?.[0] ?? null)}
+                  className="text-xs text-stone-300"
+                  data-testid="amendment-gpx"
+                />
+              </FormField>
+            </>
+          ) : (
+            <div className="rounded-lg border border-red-600/30 bg-red-900/15 px-3 py-2 text-[11px] text-red-300">
+              This will request the trail be hidden from all riders. Please explain below why the trail should be removed.
+            </div>
+          )}
+
+          <FormField label={isRemoval ? "Why should this trail be removed?" : "Reason for change"}>
             <textarea
               value={reason}
               onChange={(e) => setReason(e.target.value)}
@@ -316,7 +383,7 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
               style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
               data-testid="amendment-submit"
             >
-              {submitting ? "Submitting…" : "Submit Amendment"}
+              {submitting ? "Submitting…" : isRemoval ? "Submit Removal Request" : "Submit Amendment"}
             </button>
           </div>
         </div>
@@ -330,6 +397,7 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
         {items.map((am) => {
           const pairs = diffPairs(am.proposed_changes ?? {});
           const author = am.users?.display_name ?? "A rider";
+          const catStyle = am.reason_category ? CATEGORY_STYLES[am.reason_category] : null;
           return (
             <div
               key={am.id}
@@ -337,7 +405,7 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
               data-testid={`amendment-${am.id}`}
             >
               <div className="flex items-center justify-between mb-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span
                     className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold border ${
                       STATUS_STYLES[am.status]
@@ -346,6 +414,14 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
                   >
                     {am.status}
                   </span>
+                  {catStyle ? (
+                    <span
+                      className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold border ${catStyle.cls}`}
+                      data-testid={`amendment-category-tag-${am.id}`}
+                    >
+                      {catStyle.label}
+                    </span>
+                  ) : null}
                   <span className="text-xs text-stone-300">{author}</span>
                 </div>
                 <span className="text-[10px] text-stone-500">{timeAgo(am.created_at)}</span>
@@ -467,6 +543,69 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
                   data-testid="amendment-reject-confirm"
                 >
                   {deciding ? "Rejecting…" : "Confirm Reject"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {confirmingRemoval ? (
+        <div
+          className="fixed inset-0 z-[3050] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(3px)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="amendment-removal-title"
+          data-testid="amendment-removal-dialog"
+        >
+          <div
+            className="w-full max-w-md rounded-2xl overflow-hidden"
+            style={{ background: "hsl(22,15%,9%)" }}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[hsl(30,12%,16%)]">
+              <h2
+                id="amendment-removal-title"
+                className="text-base font-bold text-red-400 uppercase tracking-widest"
+              >
+                Confirm Trail Removal
+              </h2>
+              <button
+                onClick={() => setConfirmingRemoval(null)}
+                disabled={deciding}
+                className="text-xs text-stone-500 hover:text-red-400 disabled:opacity-50"
+                data-testid="amendment-removal-cancel"
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="px-4 py-4 space-y-3">
+              <div className="rounded-lg border border-red-600/30 bg-red-900/15 px-3 py-2 text-[11px] text-red-300">
+                Approving this removal request will hide the trail from all riders. The trail data will be preserved but no longer visible in search or on the map.
+              </div>
+              <p className="text-xs text-stone-400">
+                Reason given: <span className="text-stone-200">{confirmingRemoval.reason}</span>
+              </p>
+              {decideError ? (
+                <p className="text-[11px] text-red-400" role="alert">{decideError}</p>
+              ) : null}
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setConfirmingRemoval(null)}
+                  disabled={deciding}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-300 border border-stone-700 hover:bg-stone-800 disabled:opacity-50"
+                  data-testid="amendment-removal-dialog-cancel"
+                >
+                  Keep Visible
+                </button>
+                <button
+                  onClick={confirmRemovalApproval}
+                  disabled={deciding}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                  style={{ background: "linear-gradient(135deg, #b91c1c, #ef4444)" }}
+                  data-testid="amendment-removal-confirm"
+                >
+                  {deciding ? "Removing…" : "Confirm Removal"}
                 </button>
               </div>
             </div>

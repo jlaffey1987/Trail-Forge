@@ -27,22 +27,22 @@ describe("GET /api/trails/:trailId/permissions", () => {
   it("returns all-false for an anonymous viewer", async () => {
     const res = await request(makeApp()).get(`/api/trails/${TRAIL_ID}/permissions`);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ isOwner: false, isModerator: false, canModerate: false });
+    expect(res.body).toEqual({ isOwner: false, isModerator: false, canModerate: false, isUnowned: false, adoptedAt: null, adopter: null });
   });
 
   it("flags the trail owner as canModerate", async () => {
     const res = await request(makeApp(OWNER_ID)).get(`/api/trails/${TRAIL_ID}/permissions`);
-    expect(res.body).toEqual({ isOwner: true, isModerator: false, canModerate: true });
+    expect(res.body).toEqual({ isOwner: true, isModerator: false, canModerate: true, isUnowned: false, adoptedAt: null, adopter: null });
   });
 
   it("flags a global moderator as canModerate", async () => {
     const res = await request(makeApp(MOD_ID)).get(`/api/trails/${TRAIL_ID}/permissions`);
-    expect(res.body).toEqual({ isOwner: false, isModerator: true, canModerate: true });
+    expect(res.body).toEqual({ isOwner: false, isModerator: true, canModerate: true, isUnowned: false, adoptedAt: null, adopter: null });
   });
 
   it("returns all-false for an unrelated signed-in user", async () => {
     const res = await request(makeApp(RANDOM_ID)).get(`/api/trails/${TRAIL_ID}/permissions`);
-    expect(res.body).toEqual({ isOwner: false, isModerator: false, canModerate: false });
+    expect(res.body).toEqual({ isOwner: false, isModerator: false, canModerate: false, isUnowned: false, adoptedAt: null, adopter: null });
     // Sanity: seed wasn't consumed.
     expect(getMockSupa().rows("users")).toHaveLength(3);
   });

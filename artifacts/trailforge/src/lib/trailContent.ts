@@ -9,6 +9,7 @@
 
 export type NoteKind = "info" | "warning" | "condition";
 export type AmendmentStatus = "pending" | "approved" | "rejected" | "archived";
+export type ReasonCategory = "route_change" | "difficulty_change" | "request_removal" | "other";
 
 interface AuthorMini {
   id: string;
@@ -47,6 +48,7 @@ export interface AmendmentChanges {
   type?: string | null;
   legal_status?: string | null;
   terrain?: string | null;
+  action?: "remove";
 }
 
 export interface TrailAmendment {
@@ -56,6 +58,7 @@ export interface TrailAmendment {
   proposed_changes: AmendmentChanges;
   replacement_gpx_storage_key: string | null;
   reason: string;
+  reason_category: ReasonCategory | null;
   status: AmendmentStatus;
   decided_by: string | null;
   decided_at: string | null;
@@ -78,6 +81,9 @@ export interface TrailPermissions {
   isOwner: boolean;
   isModerator: boolean;
   canModerate: boolean;
+  isUnowned: boolean;
+  adoptedAt: string | null;
+  adopter: { id: string; display_name: string | null; avatar_url: string | null } | null;
 }
 
 export async function fetchTrailPermissions(trailId: string): Promise<TrailPermissions> {
@@ -85,10 +91,10 @@ export async function fetchTrailPermissions(trailId: string): Promise<TrailPermi
     const res = await fetch(`/api/trails/${trailId}/permissions`, {
       credentials: "include",
     });
-    if (!res.ok) return { isOwner: false, isModerator: false, canModerate: false };
+    if (!res.ok) return { isOwner: false, isModerator: false, canModerate: false, isUnowned: false, adoptedAt: null, adopter: null };
     return (await res.json()) as TrailPermissions;
   } catch {
-    return { isOwner: false, isModerator: false, canModerate: false };
+    return { isOwner: false, isModerator: false, canModerate: false, isUnowned: false, adoptedAt: null, adopter: null };
   }
 }
 
@@ -278,6 +284,7 @@ export async function createTrailAmendment(
     proposedChanges: AmendmentChanges;
     reason: string;
     replacementGpxStorageKey?: string;
+    reasonCategory?: ReasonCategory;
   },
 ): Promise<TrailAmendment | null> {
   try {
@@ -320,6 +327,35 @@ export async function decideAmendment(
   } catch (err) {
     console.error("decideAmendment failed:", err);
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Adopt trail
+// ---------------------------------------------------------------------------
+
+export interface AdoptResult {
+  ok: boolean;
+  adoptedAt: string;
+  adopter: { id: string; display_name: string | null; avatar_url: string | null };
+}
+
+export async function adoptTrail(trailId: string): Promise<AdoptResult | null> {
+  try {
+    const res = await fetch(`/api/trails/${trailId}/adopt`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      console.error("adoptTrail failed:", res.status, body?.error);
+      return null;
+    }
+    return (await res.json()) as AdoptResult;
+  } catch (err) {
+    console.error("adoptTrail failed:", err);
+    return null;
   }
 }
 
