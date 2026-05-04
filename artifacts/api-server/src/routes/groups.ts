@@ -1045,6 +1045,85 @@ router.delete(
 );
 
 // ---------------------------------------------------------------------------
+// UPDATE group photo caption (uploader / owner / admin)
+// ---------------------------------------------------------------------------
+
+const UpdateGroupPhotoBody = z.object({
+  caption: z.string().max(500).nullable(),
+});
+
+router.patch(
+  "/groups/:groupId/photos/:photoId",
+  requireAuth(async (req, res, userId) => {
+    const idParse = GroupIdParam.safeParse(req.params.groupId);
+    if (!idParse.success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const photoId = z.string().uuid().safeParse(req.params.photoId);
+    if (!photoId.success) {
+      res.status(400).json({ error: "Invalid photo id" });
+      return;
+    }
+    const parsed = UpdateGroupPhotoBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid payload" });
+      return;
+    }
+    const ms = await fetchMembership(idParse.data, userId);
+    if ("notMember" in ms) {
+      res.status(403).json({ error: "Not a member" });
+      return;
+    }
+    if ("error" in ms && ms.error) {
+      res.status(500).json({ error: "Failed to load membership" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: existing, error: lookupErr } = await supa
+      .from("group_photos")
+      .select("id, uploader_user_id")
+      .eq("id", photoId.data)
+      .eq("group_id", idParse.data)
+      .maybeSingle();
+    if (lookupErr) {
+      if (isMissingTableError(lookupErr)) {
+        res.status(404).json({ error: "Photo not found" });
+        return;
+      }
+      req.log.error({ err: lookupErr }, "load group photo failed");
+      res.status(500).json({ error: "Failed to load photo" });
+      return;
+    }
+    if (!existing) {
+      res.status(404).json({ error: "Photo not found" });
+      return;
+    }
+    const isUploader = existing.uploader_user_id === userId;
+    const canModerate =
+      ms.member.role === "owner" || ms.member.role === "admin";
+    if (!isUploader && !canModerate) {
+      res
+        .status(403)
+        .json({ error: "Only the uploader, owner, or admin can edit this photo" });
+      return;
+    }
+    const { data, error } = await supa
+      .from("group_photos")
+      .update({ caption: parsed.data.caption })
+      .eq("id", photoId.data)
+      .select(GROUP_PHOTO_SELECT)
+      .single();
+    if (error) {
+      req.log.error({ err: error }, "update group photo failed");
+      res.status(500).json({ error: "Failed to update photo" });
+      return;
+    }
+    res.json(data);
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // DELETE group (owner only)
 // ---------------------------------------------------------------------------
 

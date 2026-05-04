@@ -408,6 +408,17 @@ export async function createGroupPhoto(
   });
 }
 
+export async function updateGroupPhoto(
+  groupId: string,
+  photoId: string,
+  patch: { caption: string | null },
+): Promise<GroupPhoto | null> {
+  return jsonFetch<GroupPhoto>(
+    `/api/groups/${groupId}/photos/${photoId}`,
+    { method: "PATCH", body: JSON.stringify(patch) },
+  );
+}
+
 export async function deleteGroupPhoto(
   groupId: string,
   photoId: string,

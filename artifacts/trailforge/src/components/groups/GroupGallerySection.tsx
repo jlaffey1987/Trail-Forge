@@ -3,6 +3,7 @@ import {
   type GroupPhoto,
   createGroupPhoto,
   deleteGroupPhoto,
+  updateGroupPhoto,
   fetchGroupPhotos,
   groupPhotoUrl,
   requestGroupPhotoUploadUrl,
@@ -29,6 +30,9 @@ export default function GroupGallerySection({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<GroupPhoto | null>(null);
+  const [editingCaption, setEditingCaption] = useState(false);
+  const [captionDraft, setCaptionDraft] = useState("");
+  const [savingCaption, setSavingCaption] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -90,6 +94,36 @@ export default function GroupGallerySection({
     await refresh();
   };
 
+  const openLightbox = (photo: GroupPhoto) => {
+    setLightbox(photo);
+    setEditingCaption(false);
+    setCaptionDraft(photo.caption ?? "");
+    setSavingCaption(false);
+  };
+
+  const startEditCaption = () => {
+    if (!lightbox) return;
+    setCaptionDraft(lightbox.caption ?? "");
+    setEditingCaption(true);
+  };
+
+  const handleSaveCaption = async () => {
+    if (!lightbox) return;
+    setSavingCaption(true);
+    const caption = captionDraft.trim() || null;
+    const updated = await updateGroupPhoto(groupId, lightbox.id, { caption });
+    setSavingCaption(false);
+    if (!updated) {
+      setError("Could not save caption");
+      return;
+    }
+    setLightbox(updated);
+    setPhotos((prev) =>
+      prev.map((p) => (p.id === updated.id ? updated : p)),
+    );
+    setEditingCaption(false);
+  };
+
   return (
     <div className="space-y-2" data-testid="group-gallery-section">
       <div className="flex items-center justify-between gap-2">
@@ -147,7 +181,7 @@ export default function GroupGallerySection({
               >
                 <button
                   type="button"
-                  onClick={() => setLightbox(p)}
+                  onClick={() => openLightbox(p)}
                   className="block w-full h-full"
                   aria-label={`Open photo by ${p.users?.display_name ?? "member"}`}
                 >
@@ -181,50 +215,110 @@ export default function GroupGallerySection({
         </p>
       )}
 
-      {lightbox && (
-        <div
-          className="fixed inset-0 z-[3070] flex items-center justify-center bg-black/90 p-4"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setLightbox(null)}
-          data-testid="group-gallery-lightbox"
-        >
+      {lightbox && (() => {
+        const isLightboxUploader = lightbox.uploader_user_id === callerUserId;
+        const canEditCaption = isLightboxUploader || canModerate;
+        return (
           <div
-            className="relative max-w-3xl w-full"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[3070] flex items-center justify-center bg-black/90 p-4"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setLightbox(null)}
+            data-testid="group-gallery-lightbox"
           >
-            <img
-              src={groupPhotoUrl(lightbox)}
-              alt={lightbox.caption ?? "Group photo"}
-              className="w-full max-h-[80vh] object-contain rounded-lg"
-            />
-            <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-stone-400">
-              <div className="flex items-center gap-2 min-w-0">
-                {lightbox.users?.avatar_url ? (
-                  <img
-                    src={lightbox.users.avatar_url}
-                    alt=""
-                    className="w-6 h-6 rounded-full"
+            <div
+              className="relative max-w-3xl w-full"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <img
+                src={groupPhotoUrl(lightbox)}
+                alt={lightbox.caption ?? "Group photo"}
+                className="w-full max-h-[80vh] object-contain rounded-lg"
+              />
+              {lightbox.caption && !editingCaption && (
+                <p
+                  className="mt-2 text-sm text-stone-200 leading-snug"
+                  data-testid="group-gallery-lightbox-caption"
+                >
+                  {lightbox.caption}
+                </p>
+              )}
+              {editingCaption && (
+                <div className="mt-2 flex items-center gap-2" data-testid="group-gallery-caption-editor">
+                  <input
+                    type="text"
+                    value={captionDraft}
+                    onChange={(e) => setCaptionDraft(e.target.value)}
+                    maxLength={500}
+                    placeholder="Add a caption…"
+                    className="flex-1 rounded-md bg-stone-800 border border-stone-600 px-2 py-1 text-sm text-stone-200 placeholder:text-stone-500 focus:outline-none focus:border-amber-500"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void handleSaveCaption();
+                      if (e.key === "Escape") setEditingCaption(false);
+                    }}
+                    data-testid="group-gallery-caption-input"
                   />
-                ) : null}
-                <span className="truncate">
-                  {lightbox.users?.display_name ?? "Member"}
-                  {" · "}
-                  {new Date(lightbox.created_at).toLocaleDateString()}
-                </span>
+                  <button
+                    type="button"
+                    disabled={savingCaption}
+                    onClick={() => void handleSaveCaption()}
+                    className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider text-stone-900 disabled:opacity-50"
+                    style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                    data-testid="group-gallery-caption-save"
+                  >
+                    {savingCaption ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingCaption(false)}
+                    className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider text-stone-400 hover:text-stone-200"
+                    data-testid="group-gallery-caption-cancel"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-stone-400">
+                <div className="flex items-center gap-2 min-w-0">
+                  {lightbox.users?.avatar_url ? (
+                    <img
+                      src={lightbox.users.avatar_url}
+                      alt=""
+                      className="w-6 h-6 rounded-full"
+                    />
+                  ) : null}
+                  <span className="truncate">
+                    {lightbox.users?.display_name ?? "Member"}
+                    {" · "}
+                    {new Date(lightbox.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {canEditCaption && !editingCaption && (
+                    <button
+                      type="button"
+                      onClick={startEditCaption}
+                      className="text-stone-500 hover:text-amber-400"
+                      data-testid="group-gallery-edit-caption-btn"
+                    >
+                      {lightbox.caption ? "Edit caption" : "Add caption"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setLightbox(null)}
+                    className="text-stone-500 hover:text-amber-400"
+                    data-testid="group-gallery-lightbox-close"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setLightbox(null)}
-                className="text-stone-500 hover:text-amber-400"
-                data-testid="group-gallery-lightbox-close"
-              >
-                Close
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
