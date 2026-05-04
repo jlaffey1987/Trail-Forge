@@ -54,6 +54,7 @@ interface QueryState {
   single: boolean;
   maybeSingle: boolean;
   upsertOnConflict: string | null;
+  upsertIgnoreDuplicates: boolean;
   countMode: "exact" | null;
   head: boolean;
 }
@@ -197,19 +198,15 @@ export class MockSupa {
     }
 
     if (state.op === "upsert") {
-      // Lightweight upsert — match on `upsertOnConflict` column (defaults to
-      // "id"), update the existing row in place if found, otherwise insert.
-      const conflictCol = state.upsertOnConflict ?? "id";
+      const conflictCols = (state.upsertOnConflict ?? "id").split(",").map(c => c.trim());
       const upserted: Row[] = [];
       for (const incoming of state.insertRows) {
         const row: Row = { ...incoming };
-        const conflictVal = row[conflictCol];
-        const existing =
-          conflictVal != null
-            ? table.find((r) => r[conflictCol] === conflictVal)
-            : undefined;
+        const existing = table.find((r) =>
+          conflictCols.every(col => row[col] != null && r[col] === row[col]),
+        );
         if (existing) {
-          Object.assign(existing, row);
+          if (!state.upsertIgnoreDuplicates) Object.assign(existing, row);
           upserted.push(existing);
         } else {
           if (row.id == null) row.id = randomUUID();
@@ -343,6 +340,7 @@ class QueryBuilder implements PromiseLike<QueryResult> {
       single: false,
       maybeSingle: false,
       upsertOnConflict: null,
+      upsertIgnoreDuplicates: false,
       countMode: null,
       head: false,
     };
@@ -370,10 +368,11 @@ class QueryBuilder implements PromiseLike<QueryResult> {
     return this;
   }
 
-  upsert(row: Row | Row[], opts?: { onConflict?: string }): this {
+  upsert(row: Row | Row[], opts?: { onConflict?: string; ignoreDuplicates?: boolean }): this {
     this.state.op = "upsert";
     this.state.insertRows = Array.isArray(row) ? [...row] : [row];
     this.state.upsertOnConflict = opts?.onConflict ?? null;
+    this.state.upsertIgnoreDuplicates = opts?.ignoreDuplicates ?? false;
     return this;
   }
 
