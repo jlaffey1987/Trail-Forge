@@ -1,11 +1,13 @@
 /**
  * Push notification subscription + preferences endpoints for TrailForge.
  *
- *   GET    /api/me/push/public-key    — VAPID public key for pushManager.subscribe
- *   POST   /api/me/push/subscribe     — register / refresh a PushSubscription
- *   DELETE /api/me/push/subscribe     — unregister by endpoint
- *   GET    /api/me/push/preferences   — { enabled: boolean }
- *   PUT    /api/me/push/preferences   — toggle the per-user opt-out
+ *   GET    /api/me/push/public-key                — VAPID public key for pushManager.subscribe
+ *   POST   /api/me/push/subscribe                 — register / refresh a PushSubscription
+ *   DELETE /api/me/push/subscribe                 — unregister by endpoint
+ *   GET    /api/me/push/preferences               — { enabled: boolean }
+ *   PUT    /api/me/push/preferences               — toggle the per-user opt-out
+ *   GET    /api/me/push/group-preferences         — per-group push enabled flags
+ *   PUT    /api/me/push/group-preferences/:groupId — toggle per-group push opt-out
  *
  * The actual push fan-out lives next to the source-of-truth writes (see
  * `lib/pushNotifications.ts` + the share / join handlers in `groups.ts` and
@@ -264,6 +266,90 @@ router.put(
       return;
     }
     res.json({ enabled: parsed.data.enabled });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Per-group push preferences — lets a user silence pushes from a noisy group
+// without losing notifications from other groups. The flag lives on the
+// `group_members.push_enabled` column (default true).
+// ---------------------------------------------------------------------------
+
+const GroupPreferencesBody = z.object({
+  enabled: z.boolean(),
+});
+
+router.get(
+  "/me/push/group-preferences",
+  requireAuth(async (req, res, userId) => {
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("group_members")
+      .select("group_id, push_enabled, groups(id, name)")
+      .eq("user_id", userId);
+    if (error) {
+      if (isMissingColumnError(error) || isMissingTableError(error)) {
+        res.json({ items: [] });
+        return;
+      }
+      req.log.error({ err: error }, "push group-preferences load failed");
+      res.status(500).json({ error: "Failed to load group preferences" });
+      return;
+    }
+    const rows = (data ?? []) as Array<{
+      group_id: string;
+      push_enabled: boolean | null;
+      groups: { id: string; name: string }[] | { id: string; name: string } | null;
+    }>;
+    const items = rows.map((r) => {
+      const g = Array.isArray(r.groups) ? r.groups[0] : r.groups;
+      return {
+        group_id: r.group_id,
+        group_name: g?.name ?? "Unknown group",
+        push_enabled: r.push_enabled !== false,
+      };
+    });
+    res.json({ items });
+  }),
+);
+
+router.put(
+  "/me/push/group-preferences/:groupId",
+  requireAuth(async (req, res, userId) => {
+    const groupId = req.params.groupId;
+    if (!groupId || !z.string().uuid().safeParse(groupId).success) {
+      res.status(400).json({ error: "Invalid group id" });
+      return;
+    }
+    const parsed = GroupPreferencesBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid preferences payload" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("group_members")
+      .update({ push_enabled: parsed.data.enabled })
+      .eq("user_id", userId)
+      .eq("group_id", groupId)
+      .select("group_id, push_enabled");
+    if (error) {
+      if (isMissingColumnError(error) || isMissingTableError(error)) {
+        res.status(503).json({
+          error:
+            "Per-group push preferences not yet provisioned — apply migration 0026_group_push_preferences.sql",
+        });
+        return;
+      }
+      req.log.error({ err: error }, "push group-preferences update failed");
+      res.status(500).json({ error: "Failed to update group preference" });
+      return;
+    }
+    if (!data || (data as unknown[]).length === 0) {
+      res.status(404).json({ error: "You are not a member of this group" });
+      return;
+    }
+    res.json({ group_id: groupId, push_enabled: parsed.data.enabled });
   }),
 );
 

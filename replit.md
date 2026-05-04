@@ -42,7 +42,7 @@ The project is structured as a pnpm monorepo.
     - Long-press (400ms, 10px movement threshold) a marker to enter drag mode and reposition it — the polyline updates on drop.
     - "Done" deselects. Undo removes last point; clear removes all.
 - **Groups and Sharing:** Private groups with memberships, invites, and trail sharing features.
-- **Notifications:** In-app and OS-level push notifications for group activities (trail shares, new members).
+- **Notifications:** In-app and OS-level push notifications for group activities (trail shares, new members). Per-group push preferences let users silence individual groups without disabling all notifications.
 - **Trail Adoption & Amendments:** Users can adopt unowned trails and propose edits with categorized reasons.
 - **Cloud-synced Planner Route:** Planner route syncs across devices for signed-in users, with localStorage fallback for guests.
 - **In-app Chat:** Group and direct messaging with real-time updates, read receipts, and user blocking.

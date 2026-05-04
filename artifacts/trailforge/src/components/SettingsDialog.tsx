@@ -5,7 +5,10 @@ import {
   enablePushOnThisDevice,
   getPushSupportLevel,
   loadPushPreferences,
+  loadGroupPushPreferences,
+  updateGroupPushPreference,
   type PushPreferences,
+  type GroupPushPreference,
 } from "@/lib/push";
 import {
   listOfflineTrails,
@@ -27,6 +30,9 @@ export default function SettingsDialog({ open, onClose }: Props) {
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [offlineTrails, setOfflineTrails] = useState<OfflineTrail[]>([]);
   const [clearingAll, setClearingAll] = useState(false);
+  const [groupPrefs, setGroupPrefs] = useState<GroupPushPreference[]>([]);
+  const [togglingGroup, setTogglingGroup] = useState<string | null>(null);
+  const [groupErrMsg, setGroupErrMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -41,6 +47,9 @@ export default function SettingsDialog({ open, onClose }: Props) {
     });
     void listOfflineTrails().then((list) => {
       if (!cancelled) setOfflineTrails(list);
+    });
+    void loadGroupPushPreferences().then((gp) => {
+      if (!cancelled) setGroupPrefs(gp);
     });
     return () => {
       cancelled = true;
@@ -191,6 +200,80 @@ export default function SettingsDialog({ open, onClose }: Props) {
                 </p>
               )}
           </section>
+
+          {prefs?.enabled && groupPrefs.length > 0 && (
+            <section data-testid="settings-group-push-section">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-stone-300 mb-1">
+                Per-group notifications
+              </h3>
+              <p className="text-[11px] text-stone-500 mb-2">
+                Silence pushes from individual groups without turning off
+                notifications entirely.
+              </p>
+              <div className="space-y-1">
+                {groupPrefs.map((gp) => (
+                  <div
+                    key={gp.group_id}
+                    className="flex items-center justify-between bg-[hsl(22,15%,14%)] rounded-lg px-3 py-2"
+                    data-testid={`group-push-${gp.group_id}`}
+                  >
+                    <span className="text-xs text-stone-200 truncate flex-1 min-w-0 mr-2">
+                      {gp.group_name}
+                    </span>
+                    <button
+                      role="switch"
+                      aria-checked={gp.push_enabled}
+                      aria-label={`Notifications for ${gp.group_name}`}
+                      disabled={togglingGroup === gp.group_id}
+                      onClick={async () => {
+                        setTogglingGroup(gp.group_id);
+                        setGroupErrMsg(null);
+                        try {
+                          const newVal = await updateGroupPushPreference(
+                            gp.group_id,
+                            !gp.push_enabled,
+                          );
+                          setGroupPrefs((prev) =>
+                            prev.map((p) =>
+                              p.group_id === gp.group_id
+                                ? { ...p, push_enabled: newVal }
+                                : p,
+                            ),
+                          );
+                        } catch {
+                          setGroupErrMsg("Couldn't update — try again");
+                        } finally {
+                          setTogglingGroup(null);
+                        }
+                      }}
+                      data-testid={`group-push-toggle-${gp.group_id}`}
+                      className={`relative shrink-0 w-9 h-5 rounded-full transition-colors ${
+                        gp.push_enabled ? "bg-amber-500" : "bg-stone-700"
+                      } ${
+                        togglingGroup === gp.group_id
+                          ? "opacity-50 cursor-not-allowed"
+                          : "cursor-pointer"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                          gp.push_enabled ? "translate-x-4" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {groupErrMsg && (
+                <p
+                  className="mt-2 text-[11px] text-red-400"
+                  data-testid="settings-group-push-error"
+                >
+                  {groupErrMsg}
+                </p>
+              )}
+            </section>
+          )}
 
           <section data-testid="settings-offline-section">
             <h3 className="text-xs font-bold uppercase tracking-widest text-stone-300 mb-2">

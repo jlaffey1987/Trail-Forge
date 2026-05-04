@@ -280,6 +280,42 @@ export async function disablePushOnThisDevice(): Promise<void> {
   }
 }
 
+export interface GroupPushPreference {
+  group_id: string;
+  group_name: string;
+  push_enabled: boolean;
+}
+
+export async function loadGroupPushPreferences(): Promise<GroupPushPreference[]> {
+  try {
+    const res = await fetch("/api/me/push/group-preferences", {
+      credentials: "include",
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as { items?: GroupPushPreference[] };
+    return json.items ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function updateGroupPushPreference(
+  groupId: string,
+  enabled: boolean,
+): Promise<boolean> {
+  const res = await fetch(`/api/me/push/group-preferences/${groupId}`, {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    throw new PushError("network", "Couldn't update group notification preference");
+  }
+  const json = (await res.json()) as { push_enabled?: boolean };
+  return json.push_enabled !== false;
+}
+
 /**
  * Convert a URL-safe base64 VAPID public key (as returned by the server)
  * into the Uint8Array shape that `pushManager.subscribe` requires.

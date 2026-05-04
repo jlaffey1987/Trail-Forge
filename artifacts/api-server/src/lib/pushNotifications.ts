@@ -173,6 +173,42 @@ export async function membersOfGroupExceptActor(
   return ((data ?? []) as Array<{ user_id: string }>).map((r) => r.user_id);
 }
 
+/**
+ * Look up every member of the given group who has NOT opted out of push
+ * for that group, excluding the actor. Falls back to the full member list
+ * if the `push_enabled` column doesn't exist yet (migration not applied).
+ */
+export async function pushEnabledMembersOfGroup(
+  groupId: string,
+  actorUserId: string,
+  log: MinimalLogger,
+): Promise<string[]> {
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from("group_members")
+    .select("user_id, push_enabled")
+    .eq("group_id", groupId)
+    .neq("user_id", actorUserId);
+  if (error) {
+    if (
+      error.code === "42703" ||
+      /column .* does not exist/i.test(error.message ?? "")
+    ) {
+      log.warn(
+        { err: error },
+        "push: push_enabled column missing, falling back to all members",
+      );
+      return membersOfGroupExceptActor(groupId, actorUserId);
+    }
+    return [];
+  }
+  return (
+    (data ?? []) as Array<{ user_id: string; push_enabled: boolean | null }>
+  )
+    .filter((r) => r.push_enabled !== false)
+    .map((r) => r.user_id);
+}
+
 interface ActorLookup {
   display_name: string | null;
   email: string | null;
@@ -225,7 +261,7 @@ export async function notifyTrailShared(
     // Each group fans out independently so the push body can name the group.
     await Promise.all(
       groupIds.map(async (gid) => {
-        const recipients = await membersOfGroupExceptActor(gid, actorUserId);
+        const recipients = await pushEnabledMembersOfGroup(gid, actorUserId, log);
         if (recipients.length === 0) return;
         const groupName = groupNames.get(gid) ?? "your group";
         await sendPushToUsers(
@@ -260,7 +296,7 @@ export async function notifyMemberJoined(
     const [groupRes, joinerLabel, recipients] = await Promise.all([
       supa.from("groups").select("name").eq("id", groupId).maybeSingle(),
       lookupActorLabel(joinerUserId),
-      membersOfGroupExceptActor(groupId, joinerUserId),
+      pushEnabledMembersOfGroup(groupId, joinerUserId, log),
     ]);
     if (recipients.length === 0) return;
     const groupName =
