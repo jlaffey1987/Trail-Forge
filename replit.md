@@ -31,6 +31,10 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
 
+## Schema preflight check
+
+The API server runs a lightweight schema preflight check on every startup (`lib/preflightCheck.ts`). It probes the `trails` table for the columns and unique index added by migration `0009_act_imports.sql` (`source_region`, `segment_hash`, and the `trails_source_segment_unique` index). If anything is missing, the server logs a clear warning but continues to serve traffic — it does not block startup. Set `SKIP_SCHEMA_PREFLIGHT=true` to suppress the check (useful for local dev against a fresh/empty database).
+
 ## Applying Supabase migrations
 
 The TrailForge live database is a Supabase project (ref `qgzbppzlwydammxxjyct`,
