@@ -5,7 +5,7 @@ import { CreateTrailBody, CreateTrailResponse } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import { mintGpxUploadTicket, consumeGpxUploadTicket } from "../lib/uploadTickets";
-import { notifyTrailShared } from "../lib/pushNotifications";
+import { notifyTrailShared, notifyTrailUnshared } from "../lib/pushNotifications";
 
 const objectStorage = new ObjectStorageService();
 
@@ -572,6 +572,7 @@ router.patch(
               );
             }
           }
+          void notifyTrailUnshared(trailId, toRemove, userId, req.log);
         }
       }
     }

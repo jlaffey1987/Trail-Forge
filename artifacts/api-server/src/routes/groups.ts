@@ -10,7 +10,10 @@ import {
 } from "../lib/objectAcl";
 import {
   notifyMemberJoined,
+  notifyMemberLeft,
   notifyTrailShared,
+  notifyTrailUnshared,
+  notifyInviteDeclined,
 } from "../lib/pushNotifications";
 
 const objectStorage = new ObjectStorageService();
@@ -1125,6 +1128,7 @@ router.post(
         req.log.warn({ err: evErr }, "log member_left event failed");
       }
     }
+    void notifyMemberLeft(idParse.data, userId, userId, req.log);
     res.json({ ok: true });
   }),
 );
@@ -1202,6 +1206,7 @@ router.delete(
         req.log.warn({ err: evErr }, "log member_left event failed");
       }
     }
+    void notifyMemberLeft(idParse.data, callerId, targetUserId, req.log);
     res.json({ ok: true });
   }),
 );
@@ -1627,7 +1632,7 @@ router.post(
     }
     const { data: invite, error: lookupErr } = await supa
       .from("group_invites")
-      .select("id, email, target_user_id, accepted_at, declined_at")
+      .select("id, group_id, email, target_user_id, accepted_at, declined_at")
       .eq("id", inviteId)
       .maybeSingle();
     if (lookupErr || !invite) {
@@ -1665,6 +1670,7 @@ router.post(
       res.status(500).json({ error: "Failed to decline invite" });
       return;
     }
+    void notifyInviteDeclined(invite.group_id, userId, req.log);
     res.json({ ok: true });
   }),
 );
@@ -2816,6 +2822,7 @@ router.put(
       // Snapshot the trail name so the feed still renders if the trail is
       // later soft- or hard-deleted.
       void logTrailUnsharedEvents(tParse.data, toRemove, userId, req.log);
+      void notifyTrailUnshared(tParse.data, toRemove, userId, req.log);
     }
 
     res.json({ ok: true, added: toAdd.length, removed: toRemove.length });

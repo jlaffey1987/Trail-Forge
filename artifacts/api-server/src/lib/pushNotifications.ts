@@ -315,3 +315,177 @@ export async function notifyMemberJoined(
     log.warn({ err, groupId }, "push: notifyMemberJoined failed");
   }
 }
+
+async function pushEnabledAdminsOfGroup(
+  groupId: string,
+  actorUserId: string,
+  log: MinimalLogger,
+): Promise<string[]> {
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from("group_members")
+    .select("user_id, push_enabled")
+    .eq("group_id", groupId)
+    .neq("user_id", actorUserId)
+    .in("role", ["owner", "admin"]);
+  if (error) {
+    if (
+      error.code === "42703" ||
+      /column .* does not exist/i.test(error.message ?? "")
+    ) {
+      log.warn(
+        { err: error },
+        "push: push_enabled column missing, falling back to all admins",
+      );
+      const retry = await supa
+        .from("group_members")
+        .select("user_id")
+        .eq("group_id", groupId)
+        .neq("user_id", actorUserId)
+        .in("role", ["owner", "admin"]);
+      if (retry.error) return [];
+      return ((retry.data ?? []) as Array<{ user_id: string }>).map(
+        (r) => r.user_id,
+      );
+    }
+    return [];
+  }
+  return (
+    (data ?? []) as Array<{ user_id: string; push_enabled: boolean | null }>
+  )
+    .filter((r) => r.push_enabled !== false)
+    .map((r) => r.user_id);
+}
+
+/**
+ * Notify every remaining member of the group (except the actor) that
+ * someone left or was removed. When `actorUserId === subjectUserId` the
+ * member left voluntarily; when they differ an admin removed them.
+ * Fire-and-forget — never throws.
+ */
+export async function notifyMemberLeft(
+  groupId: string,
+  actorUserId: string,
+  subjectUserId: string,
+  log: MinimalLogger,
+): Promise<void> {
+  if (!isPushConfigured()) return;
+  try {
+    const supa = getSupabaseAdmin();
+    const removedByAdmin = actorUserId !== subjectUserId;
+    const [groupRes, subjectLabel, recipients] = await Promise.all([
+      supa.from("groups").select("name").eq("id", groupId).maybeSingle(),
+      lookupActorLabel(subjectUserId),
+      pushEnabledMembersOfGroup(groupId, actorUserId, log),
+    ]);
+    if (recipients.length === 0) return;
+    const groupName =
+      ((groupRes.data as { name?: string | null } | null)?.name ?? "your group").toString();
+    const title = removedByAdmin
+      ? `${subjectLabel} was removed from ${groupName}`
+      : `${subjectLabel} left ${groupName}`;
+    await sendPushToUsers(
+      recipients,
+      {
+        title,
+        body: "Tap to see the group",
+        url: `/?group=${encodeURIComponent(groupId)}`,
+        tag: `member-left:${groupId}:${subjectUserId}`,
+      },
+      log,
+    );
+  } catch (err) {
+    log.warn({ err, groupId }, "push: notifyMemberLeft failed");
+  }
+}
+
+/**
+ * Notify every member of the affected groups (except the actor) that a
+ * trail was unshared. Mirrors `notifyTrailShared` but with an "unshared"
+ * body. Fire-and-forget — never throws.
+ */
+export async function notifyTrailUnshared(
+  trailId: string,
+  groupIds: string[],
+  actorUserId: string,
+  log: MinimalLogger,
+): Promise<void> {
+  if (groupIds.length === 0) return;
+  if (!isPushConfigured()) return;
+  try {
+    const supa = getSupabaseAdmin();
+    const [trailRes, groupsRes, actorLabel] = await Promise.all([
+      supa.from("trails").select("id, name").eq("id", trailId).maybeSingle(),
+      supa.from("groups").select("id, name").in("id", groupIds),
+      lookupActorLabel(actorUserId),
+    ]);
+    const trailName =
+      ((trailRes.data as { name?: string | null } | null)?.name ?? "a trail").toString();
+    const groupNames = new Map<string, string>();
+    for (const g of (groupsRes.data ?? []) as Array<{
+      id: string;
+      name: string;
+    }>) {
+      groupNames.set(g.id, g.name);
+    }
+    await Promise.all(
+      groupIds.map(async (gid) => {
+        const recipients = await pushEnabledMembersOfGroup(
+          gid,
+          actorUserId,
+          log,
+        );
+        if (recipients.length === 0) return;
+        const groupName = groupNames.get(gid) ?? "your group";
+        await sendPushToUsers(
+          recipients,
+          {
+            title: `Trail removed from ${groupName}`,
+            body: `${actorLabel} stopped sharing "${trailName}"`,
+            url: `/?group=${encodeURIComponent(gid)}`,
+            tag: `trail-unshared:${trailId}:${gid}`,
+          },
+          log,
+        );
+      }),
+    );
+  } catch (err) {
+    log.warn({ err, trailId }, "push: notifyTrailUnshared failed");
+  }
+}
+
+/**
+ * Notify owners/admins of the group (not the decliner) that an invite was
+ * declined. Regular members do not see this — it's an administrative
+ * signal only. Fire-and-forget — never throws.
+ */
+export async function notifyInviteDeclined(
+  groupId: string,
+  declinerUserId: string,
+  log: MinimalLogger,
+): Promise<void> {
+  if (!isPushConfigured()) return;
+  try {
+    const supa = getSupabaseAdmin();
+    const [groupRes, declinerLabel, recipients] = await Promise.all([
+      supa.from("groups").select("name").eq("id", groupId).maybeSingle(),
+      lookupActorLabel(declinerUserId),
+      pushEnabledAdminsOfGroup(groupId, declinerUserId, log),
+    ]);
+    if (recipients.length === 0) return;
+    const groupName =
+      ((groupRes.data as { name?: string | null } | null)?.name ?? "your group").toString();
+    await sendPushToUsers(
+      recipients,
+      {
+        title: "Invite declined",
+        body: `${declinerLabel} declined the invitation to ${groupName}`,
+        url: `/?group=${encodeURIComponent(groupId)}`,
+        tag: `invite-declined:${groupId}:${declinerUserId}`,
+      },
+      log,
+    );
+  } catch (err) {
+    log.warn({ err, groupId }, "push: notifyInviteDeclined failed");
+  }
+}
