@@ -507,34 +507,81 @@ export default function MyTrailsTab() {
 
   return (
     <div className="flex flex-col h-full tf-scroll relative">
-      <div className="px-4 pt-4 pb-2 flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-bold tracking-wide text-amber-400 uppercase" style={{ letterSpacing: "0.12em" }}>
-            My Trails
-          </h1>
-          {!loading && (
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>
-              <p className="text-xs text-stone-400">Synced with Supabase</p>
+      <div
+        className="relative w-full overflow-hidden"
+        style={{ height: "210px" }}
+        data-testid="my-trails-hero"
+      >
+        <picture>
+          <source media="(min-width: 520px)" srcSet="/ride-1280.jpg" />
+          <img
+            src="/ride-640.jpg"
+            srcSet="/ride-640.jpg 640w, /ride-1280.jpg 1280w"
+            sizes="(min-width: 520px) 1280px, 640px"
+            alt=""
+            loading="eager"
+            fetchPriority="high"
+            decoding="async"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ objectPosition: "center 55%" }}
+          />
+        </picture>
+        <div
+          aria-hidden
+          className="absolute inset-0"
+          style={{
+            background:
+              "linear-gradient(180deg, rgba(15,10,5,0.55) 0%, rgba(15,10,5,0.20) 35%, rgba(23,17,10,0.65) 70%, hsl(22,15%,8%) 100%)",
+          }}
+        />
+        <div className="absolute inset-0 flex flex-col justify-end px-4 pb-4">
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <h1
+                className="text-3xl font-black tracking-tight text-white uppercase leading-none"
+                style={{
+                  letterSpacing: "0.04em",
+                  textShadow: "0 2px 14px rgba(0,0,0,0.7), 0 1px 2px rgba(0,0,0,0.9)",
+                }}
+              >
+                My <span className="text-amber-400">Trails</span>
+              </h1>
+              {!loading && (
+                <p
+                  className="text-[11px] text-stone-200/95 mt-1.5 max-w-xs flex items-center gap-1.5"
+                  style={{ textShadow: "0 1px 6px rgba(0,0,0,0.85)" }}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0" />
+                  Synced with Supabase
+                </p>
+              )}
             </div>
-          )}
+            <button
+              onClick={() => setShowAddMenu(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-bold uppercase tracking-wider text-stone-900 shadow-md shrink-0"
+              style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+              data-testid="my-trails-add"
+            >
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Add Trail
+            </button>
+          </div>
         </div>
-        <button
-          onClick={() => setShowAddMenu(true)}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-bold uppercase tracking-wider text-stone-900 shadow-md"
-          style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
-          data-testid="my-trails-add"
-        >
-          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          Add Trail
-        </button>
+        <div
+          aria-hidden
+          className="absolute left-0 right-0 bottom-0 h-px"
+          style={{
+            background:
+              "linear-gradient(90deg, transparent 0%, rgba(240,168,50,0.5) 50%, transparent 100%)",
+          }}
+        />
       </div>
 
       {/* Stats Bar */}
-      <div className="mx-4 mb-3 bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-3">
+      <div className="mx-4 mt-3 mb-3 bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-3">
         <div className="grid grid-cols-3 gap-3">
           <div className="text-center">
             <div className="text-xl font-bold text-amber-400">{loading ? "—" : ownedKm}</div>

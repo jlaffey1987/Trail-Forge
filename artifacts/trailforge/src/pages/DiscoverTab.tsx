@@ -216,23 +216,64 @@ export default function DiscoverTab() {
 
   return (
     <div className="flex flex-col h-full tf-scroll">
-      {/* Title + search + filter ribbon are all part of the same sticky
-          block so the ribbon never appears to "flash then disappear" as
-          the trail feed loads and the page starts scrolling. The whole
-          header stays pinned to the top of the scroll area with a
-          subtle border that makes the pin intentional-looking. */}
+      <div
+        className="relative w-full overflow-hidden"
+        style={{ height: "210px" }}
+        data-testid="discover-hero"
+      >
+        <picture>
+          <source media="(min-width: 520px)" srcSet="/ride2-1280.jpg" />
+          <img
+            src="/ride2-640.jpg"
+            srcSet="/ride2-640.jpg 640w, /ride2-1280.jpg 1280w"
+            sizes="(min-width: 520px) 1280px, 640px"
+            alt=""
+            loading="eager"
+            fetchPriority="high"
+            decoding="async"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ objectPosition: "center 55%" }}
+          />
+        </picture>
+        <div
+          aria-hidden
+          className="absolute inset-0"
+          style={{
+            background:
+              "linear-gradient(180deg, rgba(15,10,5,0.55) 0%, rgba(15,10,5,0.20) 35%, rgba(23,17,10,0.65) 70%, hsl(22,15%,8%) 100%)",
+          }}
+        />
+        <div className="absolute inset-0 flex flex-col justify-end px-4 pb-4">
+          <h1
+            className="text-3xl font-black tracking-tight text-white uppercase leading-none"
+            style={{
+              letterSpacing: "0.04em",
+              textShadow: "0 2px 14px rgba(0,0,0,0.7), 0 1px 2px rgba(0,0,0,0.9)",
+            }}
+          >
+            Community <span className="text-amber-400">Trails</span>
+          </h1>
+          <p
+            className="text-[11px] text-stone-200/95 mt-1.5 max-w-xs"
+            style={{ textShadow: "0 1px 6px rgba(0,0,0,0.85)" }}
+          >
+            {loading ? "Loading live trails…" : `${trails.length} trails shared by the community`}
+          </p>
+        </div>
+        <div
+          aria-hidden
+          className="absolute left-0 right-0 bottom-0 h-px"
+          style={{
+            background:
+              "linear-gradient(90deg, transparent 0%, rgba(240,168,50,0.5) 50%, transparent 100%)",
+          }}
+        />
+      </div>
+
       <div
         className="sticky top-0 z-20 bg-[hsl(22,15%,8%)]/95 backdrop-blur supports-[backdrop-filter]:bg-[hsl(22,15%,8%)]/85 pt-3 pb-2 mb-1 border-b border-[hsl(30,12%,14%)]/60"
         data-testid="discover-sticky-controls"
       >
-        <div className="px-4 pb-2">
-          <h1 className="text-lg font-bold tracking-wide text-amber-400 uppercase" style={{ letterSpacing: "0.12em" }}>
-            Discover
-          </h1>
-          <p className="text-xs text-stone-400 mt-0.5">
-            {loading ? "Loading live trails..." : `${trails.length} community trails`}
-          </p>
-        </div>
         <div className="px-4 mb-2">
           <div className="relative">
             <svg viewBox="0 0 24 24" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500" fill="none" stroke="currentColor" strokeWidth="2">
