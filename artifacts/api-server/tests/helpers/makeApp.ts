@@ -14,6 +14,7 @@ import pushRouter from "../../src/routes/push";
 import aiRouter from "../../src/routes/ai";
 import meRouter from "../../src/routes/me";
 import trailsRouter from "../../src/routes/trails";
+import chatRouter from "../../src/routes/chat";
 
 export function makeApp(authUserId: string | null = null): Express {
   const app = express();
@@ -36,5 +37,6 @@ export function makeApp(authUserId: string | null = null): Express {
   app.use("/api", aiRouter);
   app.use("/api", meRouter);
   app.use("/api", trailsRouter);
+  app.use("/api", chatRouter);
   return app;
 }

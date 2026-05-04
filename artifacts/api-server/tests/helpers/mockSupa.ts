@@ -31,8 +31,13 @@ interface OrderState {
 
 type Filter =
   | { type: "eq"; col: string; val: unknown }
+  | { type: "neq"; col: string; val: unknown }
+  | { type: "gt"; col: string; val: unknown }
+  | { type: "lt"; col: string; val: unknown }
   | { type: "is"; col: string; val: unknown }
-  | { type: "in"; col: string; vals: unknown[] };
+  | { type: "not_is"; col: string; val: unknown }
+  | { type: "in"; col: string; vals: unknown[] }
+  | { type: "or"; raw: string };
 
 type Op = "select" | "insert" | "update" | "delete" | "upsert" | null;
 
@@ -120,8 +125,38 @@ export class MockSupa {
           } else {
             if (row[f.col] !== f.val) return false;
           }
+        } else if (f.type === "neq") {
+          if (row[f.col] === f.val) return false;
+        } else if (f.type === "gt") {
+          const rv = row[f.col];
+          if (rv == null || rv <= f.val) return false;
+        } else if (f.type === "lt") {
+          const rv = row[f.col];
+          if (rv == null || rv >= f.val) return false;
+        } else if (f.type === "not_is") {
+          if (f.val === null) {
+            if (row[f.col] == null) return false;
+          } else {
+            if (row[f.col] === f.val) return false;
+          }
         } else if (f.type === "in") {
           if (!f.vals.includes(row[f.col])) return false;
+        } else if (f.type === "or") {
+          const orStr = f.raw;
+          const andBlocks = orStr.split("),").map(s => s.replace(/^and\(/, "").replace(/\)$/, ""));
+          let anyMatch = false;
+          for (const block of andBlocks) {
+            const conditions = block.split(",").map(s => s.trim());
+            let blockMatch = true;
+            for (const cond of conditions) {
+              const eqMatch = /^(\w+)\.eq\.(.+)$/.exec(cond);
+              if (eqMatch) {
+                if (String(row[eqMatch[1]]) !== eqMatch[2]) blockMatch = false;
+              }
+            }
+            if (blockMatch) { anyMatch = true; break; }
+          }
+          if (!anyMatch) return false;
         }
       }
       return true;
@@ -260,16 +295,19 @@ export class MockSupa {
    */
   private _project(row: Row, cols: string): Row {
     const out: Row = { ...row };
-    const um = /users\s*\(([^)]+)\)/.exec(cols);
+    const um = /(?:users:(\w+)|users)\s*\(([^)]+)\)/.exec(cols);
     if (um) {
-      const userId =
-        (row.author_user_id as string | undefined) ??
-        (row.owner_user_id as string | undefined) ??
-        (row.user_id as string | undefined) ??
-        null;
+      const fkCol = um[1] ?? null;
+      const userId = fkCol
+        ? (row[fkCol] as string | undefined) ?? null
+        : (row.author_user_id as string | undefined) ??
+          (row.owner_user_id as string | undefined) ??
+          (row.sender_user_id as string | undefined) ??
+          (row.user_id as string | undefined) ??
+          null;
       const users = this.tables["users"] ?? [];
       const u = users.find((x) => x.id === userId) ?? null;
-      const fields = um[1]!.split(",").map((s) => s.trim());
+      const fields = (um[2] ?? um[1])!.split(",").map((s) => s.trim());
       out.users = u
         ? Object.fromEntries(fields.map((f) => [f, (u as Row)[f] ?? null]))
         : null;
@@ -357,6 +395,31 @@ class QueryBuilder implements PromiseLike<QueryResult> {
 
   is(col: string, val: unknown): this {
     this.state.filters.push({ type: "is", col, val });
+    return this;
+  }
+
+  neq(col: string, val: unknown): this {
+    this.state.filters.push({ type: "neq", col, val });
+    return this;
+  }
+
+  gt(col: string, val: unknown): this {
+    this.state.filters.push({ type: "gt", col, val });
+    return this;
+  }
+
+  lt(col: string, val: unknown): this {
+    this.state.filters.push({ type: "lt", col, val });
+    return this;
+  }
+
+  not(col: string, _operator: string, val: unknown): this {
+    this.state.filters.push({ type: "not_is", col, val });
+    return this;
+  }
+
+  or(raw: string): this {
+    this.state.filters.push({ type: "or", raw });
     return this;
   }
 

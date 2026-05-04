@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation } from "wouter";
 import {
   type GroupDetail,
   type GroupInvite,
@@ -19,6 +20,7 @@ import {
   transferGroupOwnership,
   updateGroup,
 } from "@/lib/groups";
+import { openDm } from "@/lib/chat";
 import { preparePhotoForUpload } from "@/lib/photoUpload";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import GroupGallerySection from "./GroupGallerySection";
@@ -35,6 +37,7 @@ type InviteMode = "link" | "username";
 
 export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const { userId: callerUserId } = useCurrentUser();
+  const [, setLocation] = useLocation();
   const [detail, setDetail] = useState<GroupDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [inviteMode, setInviteMode] = useState<InviteMode>("link");
@@ -51,6 +54,16 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
   const [discoverableToggling, setDiscoverableToggling] = useState(false);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleOpenDm = async (targetUserId: string) => {
+    const roomId = await openDm(targetUserId);
+    if (roomId) {
+      onClose();
+      setLocation(`/messages/${roomId}`);
+    } else {
+      setActionError("Could not start conversation");
+    }
+  };
 
   const refresh = useCallback(async () => {
     if (!groupId) return;
@@ -608,6 +621,16 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
+                        {m.user_id !== callerUserId && (
+                          <button
+                            onClick={() => void handleOpenDm(m.user_id)}
+                            className="text-[10px] font-bold uppercase tracking-wider text-stone-400 hover:text-amber-400 px-2 py-1"
+                            data-testid={`member-message-${m.user_id}`}
+                            title="Send direct message"
+                          >
+                            Message
+                          </button>
+                        )}
                         {isOwner && m.role !== "owner" && (
                           <button
                             onClick={() => setTransferTargetId(m.user_id)}

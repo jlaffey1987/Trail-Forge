@@ -22,7 +22,10 @@ import UserMenu from "@/components/UserMenu";
 import SavedTrailsMergePrompt from "@/components/SavedTrailsMergePrompt";
 import InvitesBadge from "@/components/groups/InvitesBadge";
 import NotificationsBell from "@/components/groups/NotificationsBell";
+import ChatMessagesBadge from "@/components/chat/ChatMessagesBadge";
 import InviteAcceptPage from "@/components/groups/InviteAcceptPage";
+import ChatInboxPage from "@/pages/ChatInboxPage";
+import ChatThreadPage from "@/pages/ChatThreadPage";
 import AdminPage from "@/pages/AdminPage";
 import IntroSplash from "@/components/IntroSplash";
 import { syncCurrentUser } from "@/lib/users";
@@ -392,6 +395,7 @@ function MainShell() {
             <div className={`w-1.5 h-1.5 rounded-full ${online ? "bg-green-400" : "bg-stone-500"}`}></div>
             <span className="text-[10px] text-stone-400">{online ? "GPS Active" : "GPS"}</span>
           </div>
+          <ChatMessagesBadge />
           <NotificationsBell />
           <InvitesBadge />
           <UserMenu />
@@ -540,6 +544,20 @@ function ClerkProviderWithRoutes() {
           {(params) => <InviteAcceptPage token={params.token ?? ""} />}
         </Route>
         <Route path="/admin" component={AdminPage} />
+        <Route path="/messages/:roomId">
+          {(params) => (
+            <div className="flex flex-col h-full w-full mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "560px" }}>
+              <ChatThreadPage roomId={params.roomId ?? ""} />
+            </div>
+          )}
+        </Route>
+        <Route path="/messages">
+          {() => (
+            <div className="flex flex-col h-full w-full mx-auto bg-[hsl(22,15%,8%)]" style={{ maxWidth: "560px" }}>
+              <ChatInboxPage />
+            </div>
+          )}
+        </Route>
         <Route component={MainShell} />
       </Switch>
     </ClerkProvider>

@@ -8,6 +8,7 @@ import trailContentRouter from "./trailContent";
 import groupsRouter from "./groups";
 import aiRouter from "./ai";
 import pushRouter from "./push";
+import chatRouter from "./chat";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(trailContentRouter);
 router.use(groupsRouter);
 router.use(aiRouter);
 router.use(pushRouter);
+router.use(chatRouter);
 
 export default router;
