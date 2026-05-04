@@ -51,7 +51,7 @@ export async function downloadTrailForOffline(
       phase: "gpx",
       label: "Fetching trail data…",
       done: 0,
-      total: 3,
+      total: 1,
       bytes: 0,
     });
 
@@ -63,18 +63,26 @@ export async function downloadTrailForOffline(
       typeof gpxData === "string" ? new Blob([gpxData]).size : 0;
     totalBytes += gpxSize;
 
+    if (signal?.aborted) return false;
+
+    const photos = await fetchTrailPhotos(trail.id);
+
+    const bbox = getTrailBbox(trail);
+    const tileUrls = bbox ? tilesToDownload(bbox) : [];
+    const totalSteps = 1 + photos.length + tileUrls.length;
+
     onProgress({
       phase: "photos",
-      label: "Downloading photos…",
+      label: photos.length > 0 ? `Downloading photos 0/${photos.length}…` : "No photos to download",
       done: 1,
-      total: 3,
+      total: totalSteps,
       bytes: totalBytes,
     });
 
     if (signal?.aborted) return false;
 
-    const photos = await fetchTrailPhotos(trail.id);
     const offlinePhotos: OfflinePhoto[] = [];
+    let photoDone = 0;
     for (const photo of photos) {
       if (signal?.aborted) return false;
       try {
@@ -95,31 +103,37 @@ export async function downloadTrailForOffline(
       } catch {
         /* skip failed photo */
       }
+      photoDone++;
+      onProgress({
+        phase: "photos",
+        label: `Downloading photos ${photoDone}/${photos.length}…`,
+        done: 1 + photoDone,
+        total: totalSteps,
+        bytes: totalBytes,
+      });
     }
 
-    onProgress({
-      phase: "tiles",
-      label: "Caching map tiles…",
-      done: 2,
-      total: 3,
-      bytes: totalBytes,
-    });
+    const photosComplete = 1 + photos.length;
 
     if (signal?.aborted) return false;
 
-    const bbox = getTrailBbox(trail);
-    let tileCount = 0;
-    if (bbox) {
-      const tileUrls = tilesToDownload(bbox);
-      tileCount = tileUrls.length;
+    let tileCount = tileUrls.length;
+    if (tileUrls.length > 0) {
+      onProgress({
+        phase: "tiles",
+        label: `Caching tiles 0/${tileUrls.length}…`,
+        done: photosComplete,
+        total: totalSteps,
+        bytes: totalBytes,
+      });
       const tileBytes = await cacheTiles(
         tileUrls,
         (done, total) => {
           onProgress({
             phase: "tiles",
             label: `Caching tiles ${done}/${total}…`,
-            done: 2,
-            total: 3,
+            done: photosComplete + done,
+            total: totalSteps,
             bytes: totalBytes + done * AVG_TILE_BYTES,
           });
         },
@@ -138,6 +152,7 @@ export async function downloadTrailForOffline(
       downloadedAt: new Date().toISOString(),
       tileCount,
       estimatedSizeBytes: totalBytes,
+      tileUrls,
     };
 
     await saveTrailOffline(entry);
@@ -145,8 +160,8 @@ export async function downloadTrailForOffline(
     onProgress({
       phase: "done",
       label: "Downloaded!",
-      done: 3,
-      total: 3,
+      done: totalSteps,
+      total: totalSteps,
       bytes: totalBytes,
     });
 
@@ -170,7 +185,7 @@ async function fetchTrailPhotos(trailId: string): Promise<TrailPhoto[]> {
     const res = await fetch(`/api/trails/${trailId}/photos`);
     if (!res.ok) return [];
     const json = await res.json();
-    return (json.photos ?? json) as TrailPhoto[];
+    return (json.items ?? json.photos ?? []) as TrailPhoto[];
   } catch {
     return [];
   }

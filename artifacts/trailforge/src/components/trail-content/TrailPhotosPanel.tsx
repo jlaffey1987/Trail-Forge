@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchTrailPhotos,
   requestPhotoUploadUrl,
@@ -10,13 +10,15 @@ import {
 import { preparePhotoForUpload, MAX_PHOTOS_PER_UPLOAD } from "@/lib/photoUpload";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import PhotoLightbox from "./PhotoLightbox";
+import type { OfflinePhoto } from "@/lib/offlineStore";
 
 interface Props {
   trailId: string;
   onCountsChanged?: () => void;
+  offlinePhotos?: OfflinePhoto[];
 }
 
-export default function TrailPhotosPanel({ trailId, onCountsChanged }: Props) {
+export default function TrailPhotosPanel({ trailId, onCountsChanged, offlinePhotos }: Props) {
   const { isSignedIn, userId } = useCurrentUser();
   const [photos, setPhotos] = useState<TrailPhoto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -24,19 +26,64 @@ export default function TrailPhotosPanel({ trailId, onCountsChanged }: Props) {
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [usingOfflinePhotos, setUsingOfflinePhotos] = useState(false);
+
+  const offlineBlobUrls = useMemo(() => {
+    if (!offlinePhotos?.length) return new Map<string, string>();
+    const map = new Map<string, string>();
+    for (const op of offlinePhotos) {
+      map.set(op.storageKey, URL.createObjectURL(op.blob));
+    }
+    return map;
+  }, [offlinePhotos]);
+
+  useEffect(() => {
+    return () => {
+      for (const url of offlineBlobUrls.values()) {
+        URL.revokeObjectURL(url);
+      }
+    };
+  }, [offlineBlobUrls]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setUsingOfflinePhotos(false);
+
+    const useOfflineFallback = () => {
+      if (offlinePhotos?.length) {
+        setPhotos(
+          offlinePhotos.map((op, i) => ({
+            id: `offline-${i}`,
+            trail_id: trailId,
+            storage_key: op.storageKey,
+            width: op.width,
+            height: op.height,
+            caption: op.caption ?? null,
+            created_at: "",
+            author_user_id: "",
+            hidden_at: null,
+            users: null,
+          })),
+        );
+        setUsingOfflinePhotos(true);
+      }
+      setLoading(false);
+    };
+
     fetchTrailPhotos(trailId).then((items) => {
       if (cancelled) return;
-      setPhotos(items);
-      setLoading(false);
+      if (items.length === 0 && !navigator.onLine && offlinePhotos?.length) {
+        useOfflineFallback();
+      } else {
+        setPhotos(items);
+        setLoading(false);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [trailId]);
+  }, [trailId, offlinePhotos]);
 
   const onPickFiles = () => fileInputRef.current?.click();
 
@@ -157,7 +204,7 @@ export default function TrailPhotosPanel({ trailId, onCountsChanged }: Props) {
                 aria-label="Open photo"
               >
                 <img
-                  src={trailPhotoUrl(photo)}
+                  src={usingOfflinePhotos && offlineBlobUrls.has(photo.storage_key) ? offlineBlobUrls.get(photo.storage_key)! : trailPhotoUrl(photo)}
                   alt={photo.caption ?? "Trail photo"}
                   className="w-full h-full object-cover"
                   loading="lazy"
@@ -188,6 +235,7 @@ export default function TrailPhotosPanel({ trailId, onCountsChanged }: Props) {
           onClose={() => setLightboxIndex(null)}
           onPrev={() => setLightboxIndex((i) => (i === null ? null : (i - 1 + photos.length) % photos.length))}
           onNext={() => setLightboxIndex((i) => (i === null ? null : (i + 1) % photos.length))}
+          blobUrlMap={usingOfflinePhotos ? offlineBlobUrls : undefined}
         />
       ) : null}
     </div>

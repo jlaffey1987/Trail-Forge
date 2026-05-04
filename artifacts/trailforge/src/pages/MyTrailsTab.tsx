@@ -26,11 +26,13 @@ import {
 } from "@/lib/trailContent";
 import {
   downloadTrailForOffline,
+  estimateDownloadSize,
   formatBytes,
   type DownloadProgress,
 } from "@/lib/downloadManager";
 import { useOfflineTrails } from "@/hooks/useOfflineTrails";
-import { removeOfflineTrail } from "@/lib/offlineStore";
+import { useOnlineStatus } from "@/hooks/useOnlineStatus";
+import { removeOfflineTrail, listOfflineTrails } from "@/lib/offlineStore";
 import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTrailMenu";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import EditTrailDialog from "@/components/contribute/EditTrailDialog";
@@ -257,7 +259,9 @@ export default function MyTrailsTab() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
   const [downloadAbort, setDownloadAbort] = useState<AbortController | null>(null);
+  const [confirmDownload, setConfirmDownload] = useState<{ trail: Trail; estimatedBytes: number; tileCount: number } | null>(null);
   const offlineTrails = useOfflineTrails();
+  const online = useOnlineStatus();
 
   const refreshSavedRoutes = useCallback(async () => {
     if (!userId) {
@@ -422,7 +426,19 @@ export default function MyTrailsTab() {
     void Promise.all([
       fetchSavedTrails(owner),
       userId ? fetchOwnedTrails() : Promise.resolve([] as Trail[]),
-    ]).then(([saved, owned]) => {
+    ]).then(async ([saved, owned]) => {
+      if (saved.length === 0 && owned.length === 0 && !navigator.onLine) {
+        try {
+          const offline = await listOfflineTrails();
+          if (offline.length > 0) {
+            setSavedTrails(offline.map((o) => o.trail));
+            setLoading(false);
+            return;
+          }
+        } catch {
+          /* IndexedDB unavailable */
+        }
+      }
       setSavedTrails(saved);
       setOwnedTrails(owned);
       setLoading(false);
@@ -496,7 +512,7 @@ export default function MyTrailsTab() {
     }
   };
 
-  const handleDownloadOffline = async (trail: Trail) => {
+  const startDownload = async (trail: Trail) => {
     const ac = new AbortController();
     setDownloadingId(trail.id);
     setDownloadAbort(ac);
@@ -509,6 +525,19 @@ export default function MyTrailsTab() {
     } else if (!ac.signal.aborted) {
       setToast("Download failed — try again");
     }
+  };
+
+  const handleDownloadOffline = (trail: Trail) => {
+    const estimate = estimateDownloadSize(trail);
+    if (estimate.needsConfirm) {
+      setConfirmDownload({
+        trail,
+        estimatedBytes: estimate.estimatedBytes,
+        tileCount: estimate.tileCount,
+      });
+      return;
+    }
+    void startDownload(trail);
   };
 
   const handleCancelDownload = () => {
@@ -1109,15 +1138,24 @@ export default function MyTrailsTab() {
                     </div>
                   </button>
                   <div className="flex flex-col items-end gap-1 shrink-0">
-                    {offlineTrails.trails.some((o) => o.id === trail.id) ? (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-green-400 bg-green-900/30" data-testid={`saved-trail-offline-badge-${trail.id}`}>
-                        Offline
-                      </span>
-                    ) : (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30">
-                        Planned
-                      </span>
-                    )}
+                    {(() => {
+                      const offlineEntry = offlineTrails.trails.find((o) => o.id === trail.id);
+                      if (offlineEntry) {
+                        const downloadedLabel = offlineEntry.downloadedAt
+                          ? new Date(offlineEntry.downloadedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })
+                          : null;
+                        return (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-green-400 bg-green-900/30" data-testid={`saved-trail-offline-badge-${trail.id}`}>
+                            Offline{downloadedLabel ? ` · ${downloadedLabel}` : ""}
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30">
+                          Planned
+                        </span>
+                      );
+                    })()}
                     <button
                       type="button"
                       onClick={() => setExpandedId(isExpanded ? null : trail.id)}
@@ -1347,6 +1385,45 @@ export default function MyTrailsTab() {
           </div>
         );
       })()}
+
+      {/* Large download confirm */}
+      {confirmDownload && (
+        <div
+          className="fixed inset-0 z-[2700] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.85)" }}
+          role="dialog"
+          aria-modal="true"
+          data-testid="large-download-confirm"
+        >
+          <div className="w-full max-w-sm bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,22%)] rounded-2xl p-5">
+            <h3 className="text-base font-bold text-amber-400 uppercase tracking-wider mb-2">Large Download</h3>
+            <p className="text-xs text-stone-400 mb-4">
+              This trail requires approximately <strong className="text-stone-200">{formatBytes(confirmDownload.estimatedBytes)}</strong> of
+              satellite tiles ({confirmDownload.tileCount.toLocaleString()} tiles). Downloading on mobile data may
+              use significant bandwidth.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmDownload(null)}
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-stone-300 border border-stone-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const trail = confirmDownload.trail;
+                  setConfirmDownload(null);
+                  void startDownload(trail);
+                }}
+                className="flex-1 py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider text-white bg-amber-600"
+                data-testid="large-download-confirm-button"
+              >
+                Download Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirm */}
       {confirmDeleteId && (

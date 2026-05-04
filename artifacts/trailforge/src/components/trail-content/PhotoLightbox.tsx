@@ -7,9 +7,10 @@ interface Props {
   onClose: () => void;
   onPrev: () => void;
   onNext: () => void;
+  blobUrlMap?: Map<string, string>;
 }
 
-export default function PhotoLightbox({ photos, index, onClose, onPrev, onNext }: Props) {
+export default function PhotoLightbox({ photos, index, onClose, onPrev, onNext, blobUrlMap }: Props) {
   const photo = photos[index];
 
   useEffect(() => {
@@ -70,7 +71,7 @@ export default function PhotoLightbox({ photos, index, onClose, onPrev, onNext }
       ) : null}
       <figure className="max-w-full max-h-full p-6" onClick={(e) => e.stopPropagation()}>
         <img
-          src={trailPhotoUrl(photo)}
+          src={blobUrlMap?.get(photo.storage_key) ?? trailPhotoUrl(photo)}
           alt={photo.caption ?? "Trail photo"}
           className="max-w-full max-h-[80vh] object-contain rounded"
         />

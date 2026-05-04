@@ -28,6 +28,7 @@ export interface OfflineTrail {
   downloadedAt: string;
   tileCount: number;
   estimatedSizeBytes: number;
+  tileUrls: string[];
 }
 
 export interface OfflinePhoto {
@@ -87,6 +88,7 @@ export async function getOfflineTrail(
 }
 
 export async function removeOfflineTrail(id: string): Promise<void> {
+  const trailData = await getOfflineTrail(id);
   const db = await openDB();
   const tx = db.transaction(TRAIL_STORE, "readwrite");
   tx.objectStore(TRAIL_STORE).delete(id);
@@ -94,7 +96,9 @@ export async function removeOfflineTrail(id: string): Promise<void> {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
-  await removeTilesForTrail(id);
+  if (trailData?.tileUrls?.length) {
+    await removeTilesForTrail(trailData.tileUrls);
+  }
   notifyStoreChange();
 }
 
@@ -245,8 +249,24 @@ export async function cacheTiles(
   return totalBytes;
 }
 
-async function removeTilesForTrail(_trailId: string): Promise<void> {
-  /* noop — tiles are shared across trails, cleaned up by clearAllOffline */
+async function removeTilesForTrail(removedTileUrls: string[]): Promise<void> {
+  const remaining = await listOfflineTrails();
+  const sharedUrls = new Set<string>();
+  for (const t of remaining) {
+    for (const url of t.tileUrls ?? []) {
+      sharedUrls.add(url);
+    }
+  }
+  try {
+    const cache = await caches.open(TILE_CACHE_NAME);
+    for (const url of removedTileUrls) {
+      if (!sharedUrls.has(url)) {
+        await cache.delete(url);
+      }
+    }
+  } catch {
+    /* Cache API may be unavailable */
+  }
 }
 
 export async function enqueueAction(action: Omit<QueuedAction, "id" | "createdAt" | "retries">): Promise<void> {

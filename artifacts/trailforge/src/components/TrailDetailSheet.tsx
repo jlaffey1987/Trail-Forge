@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useLocation } from "wouter";
-import { type Trail, saveTrail, fetchTrailGpxByIds } from "@/lib/supabase";
+import { type Trail, saveTrail, fetchTrailGpxByIds, populateTrailGpxCache } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { getDifficultyColor } from "@/lib/trailLayer";
 import { useIsTrailOffline } from "@/hooks/useOfflineTrails";
-import { getOfflineTrail } from "@/lib/offlineStore";
+import { getOfflineTrail, type OfflineTrail } from "@/lib/offlineStore";
 import {
   addRouteTrail,
   removeRouteTrail,
@@ -108,6 +108,15 @@ export default function TrailDetailSheet({
   }, [trail.id]);
 
   const isOffline = useIsTrailOffline(trail.id);
+  const [offlineData, setOfflineData] = useState<OfflineTrail | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOfflineTrail(trail.id)
+      .then((data) => { if (!cancelled) setOfflineData(data); })
+      .catch(() => { if (!cancelled) setOfflineData(null); });
+    return () => { cancelled = true; };
+  }, [trail.id]);
 
   useEffect(() => {
     if (trail.gpx_data != null) {
@@ -121,6 +130,7 @@ export default function TrailDetailSheet({
       try {
         const offline = await getOfflineTrail(trail.id);
         if (offline?.gpxData) {
+          populateTrailGpxCache(trail.id, offline.gpxData);
           if (!cancelled) setGpxLoading(false);
           return;
         }
@@ -326,6 +336,23 @@ export default function TrailDetailSheet({
                 {counts.notes} notes · {counts.photos} photos · {counts.pending} pending edits
               </p>
               <RiddenBadgeInline trailId={trail.id} />
+              {isOffline && (
+                <span
+                  className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider text-green-300 bg-green-500/15 border border-green-500/40"
+                  data-testid="trail-detail-offline-badge"
+                  title={offlineData?.downloadedAt ? `Downloaded ${new Date(offlineData.downloadedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : "Available offline"}
+                >
+                  <svg viewBox="0 0 24 24" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth="3">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  Available offline
+                  {offlineData?.downloadedAt && (
+                    <span className="text-green-400/70 font-normal normal-case">
+                      {" · "}{new Date(offlineData.downloadedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                    </span>
+                  )}
+                </span>
+              )}
 
               {gpxLoading ? (
                 <div
@@ -439,7 +466,7 @@ export default function TrailDetailSheet({
             <TrailNotesPanel trailId={trail.id} onCountsChanged={refreshCounts} />
           ) : null}
           {activeTab === "photos" ? (
-            <TrailPhotosPanel trailId={trail.id} onCountsChanged={refreshCounts} />
+            <TrailPhotosPanel trailId={trail.id} onCountsChanged={refreshCounts} offlinePhotos={offlineData?.photos} />
           ) : null}
           {activeTab === "amendments" ? (
             <TrailAmendmentsPanel

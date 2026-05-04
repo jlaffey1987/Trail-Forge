@@ -342,6 +342,10 @@ const trailGpxGeneration = new Map<string, number>();
  * the same id, so a request that was already on the wire when the
  * mutation happened can't repopulate the cache with a stale value.
  */
+export function populateTrailGpxCache(trailId: string, gpxData: unknown): void {
+  trailGpxCache.set(trailId, gpxData);
+}
+
 export function invalidateTrailGpxCache(trailId?: string): void {
   if (trailId == null) {
     trailGpxCache.clear();
