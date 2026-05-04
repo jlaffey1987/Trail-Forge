@@ -203,6 +203,10 @@ export function getTrailEnd(waypoints: Waypoint[]): Waypoint | null {
   return waypoints[waypoints.length - 1] ?? null;
 }
 
+export function reverseWaypoints(waypoints: Waypoint[]): Waypoint[] {
+  return [...waypoints].reverse();
+}
+
 function haversineKm(a: Waypoint, b: Waypoint): number {
   const R = 6371;
   const dLat = ((b.lat - a.lat) * Math.PI) / 180;

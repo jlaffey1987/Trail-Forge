@@ -65,7 +65,7 @@ export type RouteSection =
 
 export interface AssembledRoute {
   start: GeoPoint;
-  end: GeoPoint;
+  end: GeoPoint | null;
   sections: RouteSection[];
   totalDistanceKm: number;
   totalDurationMin: number;
@@ -459,9 +459,63 @@ export type RouteEntry =
   | { kind: "trail"; trail: Trail }
   | { kind: "waypoint"; waypoint: RouteWaypoint };
 
+export function orderTrailsNearestNeighbour(
+  start: GeoPoint,
+  trails: Trail[],
+): Trail[] {
+  if (trails.length <= 1) return trails;
+
+  const withGpx: Trail[] = [];
+  const withoutGpx: Trail[] = [];
+  for (const t of trails) {
+    const wps = parseGPX(t.gpx_data);
+    if (wps.length >= 2) withGpx.push(t);
+    else withoutGpx.push(t);
+  }
+
+  if (withGpx.length <= 1) return [...withGpx, ...withoutGpx];
+
+  const remaining = [...withGpx];
+  const ordered: Trail[] = [];
+  let current = start;
+
+  while (remaining.length > 0) {
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    let bestReversed = false;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const wps = parseGPX(remaining[i].gpx_data);
+      const entry: GeoPoint = { lat: wps[0].lat, lng: wps[0].lon };
+      const exit: GeoPoint = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
+
+      const dEntry = haversineM(current, entry);
+      const dExit = haversineM(current, exit);
+      const d = Math.min(dEntry, dExit);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+        bestReversed = dExit < dEntry;
+      }
+    }
+
+    const picked = remaining.splice(bestIdx, 1)[0];
+    ordered.push(picked);
+
+    const wps = parseGPX(picked.gpx_data);
+    if (bestReversed) {
+      current = { lat: wps[0].lat, lng: wps[0].lon };
+    } else {
+      current = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
+    }
+  }
+
+  return [...ordered, ...withoutGpx];
+}
+
 export async function assembleMultiModalRoute(
   start: GeoPoint,
-  end: GeoPoint,
+  end: GeoPoint | null,
   trailsOrEntries: Trail[] | RouteEntry[],
   onProgress?: (step: number, total: number, label: string) => void,
 ): Promise<AssembledRoute> {
@@ -489,9 +543,7 @@ export async function assembleMultiModalRoute(
   let sectionIdx = 0;
   let trailCount = 0;
 
-  // Each entry contributes one road leg + one stop section (trail or
-  // waypoint). The extra +1 is the final road leg back to `end`.
-  const totalSteps = entries.length * 2 + 1;
+  const totalSteps = entries.length * 2 + (end ? 1 : 0);
   let stepNo = 0;
 
   // Trails coming from the slim Map-tab fetch don't carry `gpx_data`. We
@@ -558,11 +610,17 @@ export async function assembleMultiModalRoute(
     const wps = parseGPX(trail.gpx_data);
     if (wps.length < 2) {
       skippedTrails.push(trail.name);
-      // Skip both progress steps for this trail to keep the bar accurate.
       stepNo += 2;
       continue;
     }
     trailCount++;
+
+    const dToFirst = haversineM(currentPoint, { lat: wps[0].lat, lng: wps[0].lon });
+    const dToLast = haversineM(currentPoint, { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon });
+    if (dToLast < dToFirst) {
+      wps.reverse();
+    }
+
     const trailEntry: GeoPoint = { lat: wps[0].lat, lng: wps[0].lon };
     const trailExit: GeoPoint = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
 
@@ -605,23 +663,24 @@ export async function assembleMultiModalRoute(
     await new Promise((r) => setTimeout(r, 250));
   }
 
-  // Final road segment to end
-  stepNo++;
-  onProgress?.(stepNo, totalSteps, `Routing final road to ${end.label || "destination"}`);
-  const finalRoute = await getRoadRoute([currentPoint, end]);
-  if (finalRoute) {
-    sections.push({
-      kind: "road",
-      index: sectionIdx++,
-      from: currentPoint,
-      to: end,
-      route: finalRoute,
-      label: `${currentLabel} → ${end.label || "Destination"}`,
-    });
-    totalRoadKm += finalRoute.distanceKm;
-    totalRoadDurationMin += finalRoute.durationMin;
-  } else {
-    failedRoadSegments++;
+  if (end) {
+    stepNo++;
+    onProgress?.(stepNo, totalSteps, `Routing final road to ${end.label || "destination"}`);
+    const finalRoute = await getRoadRoute([currentPoint, end]);
+    if (finalRoute) {
+      sections.push({
+        kind: "road",
+        index: sectionIdx++,
+        from: currentPoint,
+        to: end,
+        route: finalRoute,
+        label: `${currentLabel} → ${end.label || "Destination"}`,
+      });
+      totalRoadKm += finalRoute.distanceKm;
+      totalRoadDurationMin += finalRoute.durationMin;
+    } else {
+      failedRoadSegments++;
+    }
   }
 
   // Keep the unused trailCount lint-clean; it documents the parsed trail

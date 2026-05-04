@@ -511,16 +511,18 @@ export default function NavigationView({
         iconSize: [24, 24], iconAnchor: [12, 12], className: "",
       }),
     }).addTo(map);
-    const endMarker = L.marker([activeRoute.end.lat, activeRoute.end.lng], {
-      icon: L.divIcon({
-        html: `<div style="background:#dc2626;width:24px;height:24px;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#fff;">B</div>`,
-        iconSize: [24, 24], iconAnchor: [12, 12], className: "",
-      }),
-    }).addTo(map);
     sectionLayersRef.current.set(-1, startMarker);
-    sectionLayersRef.current.set(-2, endMarker);
     allBounds.push([activeRoute.start.lat, activeRoute.start.lng]);
-    allBounds.push([activeRoute.end.lat, activeRoute.end.lng]);
+    if (activeRoute.end) {
+      const endMarker = L.marker([activeRoute.end.lat, activeRoute.end.lng], {
+        icon: L.divIcon({
+          html: `<div style="background:#dc2626;width:24px;height:24px;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#fff;">B</div>`,
+          iconSize: [24, 24], iconAnchor: [12, 12], className: "",
+        }),
+      }).addTo(map);
+      sectionLayersRef.current.set(-2, endMarker);
+      allBounds.push([activeRoute.end.lat, activeRoute.end.lng]);
+    }
 
     activeRoute.sections.forEach((sec) => {
       const isActive = activeSection === sec.index;
@@ -858,7 +860,7 @@ export default function NavigationView({
           <div className="text-center">
             <div className="text-[10px] text-stone-500 uppercase tracking-widest">Trip Navigation</div>
             <div className="text-xs font-bold text-amber-400">
-              {activeRoute.start.label?.split(",")[0] || "Start"} → {activeRoute.end.label?.split(",")[0] || "End"}
+              {activeRoute.start.label?.split(",")[0] || "Start"}{activeRoute.end ? ` → ${activeRoute.end.label?.split(",")[0] || "End"}` : ""}
             </div>
           </div>
           <div className="flex items-center gap-1.5">
@@ -1651,14 +1653,15 @@ function SectionsList({
         );
       })}
 
-      {/* End node */}
-      <div className="flex items-center gap-3 py-2">
-        <div className="w-7 h-7 rounded-full bg-red-500 text-white flex items-center justify-center text-xs font-black shrink-0">B</div>
-        <div className="flex-1 min-w-0">
-          <div className="text-xs font-bold text-red-400">DESTINATION</div>
-          <div className="text-[10px] text-stone-400 truncate">{route.end.label || `${route.end.lat.toFixed(4)}, ${route.end.lng.toFixed(4)}`}</div>
+      {route.end && (
+        <div className="flex items-center gap-3 py-2">
+          <div className="w-7 h-7 rounded-full bg-red-500 text-white flex items-center justify-center text-xs font-black shrink-0">B</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-bold text-red-400">DESTINATION</div>
+            <div className="text-[10px] text-stone-400 truncate">{route.end.label || `${route.end.lat.toFixed(4)}, ${route.end.lng.toFixed(4)}`}</div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

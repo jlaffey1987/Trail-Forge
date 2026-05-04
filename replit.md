@@ -37,6 +37,9 @@ The project is structured as a pnpm monorepo.
     - `NavigationView` features heading-up map rotation, motorbike SVG marker, and a compass widget. Uses CARTO Dark Matter road-focused tiles (not satellite). Smooth following with 5m threshold, 0.6s pan animation, forward-look bias in heading-up mode.
     - `useHeading.ts` for device orientation and GPS heading with heavy low-pass smoothing (α=0.05), 3° dead zone, render-gated setState.
     - `navigationReroute.ts` for off-route detection, with auto re-routing on road sections via OSRM.
+    - **Trails-only routing:** End destination is optional when trails are in the route. `AssembledRoute.end` is `GeoPoint | null`; when null, no final road leg is built and NavigationView omits the B marker.
+    - **Auto-order:** `orderTrailsNearestNeighbour` in `routing.ts` reorders trails using a greedy nearest-neighbour algorithm, evaluating both endpoints of each trail for bidirectional access. Waypoint positions are preserved during reordering.
+    - **Bidirectional trail access:** `assembleMultiModalRoute` evaluates distance from current point to both ends of each trail and reverses waypoints if entering from the far end is shorter.
 - **Draw Trail Point Editing:**
     - In draw mode, waypoint markers are numbered (A, 2, 3…B). Tap a marker to select it (turns blue); the bottom bar shows coordinates and a red "Remove" button that deletes just that point (polyline reconnects through remaining points). A blue ⊗ button also appears in the top toolbar.
     - Long-press (400ms, 10px movement threshold) a marker to enter drag mode and reposition it — the polyline updates on drop.

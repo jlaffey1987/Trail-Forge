@@ -10,10 +10,12 @@ import {
   geocode,
   reverseGeocode,
   assembleMultiModalRoute,
+  orderTrailsNearestNeighbour,
   type GeoPoint,
   type AssembledRoute,
   type RouteWaypoint,
 } from "@/lib/routing";
+import { fetchTrailGpxByIds } from "@/lib/supabase";
 import {
   useRouteTrails,
   useRouteEntries,
@@ -801,9 +803,14 @@ export default function PlannerTab() {
 
     const missingStart = !startLocation.trim();
     const missingEnd = !endLocation.trim();
-    if (missingStart || missingEnd) {
+    const hasTrails = routeTrails.length > 0;
+    if (missingStart || (missingEnd && !hasTrails)) {
       setHighlightInputs(true);
-      const which = missingStart && missingEnd ? "start address and destination" : missingStart ? "start address" : "destination";
+      const which = missingStart && (missingEnd && !hasTrails)
+        ? "start address and destination"
+        : missingStart
+          ? "start address"
+          : "destination (or add trails to your route)";
       setPlanError(`Please enter your ${which} above to plan navigation.`);
       const container = scrollerRef.current;
       if (container) container.scrollTo({ top: 0, behavior: "smooth" });
@@ -842,27 +849,52 @@ export default function PlannerTab() {
         return;
       }
 
-      setPlanProgress({ step: 10, total: 100, label: "Looking up destination..." });
-
-      // Geocode end
       let endPt: GeoPoint | null = null;
-      if (geocodedEnd && geocodedEnd.q === endLocation.trim()) {
-        endPt = geocodedEnd.pt;
-      } else {
-        endPt = await geocode(endLocation);
-        if (endPt) setGeocodedEnd({ q: endLocation.trim(), pt: endPt });
-      }
-      if (!endPt) {
-        setPlanError(`Could not find "${endLocation}". Try a more specific address.`);
-        setPlanningTrip(false);
-        setPlanProgress(null);
-        return;
+      const hasEndInput = endLocation.trim().length > 0;
+      if (hasEndInput) {
+        setPlanProgress({ step: 10, total: 100, label: "Looking up destination..." });
+        if (geocodedEnd && geocodedEnd.q === endLocation.trim()) {
+          endPt = geocodedEnd.pt;
+        } else {
+          endPt = await geocode(endLocation);
+          if (endPt) setGeocodedEnd({ q: endLocation.trim(), pt: endPt });
+        }
+        if (!endPt) {
+          setPlanError(`Could not find "${endLocation}". Try a more specific address.`);
+          setPlanningTrip(false);
+          setPlanProgress(null);
+          return;
+        }
       }
 
-      // Assemble route — use the entries-aware overload so any custom
-      // waypoints the rider added (fuel, campsite, etc.) become real road
-      // legs in the trip.
-      const entriesForAssembly = routeEntries.map((e) =>
+      let orderedEntries = routeEntries;
+      if (routeTrails.length > 1) {
+        setPlanProgress({ step: 12, total: 100, label: "Optimizing trail order..." });
+        const trailsRaw = routeTrails;
+        const missingGpxIds = trailsRaw.filter((t) => t.gpx_data == null).map((t) => t.id);
+        let hydratedTrails = trailsRaw;
+        if (missingGpxIds.length > 0) {
+          const gpxMap = await fetchTrailGpxByIds(missingGpxIds);
+          hydratedTrails = trailsRaw.map((t) => {
+            if (t.gpx_data != null) return t;
+            const g = gpxMap.get(t.id);
+            return g != null ? { ...t, gpx_data: g } : t;
+          });
+        }
+        const sorted = orderTrailsNearestNeighbour(startPt, hydratedTrails);
+        const trailSlots: number[] = [];
+        for (let i = 0; i < routeEntries.length; i++) {
+          if (routeEntries[i].kind === "trail") trailSlots.push(i);
+        }
+        const reordered = [...routeEntries];
+        for (let s = 0; s < trailSlots.length && s < sorted.length; s++) {
+          reordered[trailSlots[s]] = { kind: "trail" as const, trail: sorted[s] };
+        }
+        orderedEntries = reordered;
+        setRouteEntries(orderedEntries);
+      }
+
+      const entriesForAssembly = orderedEntries.map((e) =>
         e.kind === "trail"
           ? { kind: "trail" as const, trail: e.trail }
           : { kind: "waypoint" as const, waypoint: e.waypoint },
@@ -1090,7 +1122,7 @@ export default function PlannerTab() {
                 endSeqRef.current++;
                 setPlanError(null);
               }}
-              placeholder="Destination (UK or Ireland — e.g. Snowdonia, Killarney)"
+              placeholder={routeTrails.length > 0 ? "Destination (optional with trails)" : "Destination (UK or Ireland — e.g. Snowdonia, Killarney)"}
               dotColor="#f0a832"
               highlight={highlightInputs}
               confirmed={!!geocodedEnd && geocodedEnd.q === endLocation.trim()}
@@ -1201,7 +1233,7 @@ export default function PlannerTab() {
             </button>
             <button
               onClick={handlePlanTrip}
-              disabled={planningTrip || !startLocation.trim() || !endLocation.trim()}
+              disabled={planningTrip || !startLocation.trim() || (!endLocation.trim() && routeTrails.length === 0)}
               className="py-4 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-40"
               style={{ background: "linear-gradient(135deg, #1d4ed8 0%, #3b82f6 50%, #1d4ed8 100%)", color: "#fff" }}
             >
@@ -1391,7 +1423,7 @@ export default function PlannerTab() {
             {/* Build Navigation button at the bottom of results */}
             <button
               onClick={handlePlanTrip}
-              disabled={planningTrip || !startLocation.trim() || !endLocation.trim()}
+              disabled={planningTrip || !startLocation.trim() || (!endLocation.trim() && routeTrails.length === 0)}
               className="w-full mt-4 py-3.5 rounded-xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-40"
               style={{ background: "linear-gradient(135deg, #1d4ed8 0%, #3b82f6 50%, #1d4ed8 100%)", color: "#fff" }}
             >
@@ -1554,8 +1586,8 @@ export default function PlannerTab() {
             </button>
             <button
               onClick={handlePlanTrip}
-              disabled={planningTrip || (!startLocation.trim() || !endLocation.trim())}
-              title={!startLocation.trim() || !endLocation.trim() ? "Enter start and end addresses to plan navigation" : undefined}
+              disabled={planningTrip || !startLocation.trim() || (!endLocation.trim() && routeTrails.length === 0)}
+              title={!startLocation.trim() || (!endLocation.trim() && routeTrails.length === 0) ? "Enter start address to plan navigation" : undefined}
               className="py-2.5 rounded-lg text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 text-stone-900 disabled:opacity-50 shadow-lg shadow-amber-900/30"
               style={{ background: "linear-gradient(135deg, #d4870c 0%, #f0a832 50%, #d4870c 100%)" }}
             >
