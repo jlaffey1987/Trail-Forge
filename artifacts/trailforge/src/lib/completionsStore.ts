@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { type Trail } from "@/lib/supabase";
+import { queueOfflineAction } from "@/lib/offlineQueue";
 
 /**
  * Trail completions ("ridden" log) — client-side store.
@@ -177,6 +178,13 @@ export async function markCompleted(
     void loadCompletions();
     return true;
   } catch {
+    if (!navigator.onLine) {
+      void queueOfflineAction("mark-ridden", {
+        trailId: trail.id,
+        completedAt: stamp,
+      });
+      return true;
+    }
     if (myEpoch !== epoch) return false;
     if (!wasCompleted) revertMark(trail.id);
     return false;
@@ -208,6 +216,10 @@ export async function unmarkCompleted(trailId: string): Promise<boolean> {
     }
     return true;
   } catch {
+    if (!navigator.onLine) {
+      void queueOfflineAction("unmark-ridden", { trailId });
+      return true;
+    }
     if (myEpoch !== epoch) return false;
     if (wasCompleted) revertUnmark(trailId, prevItem);
     return false;

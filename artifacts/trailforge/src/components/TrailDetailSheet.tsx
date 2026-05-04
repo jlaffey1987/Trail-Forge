@@ -3,6 +3,8 @@ import { useLocation } from "wouter";
 import { type Trail, saveTrail, fetchTrailGpxByIds } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { getDifficultyColor } from "@/lib/trailLayer";
+import { useIsTrailOffline } from "@/hooks/useOfflineTrails";
+import { getOfflineTrail } from "@/lib/offlineStore";
 import {
   addRouteTrail,
   removeRouteTrail,
@@ -105,11 +107,8 @@ export default function TrailDetailSheet({
     });
   }, [trail.id]);
 
-  // Lazy-load gpx_data for trails that arrived via the slim Map-tab fetch.
-  // We don't actually consume the result here today, but the spinner the
-  // effect drives makes the brief background fetch feel intentional rather
-  // than silent — and keeps the public API in step with planner / route
-  // builder hydration so a future GPX cache layer can short-circuit both.
+  const isOffline = useIsTrailOffline(trail.id);
+
   useEffect(() => {
     if (trail.gpx_data != null) {
       setGpxLoading(false);
@@ -117,9 +116,25 @@ export default function TrailDetailSheet({
     }
     let cancelled = false;
     setGpxLoading(true);
-    void fetchTrailGpxByIds([trail.id]).finally(() => {
+
+    const tryLoad = async () => {
+      try {
+        const offline = await getOfflineTrail(trail.id);
+        if (offline?.gpxData) {
+          if (!cancelled) setGpxLoading(false);
+          return;
+        }
+      } catch {
+        /* IndexedDB may be unavailable — fall through to network */
+      }
+      try {
+        await fetchTrailGpxByIds([trail.id]);
+      } catch {
+        /* offline — ignore */
+      }
       if (!cancelled) setGpxLoading(false);
-    });
+    };
+    void tryLoad();
     return () => {
       cancelled = true;
     };

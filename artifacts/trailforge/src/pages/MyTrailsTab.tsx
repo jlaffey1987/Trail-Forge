@@ -24,6 +24,13 @@ import {
   fetchTrailActivityCounts,
   type TrailActivityCounts,
 } from "@/lib/trailContent";
+import {
+  downloadTrailForOffline,
+  formatBytes,
+  type DownloadProgress,
+} from "@/lib/downloadManager";
+import { useOfflineTrails } from "@/hooks/useOfflineTrails";
+import { removeOfflineTrail } from "@/lib/offlineStore";
 import AddTrailMenu, { type AddTrailChoice } from "@/components/contribute/AddTrailMenu";
 import UploadGpxFlow from "@/components/contribute/UploadGpxFlow";
 import EditTrailDialog from "@/components/contribute/EditTrailDialog";
@@ -247,6 +254,10 @@ export default function MyTrailsTab() {
   const [renameDraft, setRenameDraft] = useState("");
   const [renamingBusy, setRenamingBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [downloadAbort, setDownloadAbort] = useState<AbortController | null>(null);
+  const offlineTrails = useOfflineTrails();
 
   const refreshSavedRoutes = useCallback(async () => {
     if (!userId) {
@@ -482,6 +493,44 @@ export default function MyTrailsTab() {
       const params = new URLSearchParams(window.location.search);
       params.set("mode", choice);
       setLocation(`/map?${params.toString()}`);
+    }
+  };
+
+  const handleDownloadOffline = async (trail: Trail) => {
+    const ac = new AbortController();
+    setDownloadingId(trail.id);
+    setDownloadAbort(ac);
+    setDownloadProgress(null);
+    const ok = await downloadTrailForOffline(trail, setDownloadProgress, ac.signal);
+    setDownloadingId(null);
+    setDownloadAbort(null);
+    if (ok) {
+      setToast("Trail saved for offline use");
+    } else if (!ac.signal.aborted) {
+      setToast("Download failed — try again");
+    }
+  };
+
+  const handleCancelDownload = () => {
+    downloadAbort?.abort();
+    setDownloadingId(null);
+    setDownloadAbort(null);
+    setDownloadProgress(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      downloadAbort?.abort();
+    };
+  }, [downloadAbort]);
+
+  const handleRemoveOffline = async (trailId: string) => {
+    try {
+      await removeOfflineTrail(trailId);
+      offlineTrails.refresh();
+      setToast("Offline data removed");
+    } catch {
+      setToast("Failed to remove offline data");
     }
   };
 
@@ -1060,9 +1109,15 @@ export default function MyTrailsTab() {
                     </div>
                   </button>
                   <div className="flex flex-col items-end gap-1 shrink-0">
-                    <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30">
-                      Planned
-                    </span>
+                    {offlineTrails.trails.some((o) => o.id === trail.id) ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-green-400 bg-green-900/30" data-testid={`saved-trail-offline-badge-${trail.id}`}>
+                        Offline
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-amber-400 bg-amber-900/30">
+                        Planned
+                      </span>
+                    )}
                     <button
                       type="button"
                       onClick={() => setExpandedId(isExpanded ? null : trail.id)}
@@ -1094,13 +1149,51 @@ export default function MyTrailsTab() {
                         <div className="text-sm font-bold text-stone-300">{trail.terrain || "Mixed"}</div>
                       </div>
                     </div>
+                    {downloadingId === trail.id && downloadProgress && (
+                      <div className="mb-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-stone-400">{downloadProgress.label}</span>
+                          <button
+                            type="button"
+                            onClick={handleCancelDownload}
+                            className="text-[10px] text-red-400 hover:text-red-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-amber-500 rounded-full transition-all"
+                            style={{ width: `${downloadProgress.total > 0 ? (downloadProgress.done / downloadProgress.total) * 100 : 0}%` }}
+                          />
+                        </div>
+                        <div className="text-[10px] text-stone-500 mt-0.5">{formatBytes(downloadProgress.bytes)}</div>
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       <button className="flex-1 py-2 rounded-lg text-xs font-semibold text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition-colors">
                         View on Map
                       </button>
-                      <button className="flex-1 py-2 rounded-lg text-xs font-semibold text-stone-400 border border-stone-700 hover:bg-stone-700/30 transition-colors">
-                        Share
-                      </button>
+                      {offlineTrails.trails.some((o) => o.id === trail.id) ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveOffline(trail.id)}
+                          className="flex-1 py-2 rounded-lg text-xs font-semibold text-green-400 border border-green-500/30 hover:bg-green-900/20 transition-colors"
+                          data-testid={`saved-trail-offline-remove-${trail.id}`}
+                        >
+                          ✓ Offline
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleDownloadOffline(trail)}
+                          disabled={downloadingId != null}
+                          className="flex-1 py-2 rounded-lg text-xs font-semibold text-stone-400 border border-stone-700 hover:bg-stone-700/30 transition-colors disabled:opacity-40"
+                          data-testid={`saved-trail-offline-download-${trail.id}`}
+                        >
+                          {downloadingId === trail.id ? "Downloading…" : "↓ Offline"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}

@@ -29,6 +29,30 @@ import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
 import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
 import { loadCompletions, clearCompletions } from "@/lib/completionsStore";
+import { useOnlineStatus } from "@/hooks/useOnlineStatus";
+import { replayQueue, registerOfflineHandler } from "@/lib/offlineQueue";
+
+registerOfflineHandler("mark-ridden", async (action) => {
+  const { trailId, completedAt } = action.payload as { trailId: string; completedAt?: string };
+  const body: Record<string, unknown> = { trailId };
+  if (completedAt) body.completedAt = completedAt;
+  const res = await fetch("/api/me/completions", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.ok;
+});
+
+registerOfflineHandler("unmark-ridden", async (action) => {
+  const { trailId } = action.payload as { trailId: string };
+  const res = await fetch(
+    `/api/me/completions/${encodeURIComponent(trailId)}`,
+    { method: "DELETE", credentials: "include" },
+  );
+  return res.ok;
+});
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
@@ -184,9 +208,25 @@ function TabContent({ tab }: { tab: Tab }) {
   }
 }
 
+function OfflineReplayBridge() {
+  const online = useOnlineStatus();
+  const didReplay = useRef(false);
+
+  useEffect(() => {
+    if (online && !didReplay.current) {
+      didReplay.current = true;
+      void replayQueue();
+    }
+    if (!online) didReplay.current = false;
+  }, [online]);
+
+  return null;
+}
+
 function MainShell() {
   const [location, setLocation] = useLocation();
   const activeTab = pathToTab(location);
+  const online = useOnlineStatus();
 
   // Cross-tab navigation bridge: the `trailforge:open-group` window event is
   // still in use because the service worker's `notificationclick` handler
@@ -253,9 +293,15 @@ function MainShell() {
           />
         </div>
         <div className="flex items-center gap-2">
+          {!online && (
+            <div className="flex items-center gap-1 bg-red-900/40 border border-red-500/40 rounded-full px-2 py-1" data-testid="offline-badge">
+              <div className="w-1.5 h-1.5 rounded-full bg-red-400"></div>
+              <span className="text-[10px] text-red-300 font-semibold">Offline</span>
+            </div>
+          )}
           <div className="flex items-center gap-1 bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,20%)] rounded-full px-2 py-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>
-            <span className="text-[10px] text-stone-400">GPS Active</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${online ? "bg-green-400" : "bg-stone-500"}`}></div>
+            <span className="text-[10px] text-stone-400">{online ? "GPS Active" : "GPS"}</span>
           </div>
           <NotificationsBell />
           <InvitesBadge />
@@ -396,6 +442,7 @@ function ClerkProviderWithRoutes() {
       routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
     >
       <ClerkUserSync />
+      <OfflineReplayBridge />
       <SavedTrailsMergePrompt />
       <Switch>
         <Route path="/sign-in/*?" component={SignInPage} />

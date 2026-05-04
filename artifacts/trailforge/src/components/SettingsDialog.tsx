@@ -7,6 +7,13 @@ import {
   loadPushPreferences,
   type PushPreferences,
 } from "@/lib/push";
+import {
+  listOfflineTrails,
+  removeOfflineTrail,
+  clearAllOffline,
+  type OfflineTrail,
+} from "@/lib/offlineStore";
+import { formatBytes } from "@/lib/downloadManager";
 
 interface Props {
   open: boolean;
@@ -18,6 +25,8 @@ export default function SettingsDialog({ open, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [offlineTrails, setOfflineTrails] = useState<OfflineTrail[]>([]);
+  const [clearingAll, setClearingAll] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -29,6 +38,9 @@ export default function SettingsDialog({ open, onClose }: Props) {
         setPrefs(p);
         setLoading(false);
       }
+    });
+    void listOfflineTrails().then((list) => {
+      if (!cancelled) setOfflineTrails(list);
     });
     return () => {
       cancelled = true;
@@ -178,6 +190,74 @@ export default function SettingsDialog({ open, onClose }: Props) {
                   toggle to add this device.
                 </p>
               )}
+          </section>
+
+          <section data-testid="settings-offline-section">
+            <h3 className="text-xs font-bold uppercase tracking-widest text-stone-300 mb-2">
+              Offline Storage
+            </h3>
+            {offlineTrails.length === 0 ? (
+              <p className="text-[11px] text-stone-500">
+                No trails downloaded for offline use yet.
+              </p>
+            ) : (
+              <>
+                <p className="text-[11px] text-stone-500 mb-2">
+                  {offlineTrails.length} trail{offlineTrails.length !== 1 ? "s" : ""} ·{" "}
+                  {formatBytes(offlineTrails.reduce((s, t) => s + t.estimatedSizeBytes, 0))}
+                </p>
+                <div className="space-y-2 mb-3">
+                  {offlineTrails.map((ot) => (
+                    <div
+                      key={ot.id}
+                      className="flex items-center justify-between bg-[hsl(22,15%,14%)] rounded-lg px-3 py-2"
+                      data-testid={`offline-trail-${ot.id}`}
+                    >
+                      <div className="flex-1 min-w-0 mr-2">
+                        <div className="text-xs text-stone-200 truncate">{ot.trail.name}</div>
+                        <div className="text-[10px] text-stone-500">
+                          {formatBytes(ot.estimatedSizeBytes)} · {ot.tileCount} tiles
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await removeOfflineTrail(ot.id);
+                            setOfflineTrails((prev) => prev.filter((t) => t.id !== ot.id));
+                          } catch {
+                            /* non-fatal */
+                          }
+                        }}
+                        className="text-[10px] text-red-400 hover:text-red-300 shrink-0"
+                        data-testid={`offline-trail-remove-${ot.id}`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  disabled={clearingAll}
+                  onClick={async () => {
+                    setClearingAll(true);
+                    try {
+                      await clearAllOffline();
+                      setOfflineTrails([]);
+                    } catch {
+                      /* non-fatal */
+                    } finally {
+                      setClearingAll(false);
+                    }
+                  }}
+                  className="w-full py-2 rounded-lg text-xs font-semibold text-red-400 border border-red-500/30 hover:bg-red-900/20 transition-colors disabled:opacity-40"
+                  data-testid="offline-clear-all"
+                >
+                  {clearingAll ? "Clearing…" : "Clear all offline data"}
+                </button>
+              </>
+            )}
           </section>
         </div>
       </div>

@@ -53,7 +53,7 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key !== CACHE_NAME)
+          .filter((key) => key !== CACHE_NAME && key !== TILE_CACHE_NAME)
           .map((key) => caches.delete(key)),
       ),
     ),
@@ -131,6 +131,9 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
+const TILE_CACHE_NAME = "trailforge-tiles-v1";
+const ESRI_TILE_HOST = "server.arcgisonline.com";
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
 
@@ -138,11 +141,32 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
 
+  if (url.hostname === ESRI_TILE_HOST && url.pathname.includes("/MapServer/tile/")) {
+    event.respondWith(
+      caches.open(TILE_CACHE_NAME).then((cache) =>
+        cache.match(request).then((cached) => {
+          if (cached) return cached;
+          return fetch(request)
+            .then((response) => {
+              if (response.ok) {
+                cache.put(request, response.clone());
+              }
+              return response;
+            })
+            .catch(() => {
+              return new Response(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#2a2520"/></svg>',
+                { headers: { "Content-Type": "image/svg+xml" } },
+              );
+            });
+        }),
+      ),
+    );
+    return;
+  }
+
   if (url.origin !== self.location.origin) return;
 
-  // Never serve API responses from cache — the app must always see fresh
-  // data, and most of these are write operations / authenticated reads.
-  // We also bypass any "/api/" prefix outside our own scope just in case.
   if (url.pathname.startsWith(API_PREFIX) || url.pathname.startsWith("/api/")) return;
 
   if (request.mode === "navigate") {
