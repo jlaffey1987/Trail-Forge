@@ -48,6 +48,8 @@ externalPort = 3001
 SUPABASE_URL = "https://qgzbppzlwydammxxjyct.supabase.co"
 VITE_SUPABASE_URL = "https://qgzbppzlwydammxxjyct.supabase.co"
 VITE_CLERK_PUBLISHABLE_KEY = "pk_test_ZGVmaW5pdGUtd2hhbGUtMjIuY2xlcmsuYWNjb3VudHMuZGV2JA"
+VAPID_PUBLIC_KEY = "BFVgkg-wAZlqe34ScfgoeLCCBqDUPyty20Ybs69nYqAmYwvZzTBOnItNx9KOz9tu2_zbdZyCJ5a7-PLWtQfpdSY"
+VAPID_SUBJECT = "mailto:notifications@trailforge.app"
 
 [nix]
 channel = "stable-25_05"
