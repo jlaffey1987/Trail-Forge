@@ -77,6 +77,22 @@ export class MockSupa {
   public missingTables = new Set<string>();
   /** Optional: forced errors per (table, op) — return error from execute. */
   public forcedErrors = new Map<string, PgError>();
+  private rpcResults = new Map<string, { data: unknown; error: PgError | null }>();
+
+  setRpcResult(name: string, data: unknown, error: PgError | null = null): void {
+    this.rpcResults.set(name, { data, error });
+  }
+
+  rpc(name: string, _params?: Record<string, unknown>): Promise<{ data: unknown; error: PgError | null }> {
+    const result = this.rpcResults.get(name);
+    if (!result) {
+      return Promise.resolve({
+        data: null,
+        error: { code: "42883", message: `MockSupa: no rpc result configured for "${name}"` },
+      });
+    }
+    return Promise.resolve(result);
+  }
 
   seed(table: string, rows: Row[]): void {
     this.tables[table] = rows.map((r) => ({ ...r }));
@@ -95,7 +111,6 @@ export class MockSupa {
     return (this.tables[table] ?? []).map((r) => ({ ...r }));
   }
 
-  // The route uses `supa.from(...)` only — no `.rpc`, `.auth`, etc.
   from(table: string): QueryBuilder {
     return new QueryBuilder(this, table);
   }
