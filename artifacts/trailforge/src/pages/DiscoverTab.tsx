@@ -92,6 +92,8 @@ export default function DiscoverTab() {
   const [joiningGroupId, setJoiningGroupId] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [showAllGroups, setShowAllGroups] = useState(false);
+  const [joinPromptGroup, setJoinPromptGroup] = useState<DiscoverableGroup | null>(null);
+  const [joinMessage, setJoinMessage] = useState("");
   const completedIds = useCompletionIds();
 
   const [publishedRoutes, setPublishedRoutes] = useState<SavedRouteSummary[]>(
@@ -128,10 +130,24 @@ export default function DiscoverTab() {
     setDiscoverableGroups(items);
   }, [isSignedIn]);
 
-  const handleRequestJoin = async (group: DiscoverableGroup) => {
+  const openJoinPrompt = (group: DiscoverableGroup) => {
+    setJoinMessage("");
+    setJoinPromptGroup(group);
+  };
+
+  const closeJoinPrompt = () => {
+    setJoinPromptGroup(null);
+    setJoinMessage("");
+  };
+
+  const handleRequestJoin = async () => {
+    if (!joinPromptGroup) return;
+    const group = joinPromptGroup;
     setJoinError(null);
     setJoiningGroupId(group.id);
-    const res = await requestToJoinGroup(group.id);
+    closeJoinPrompt();
+    const msg = joinMessage.trim() || undefined;
+    const res = await requestToJoinGroup(group.id, msg);
     setJoiningGroupId(null);
     if ("error" in res) {
       setJoinError(res.error || "Could not send request");
@@ -395,7 +411,7 @@ export default function DiscoverTab() {
                   <button
                     type="button"
                     disabled={isBusy || isPending}
-                    onClick={() => void handleRequestJoin(g)}
+                    onClick={() => openJoinPrompt(g)}
                     className={
                       "shrink-0 px-2.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors disabled:cursor-not-allowed " +
                       (isPending
@@ -430,6 +446,61 @@ export default function DiscoverTab() {
                 : `Show ${discoverableGroups.length - 2} more`}
             </button>
           )}
+        </div>
+      )}
+
+      {joinPromptGroup && (
+        <div
+          className="fixed inset-0 z-[3100] flex items-end justify-center"
+          style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(2px)" }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeJoinPrompt(); }}
+          data-testid="join-prompt-backdrop"
+        >
+          <div
+            className="w-full max-w-md rounded-t-2xl px-5 pt-5 pb-6 space-y-3"
+            style={{ background: "hsl(22,15%,9%)" }}
+            data-testid="join-prompt-dialog"
+          >
+            <h3 className="text-sm font-bold text-stone-100">
+              Join {joinPromptGroup.name}
+            </h3>
+            <p className="text-[11px] text-stone-400">
+              Add an optional message for the group owner.
+            </p>
+            <textarea
+              value={joinMessage}
+              onChange={(e) => setJoinMessage(e.target.value.slice(0, 200))}
+              maxLength={200}
+              rows={3}
+              placeholder="Why do you want to join?"
+              className="w-full rounded-lg bg-[hsl(22,15%,14%)] border border-[hsl(30,12%,22%)] px-3 py-2 text-xs text-stone-100 placeholder:text-stone-500 focus:outline-none focus:border-amber-500/60 resize-none"
+              data-testid="join-prompt-textarea"
+            />
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-stone-500">
+                {joinMessage.length}/200
+              </span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={closeJoinPrompt}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-stone-400 border border-stone-700"
+                  data-testid="join-prompt-cancel"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRequestJoin()}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider text-stone-900"
+                  style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                  data-testid="join-prompt-send"
+                >
+                  Send request
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

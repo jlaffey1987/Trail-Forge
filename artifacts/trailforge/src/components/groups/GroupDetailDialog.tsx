@@ -452,9 +452,12 @@ export default function GroupDetailDialog({ groupId, onClose }: Props) {
                                 {label}
                               </div>
                               {r.message && (
-                                <div className="text-[10px] text-stone-500 truncate">
-                                  "{r.message}"
-                                </div>
+                                <p
+                                  className="text-[10px] text-stone-400 mt-0.5 whitespace-pre-line break-words italic"
+                                  data-testid={`join-request-message-${r.id}`}
+                                >
+                                  &ldquo;{r.message}&rdquo;
+                                </p>
                               )}
                             </div>
                           </div>
