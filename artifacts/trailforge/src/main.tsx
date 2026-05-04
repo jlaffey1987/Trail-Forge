@@ -39,17 +39,8 @@ if (typeof window !== "undefined") {
 // the SW is in place even if the user starts the upload flow during the
 // initial page load — otherwise the very first session can still hit the
 // eviction bug.
-if (typeof window !== "undefined" && "serviceWorker" in navigator) {
-  const swUrl = `${import.meta.env.BASE_URL}sw.js`;
-  navigator.serviceWorker
-    .register(swUrl, { scope: import.meta.env.BASE_URL })
-    .catch((err) => {
-      // Non-fatal: the app still works without the SW; we just lose the
-      // PWA-stability benefits. Log so we can spot problems in dev.
-      // eslint-disable-next-line no-console
-      console.warn("[trailforge] service worker registration failed", err);
-    });
-}
+import { registerServiceWorker } from "./lib/registerSW";
+void registerServiceWorker(import.meta.env.BASE_URL);
 
 // ---------------------------------------------------------------------------
 // Last-chance error capture. Without these, a thrown error inside a React
