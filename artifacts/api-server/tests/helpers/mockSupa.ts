@@ -332,6 +332,7 @@ export class MockSupa {
         ? (row[fkCol] as string | undefined) ?? null
         : (row.author_user_id as string | undefined) ??
           (row.owner_user_id as string | undefined) ??
+          (row.uploader_user_id as string | undefined) ??
           (row.sender_user_id as string | undefined) ??
           (row.user_id as string | undefined) ??
           null;
