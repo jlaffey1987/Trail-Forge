@@ -1,5 +1,5 @@
 import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
-import { parseGPX } from "@/lib/gpx";
+import { parseGPX, reverseWaypoints } from "@/lib/gpx";
 
 export interface GeoPoint {
   lat: number;
@@ -617,12 +617,11 @@ export async function assembleMultiModalRoute(
 
     const dToFirst = haversineM(currentPoint, { lat: wps[0].lat, lng: wps[0].lon });
     const dToLast = haversineM(currentPoint, { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon });
-    if (dToLast < dToFirst) {
-      wps.reverse();
-    }
+    const useReversed = dToLast < dToFirst;
+    const orientedWps = useReversed ? reverseWaypoints(wps) : wps;
 
-    const trailEntry: GeoPoint = { lat: wps[0].lat, lng: wps[0].lon };
-    const trailExit: GeoPoint = { lat: wps[wps.length - 1].lat, lng: wps[wps.length - 1].lon };
+    const trailEntry: GeoPoint = { lat: orientedWps[0].lat, lng: orientedWps[0].lon };
+    const trailExit: GeoPoint = { lat: orientedWps[orientedWps.length - 1].lat, lng: orientedWps[orientedWps.length - 1].lon };
 
     stepNo++;
     onProgress?.(stepNo, totalSteps, `Routing roads to ${trail.name}`);
@@ -644,7 +643,7 @@ export async function assembleMultiModalRoute(
 
     stepNo++;
     onProgress?.(stepNo, totalSteps, `Adding ${trail.name}`);
-    const trailPolyline: GeoPoint[] = wps.map((w) => ({ lat: w.lat, lng: w.lon }));
+    const trailPolyline: GeoPoint[] = orientedWps.map((w) => ({ lat: w.lat, lng: w.lon }));
     const trailKm = trail.distance_km ?? 0;
     sections.push({
       kind: "trail",

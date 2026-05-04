@@ -882,13 +882,27 @@ export default function PlannerTab() {
           });
         }
         const sorted = orderTrailsNearestNeighbour(startPt, hydratedTrails);
-        const trailSlots: number[] = [];
-        for (let i = 0; i < routeEntries.length; i++) {
-          if (routeEntries[i].kind === "trail") trailSlots.push(i);
+        const trailGroups = new Map<string, typeof routeEntries>();
+        let currentGroupId: string | null = null;
+        const leadingWaypoints: typeof routeEntries = [];
+        for (const entry of routeEntries) {
+          if (entry.kind === "trail") {
+            currentGroupId = entry.trail.id;
+            trailGroups.set(currentGroupId, [entry]);
+          } else if (currentGroupId) {
+            trailGroups.get(currentGroupId)!.push(entry);
+          } else {
+            leadingWaypoints.push(entry);
+          }
         }
-        const reordered = [...routeEntries];
-        for (let s = 0; s < trailSlots.length && s < sorted.length; s++) {
-          reordered[trailSlots[s]] = { kind: "trail" as const, trail: sorted[s] };
+        const reordered: typeof routeEntries = [...leadingWaypoints];
+        for (const trail of sorted) {
+          const group = trailGroups.get(trail.id);
+          if (group) {
+            reordered.push({ kind: "trail" as const, trail }, ...group.slice(1));
+          } else {
+            reordered.push({ kind: "trail" as const, trail });
+          }
         }
         orderedEntries = reordered;
         setRouteEntries(orderedEntries);
