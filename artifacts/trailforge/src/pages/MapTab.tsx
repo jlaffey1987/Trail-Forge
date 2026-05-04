@@ -97,6 +97,7 @@ export default function MapTab() {
   const [mapMode, setMapMode] = useState<MapMode>("explore");
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   const [totalKm, setTotalKm] = useState(0);
+  const [selectedWaypointId, setSelectedWaypointId] = useState<number | null>(null);
   // Shared loader hook — also used by UploadGpxFlow's preview map so the upload
   // flow works even when the user opens it from My Trails before visiting Map.
   const leafletLoaded = useLeaflet();
@@ -150,8 +151,112 @@ export default function MapTab() {
 
   const mapModeRef = useRef(mapMode);
   const waypointsRef = useRef(waypoints);
+  const selectedWaypointIdRef = useRef<number | null>(null);
   mapModeRef.current = mapMode;
   waypointsRef.current = waypoints;
+  selectedWaypointIdRef.current = selectedWaypointId;
+
+  const createDrawMarker = useCallback((wp: Waypoint, index: number, total: number, map: import("leaflet").Map): import("leaflet").Marker => {
+    const L = window.L;
+    const isSelected = wp.id === selectedWaypointIdRef.current;
+    const isFirst = index === 0;
+    const isLast = index === total - 1;
+    const label = isFirst ? "A" : isLast && total > 1 ? "B" : `${index + 1}`;
+    const bg = isSelected ? "#3b82f6" : "#d4870c";
+    const border = isSelected ? "#93c5fd" : "#fff";
+    const size = isSelected ? 28 : 22;
+    const html = `<div style="width:${size}px;height:${size}px;background:${bg};border:2.5px solid ${border};border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:${size > 24 ? 11 : 9}px;font-weight:900;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.6);cursor:grab;user-select:none;touch-action:none;">${label}</div>`;
+    const marker = L.marker([wp.lat, wp.lng], {
+      icon: L.divIcon({ html, iconSize: [size, size], iconAnchor: [size / 2, size / 2], className: "" }),
+      draggable: true,
+      zIndexOffset: isSelected ? 1000 : 0,
+    }).addTo(map);
+
+    marker.dragging?.disable();
+
+    let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+    let didLongPress = false;
+    let startX = 0;
+    let startY = 0;
+    const MOVE_THRESHOLD = 10;
+
+    const startLongPress = (e: PointerEvent) => {
+      didLongPress = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      longPressTimer = setTimeout(() => {
+        didLongPress = true;
+        marker.dragging?.enable();
+        const el = marker.getElement();
+        if (el) el.style.cursor = "grabbing";
+      }, 400);
+    };
+    const cancelLongPress = () => {
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    };
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!longPressTimer) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (dx * dx + dy * dy > MOVE_THRESHOLD * MOVE_THRESHOLD) {
+        cancelLongPress();
+      }
+    };
+    const handleClick = () => {
+      if (didLongPress) { didLongPress = false; return; }
+      setSelectedWaypointId((prev) => prev === wp.id ? null : wp.id);
+    };
+
+    marker.on("click", handleClick);
+    const el = marker.getElement();
+    if (el) {
+      el.addEventListener("pointerdown", startLongPress);
+      el.addEventListener("pointerup", cancelLongPress);
+      el.addEventListener("pointercancel", cancelLongPress);
+      el.addEventListener("pointermove", handlePointerMove);
+    }
+
+    marker.on("dragend", () => {
+      marker.dragging?.disable();
+      const markerEl = marker.getElement();
+      if (markerEl) markerEl.style.cursor = "grab";
+      const pos = marker.getLatLng();
+      const updatedWaypoints = waypointsRef.current.map((w) =>
+        w.id === wp.id ? { ...w, lat: pos.lat, lng: pos.lng } : w
+      );
+      setWaypoints(updatedWaypoints);
+      waypointsRef.current = updatedWaypoints;
+      redrawPolyline(updatedWaypoints);
+    });
+
+    return marker;
+  }, []);
+
+  const redrawPolyline = useCallback((wps: Waypoint[]) => {
+    if (drawPolylineRef.current) { drawPolylineRef.current.remove(); drawPolylineRef.current = null; }
+    if (wps.length >= 2 && mapRef.current) {
+      const L = window.L;
+      const latlngs = wps.map((wp) => [wp.lat, wp.lng] as [number, number]);
+      drawPolylineRef.current = L.polyline(latlngs, { color: "#f0a832", weight: 3.5, opacity: 0.85 }).addTo(mapRef.current);
+      let dist = 0;
+      for (let i = 1; i < wps.length; i++) {
+        dist += L.latLng(wps[i - 1].lat, wps[i - 1].lng).distanceTo(L.latLng(wps[i].lat, wps[i].lng));
+      }
+      setTotalKm(dist / 1000);
+    } else {
+      setTotalKm(0);
+    }
+  }, []);
+
+  const redrawAllMarkers = useCallback((wps: Waypoint[]) => {
+    if (!mapRef.current) return;
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+    wps.forEach((wp, i) => {
+      const marker = createDrawMarker(wp, i, wps.length, mapRef.current!);
+      markersRef.current.push(marker);
+    });
+  }, [createDrawMarker]);
 
   // Leaflet is loaded by the `useLeaflet()` hook above.
 
@@ -237,28 +342,14 @@ export default function MapTab() {
 
     map.on("click", (e: import("leaflet").LeafletMouseEvent) => {
       if (mapModeRef.current !== "draw") return;
-      const L = window.L;
       const { lat, lng } = e.latlng;
       const id = Date.now();
-      const svgMarker = L.divIcon({
-        html: `<div style="width:20px;height:20px;background:#d4870c;border:2.5px solid #fff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.6);"></div>`,
-        iconSize: [20, 20], iconAnchor: [10, 20], className: "",
-      });
-      const marker = L.marker([lat, lng], { icon: svgMarker }).addTo(map);
-      markersRef.current.push(marker);
       const newWaypoints = [...waypointsRef.current, { id, lat, lng }];
       setWaypoints(newWaypoints);
       waypointsRef.current = newWaypoints;
-      if (drawPolylineRef.current) drawPolylineRef.current.remove();
-      if (newWaypoints.length >= 2) {
-        const latlngs = newWaypoints.map((wp) => [wp.lat, wp.lng] as [number, number]);
-        drawPolylineRef.current = L.polyline(latlngs, { color: "#f0a832", weight: 3.5, opacity: 0.85 }).addTo(map);
-        let dist = 0;
-        for (let i = 1; i < newWaypoints.length; i++) {
-          dist += L.latLng(newWaypoints[i - 1].lat, newWaypoints[i - 1].lng).distanceTo(L.latLng(newWaypoints[i].lat, newWaypoints[i].lng));
-        }
-        setTotalKm(dist / 1000);
-      }
+      setSelectedWaypointId(null);
+      redrawPolyline(newWaypoints);
+      redrawAllMarkers(newWaypoints);
     });
 
     // Re-fetch trails on viewport change (debounced)
@@ -678,29 +769,42 @@ export default function MapTab() {
     markersRef.current = [];
     if (drawPolylineRef.current) { drawPolylineRef.current.remove(); drawPolylineRef.current = null; }
     setWaypoints([]);
+    waypointsRef.current = [];
     setTotalKm(0);
+    setSelectedWaypointId(null);
   };
 
   const undoWaypoint = () => {
-    if (markersRef.current.length === 0) return;
-    markersRef.current.pop()?.remove();
+    if (waypointsRef.current.length === 0) return;
     const newWaypoints = waypointsRef.current.slice(0, -1);
     setWaypoints(newWaypoints);
     waypointsRef.current = newWaypoints;
-    if (drawPolylineRef.current) { drawPolylineRef.current.remove(); drawPolylineRef.current = null; }
-    if (newWaypoints.length >= 2 && mapRef.current) {
-      const L = window.L;
-      const latlngs = newWaypoints.map((wp) => [wp.lat, wp.lng] as [number, number]);
-      drawPolylineRef.current = L.polyline(latlngs, { color: "#f0a832", weight: 3.5, opacity: 0.85 }).addTo(mapRef.current);
-      let dist = 0;
-      for (let i = 1; i < newWaypoints.length; i++) {
-        dist += L.latLng(newWaypoints[i - 1].lat, newWaypoints[i - 1].lng).distanceTo(L.latLng(newWaypoints[i].lat, newWaypoints[i].lng));
-      }
-      setTotalKm(dist / 1000);
-    } else {
-      setTotalKm(0);
-    }
+    setSelectedWaypointId(null);
+    redrawPolyline(newWaypoints);
+    redrawAllMarkers(newWaypoints);
   };
+
+  const removeWaypoint = useCallback((wpId: number) => {
+    const newWaypoints = waypointsRef.current.filter((w) => w.id !== wpId);
+    setWaypoints(newWaypoints);
+    waypointsRef.current = newWaypoints;
+    setSelectedWaypointId(null);
+    redrawPolyline(newWaypoints);
+    redrawAllMarkers(newWaypoints);
+  }, [redrawPolyline, redrawAllMarkers]);
+
+  const prevSelectedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (mapMode !== "draw") return;
+    if (prevSelectedRef.current === selectedWaypointId) return;
+    prevSelectedRef.current = selectedWaypointId;
+    if (waypoints.length > 0) redrawAllMarkers(waypoints);
+  }, [selectedWaypointId, mapMode, waypoints, redrawAllMarkers]);
+
+  const selectedWaypoint = useMemo(
+    () => selectedWaypointId != null ? waypoints.find((w) => w.id === selectedWaypointId) ?? null : null,
+    [waypoints, selectedWaypointId],
+  );
 
   const activeLayerCount = layers.filter((l) => l.visible).length;
   const filterCount = filters.difficulties.length + filters.trailTypes.length;
@@ -824,9 +928,21 @@ ${trkpts}
         <div className="pointer-events-auto flex items-center gap-1.5">
           {mapMode === "draw" && waypoints.length > 0 && (
             <>
+              {selectedWaypoint && (
+                <button
+                  onClick={() => removeWaypoint(selectedWaypoint.id)}
+                  className="p-1.5 rounded-lg bg-black/65 border border-blue-500/60 text-blue-400 backdrop-blur hover:bg-blue-900/30 transition-colors"
+                  title="Remove selected point"
+                >
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+                  </svg>
+                </button>
+              )}
               <button
                 onClick={undoWaypoint}
                 className="p-1.5 rounded-lg bg-black/65 border border-stone-600/60 text-stone-300 backdrop-blur hover:bg-stone-700/60 transition-colors"
+                title="Undo last point"
               >
                 <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
                   <polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>
@@ -835,6 +951,7 @@ ${trkpts}
               <button
                 onClick={clearWaypoints}
                 className="p-1.5 rounded-lg bg-black/65 border border-red-600/50 text-red-400 backdrop-blur hover:bg-red-900/30 transition-colors"
+                title="Clear all points"
               >
                 <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2">
                   <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
@@ -894,7 +1011,7 @@ ${trkpts}
       {/* Mode hints */}
       {mapMode === "draw" && (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-[1000] bg-amber-500/90 text-stone-900 text-xs font-bold px-3 py-1.5 rounded-full shadow-lg pointer-events-none whitespace-nowrap">
-          Tap map to add waypoints
+          {selectedWaypoint ? "Tap point to deselect · Hold to drag" : "Tap map to add · Tap point to select · Hold to drag"}
         </div>
       )}
       {mapMode === "record" && (
@@ -1033,47 +1150,78 @@ ${trkpts}
           className="absolute bottom-0 left-0 right-0 z-[1000] bg-gradient-to-t from-black/85 via-black/70 to-transparent pt-6"
           style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 0.5rem)" }}
         >
-          <div className="flex items-center justify-between gap-2 px-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="min-w-0">
-                <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Distance</div>
-                <div className="text-sm font-bold text-amber-400 leading-tight">{totalKm > 0 ? `${totalKm.toFixed(1)} km` : "0.0 km"}</div>
+          {selectedWaypoint ? (
+            <div className="flex items-center justify-between gap-2 px-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-full bg-blue-500 border-2 border-blue-300 flex items-center justify-center text-[10px] font-black text-white shrink-0">
+                  {(() => { const idx = waypoints.findIndex((w) => w.id === selectedWaypoint.id); return idx === 0 ? "A" : idx === waypoints.length - 1 && waypoints.length > 1 ? "B" : `${idx + 1}`; })()}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] text-stone-400 uppercase tracking-wider leading-tight">Point {waypoints.findIndex((w) => w.id === selectedWaypoint.id) + 1} of {waypoints.length}</div>
+                  <div className="text-xs text-stone-300 leading-tight">{selectedWaypoint.lat.toFixed(5)}, {selectedWaypoint.lng.toFixed(5)}</div>
+                </div>
               </div>
-              <div className="w-px h-7 bg-stone-700 shrink-0"></div>
-              <div className="min-w-0">
-                <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Points</div>
-                <div className="text-sm font-bold text-amber-400 leading-tight">{waypoints.length}</div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => removeWaypoint(selectedWaypoint.id)}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-red-600/80 text-white border border-red-500/60 shadow-lg"
+                >
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+                  </svg>
+                  Remove
+                </button>
+                <button
+                  onClick={() => setSelectedWaypointId(null)}
+                  className="px-2.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider bg-stone-700/80 text-stone-300 border border-stone-600/60"
+                >
+                  Done
+                </button>
               </div>
-              {totalKm > 0 && (
-                <>
-                  <div className="w-px h-7 bg-stone-700 shrink-0"></div>
-                  <div className="min-w-0">
-                    <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Time</div>
-                    <div className="text-sm font-bold text-amber-400 leading-tight">{Math.round((totalKm / 15) * 60)}m</div>
-                  </div>
-                </>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2 px-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="min-w-0">
+                  <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Distance</div>
+                  <div className="text-sm font-bold text-amber-400 leading-tight">{totalKm > 0 ? `${totalKm.toFixed(1)} km` : "0.0 km"}</div>
+                </div>
+                <div className="w-px h-7 bg-stone-700 shrink-0"></div>
+                <div className="min-w-0">
+                  <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Points</div>
+                  <div className="text-sm font-bold text-amber-400 leading-tight">{waypoints.length}</div>
+                </div>
+                {totalKm > 0 && (
+                  <>
+                    <div className="w-px h-7 bg-stone-700 shrink-0"></div>
+                    <div className="min-w-0">
+                      <div className="text-[10px] text-stone-500 uppercase tracking-wider leading-tight">Time</div>
+                      <div className="text-sm font-bold text-amber-400 leading-tight">{Math.round((totalKm / 15) * 60)}m</div>
+                    </div>
+                  </>
+                )}
+              </div>
+              {waypoints.length >= 2 ? (
+                <button
+                  onClick={() => setShowDrawSave(true)}
+                  className="shrink-0 flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-bold uppercase tracking-wider text-stone-900 shadow-lg shadow-amber-900/40 ring-2 ring-amber-300/40"
+                  style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
+                  data-testid="map-save-drawn-trail"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                    <polyline points="17 21 17 13 7 13 7 21"/>
+                    <polyline points="7 3 7 8 15 8"/>
+                  </svg>
+                  Save Trail
+                </button>
+              ) : (
+                <span className="shrink-0 text-[10px] text-stone-500 uppercase tracking-wider px-2 text-right leading-tight">
+                  Tap map to add<br />at least 2 points
+                </span>
               )}
             </div>
-            {waypoints.length >= 2 ? (
-              <button
-                onClick={() => setShowDrawSave(true)}
-                className="shrink-0 flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-bold uppercase tracking-wider text-stone-900 shadow-lg shadow-amber-900/40 ring-2 ring-amber-300/40"
-                style={{ background: "linear-gradient(135deg, #d4870c, #f0a832)" }}
-                data-testid="map-save-drawn-trail"
-              >
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                  <polyline points="17 21 17 13 7 13 7 21"/>
-                  <polyline points="7 3 7 8 15 8"/>
-                </svg>
-                Save Trail
-              </button>
-            ) : (
-              <span className="shrink-0 text-[10px] text-stone-500 uppercase tracking-wider px-2 text-right leading-tight">
-                Tap map to add<br />at least 2 points
-              </span>
-            )}
-          </div>
+          )}
         </div>
       )}
 

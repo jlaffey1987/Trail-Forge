@@ -34,9 +34,13 @@ The project is structured as a pnpm monorepo.
     - Connectivity detection using `useOnlineStatus` (navigator.onLine + periodic API pings).
     - UI elements for managing offline content.
 - **Navigation:**
-    - `NavigationView` features heading-up map rotation, motorbike SVG marker, and a compass widget.
-    - `useHeading.ts` for device orientation and GPS heading.
+    - `NavigationView` features heading-up map rotation, motorbike SVG marker, and a compass widget. Uses CARTO Dark Matter road-focused tiles (not satellite). Smooth following with 5m threshold, 0.6s pan animation, forward-look bias in heading-up mode.
+    - `useHeading.ts` for device orientation and GPS heading with heavy low-pass smoothing (α=0.05), 3° dead zone, render-gated setState.
     - `navigationReroute.ts` for off-route detection, with auto re-routing on road sections via OSRM.
+- **Draw Trail Point Editing:**
+    - In draw mode, waypoint markers are numbered (A, 2, 3…B). Tap a marker to select it (turns blue); the bottom bar shows coordinates and a red "Remove" button that deletes just that point (polyline reconnects through remaining points). A blue ⊗ button also appears in the top toolbar.
+    - Long-press (400ms, 10px movement threshold) a marker to enter drag mode and reposition it — the polyline updates on drop.
+    - "Done" deselects. Undo removes last point; clear removes all.
 - **Groups and Sharing:** Private groups with memberships, invites, and trail sharing features.
 - **Notifications:** In-app and OS-level push notifications for group activities (trail shares, new members).
 - **Trail Adoption & Amendments:** Users can adopt unowned trails and propose edits with categorized reasons.
