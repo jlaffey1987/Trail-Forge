@@ -1502,7 +1502,7 @@ export default function PlannerTab() {
           onCommitRemoveWaypoint={handleCommitRemoveWaypoint}
           onSaveRoute={
             isSignedIn
-              ? async (name) => {
+              ? async ({ name, description, rideType, isPublic }) => {
                   // Build the persistence payload from the live store. We
                   // reach into routeEntries (not routeTrails) so the
                   // entry_order reflects whatever interleave the rider
@@ -1519,6 +1519,9 @@ export default function PlannerTab() {
                   );
                   const created = await createSavedRoute({
                     name,
+                    description,
+                    rideType,
+                    isPublic,
                     trailIds,
                     waypoints: routeWaypoints,
                     entryOrder,

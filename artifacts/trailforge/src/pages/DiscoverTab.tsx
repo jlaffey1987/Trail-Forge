@@ -16,8 +16,19 @@ import {
   type SharedTrail,
 } from "@/lib/groups";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
+import RouteDetailSheet from "@/components/RouteDetailSheet";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import GlossaryDialog from "@/components/GlossaryDialog";
+import {
+  listPublishedRoutes,
+  type ListPublishedRoutesParams,
+} from "@/lib/publishedRoutes";
+import {
+  RIDE_TYPES,
+  RIDE_TYPE_LABEL,
+  type RideType,
+  type SavedRouteSummary,
+} from "@/lib/savedRoutes";
 import {
   markCompleted,
   unmarkCompleted,
@@ -78,16 +89,35 @@ export default function DiscoverTab() {
   const [discoverableGroups, setDiscoverableGroups] = useState<
     DiscoverableGroup[]
   >([]);
-  // Tracks which group's "Request to join" button is mid-flight so we can
-  // disable just that row (and not the whole list) while waiting for the
-  // server response.
   const [joiningGroupId, setJoiningGroupId] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
-  // Keep the "Groups to Join" section compact so it doesn't push the trail
-  // feed off-screen. We show the first 2 by default and let the user expand
-  // the rest with a single tap.
   const [showAllGroups, setShowAllGroups] = useState(false);
   const completedIds = useCompletionIds();
+
+  const [publishedRoutes, setPublishedRoutes] = useState<SavedRouteSummary[]>(
+    [],
+  );
+  const [routesLoading, setRoutesLoading] = useState(true);
+  const [routeRideType, setRouteRideType] = useState<RideType | "">("");
+  const [routeSort, setRouteSort] = useState<"recent" | "likes">("recent");
+  const [routeSearch, setRouteSearch] = useState("");
+  const [openRouteId, setOpenRouteId] = useState<string | null>(null);
+
+  const refreshPublishedRoutes = useCallback(async () => {
+    setRoutesLoading(true);
+    const params: ListPublishedRoutesParams = {
+      sort: routeSort,
+      ...(routeRideType ? { rideType: routeRideType } : {}),
+      ...(routeSearch.trim() ? { q: routeSearch.trim() } : {}),
+    };
+    const list = await listPublishedRoutes(params);
+    setPublishedRoutes(list);
+    setRoutesLoading(false);
+  }, [routeSort, routeRideType, routeSearch]);
+
+  useEffect(() => {
+    void refreshPublishedRoutes();
+  }, [refreshPublishedRoutes]);
 
   const refreshDiscoverableGroups = useCallback(async () => {
     if (!isSignedIn) {
@@ -107,8 +137,6 @@ export default function DiscoverTab() {
       setJoinError(res.error || "Could not send request");
       return;
     }
-    // Optimistically mark this group as pending so the CTA flips immediately,
-    // then refetch so the (potentially server-corrected) state wins.
     setDiscoverableGroups((cur) =>
       cur.map((g) =>
         g.id === group.id ? { ...g, my_status: "pending" as const } : g,
@@ -122,8 +150,6 @@ export default function DiscoverTab() {
     void refreshDiscoverableGroups();
     void Promise.all([fetchCommunityTrails(), fetchGroupTrails()]).then(
       ([community, groupTrails]) => {
-        // Merge: group-shared trails go first so the user sees private picks
-        // from their groups at the top of the feed alongside the public list.
         const seen = new Set<string>();
         const merged: SharedTrail[] = [];
         for (const t of groupTrails) {
@@ -151,8 +177,6 @@ export default function DiscoverTab() {
     refresh();
   }, [refresh]);
 
-  // Invalidate the discover feed when group membership changes so removed
-  // members no longer see private trails from a group they just left.
   useEffect(() => {
     const handler = () => refresh();
     window.addEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
@@ -160,12 +184,6 @@ export default function DiscoverTab() {
       window.removeEventListener(GROUPS_MEMBERSHIP_CHANGED_EVENT, handler);
   }, [refresh]);
 
-  // Open a TrailDetailSheet when the URL carries `?trail=<id>`. The
-  // notifications bell (and push-notification deep links) set this and
-  // navigate to /discover via wouter; depending on the wouter search string
-  // means this effect re-fires for both fresh mounts and in-tab updates.
-  // Once the sheet is opened we strip the param so navigating away and back
-  // doesn't re-open the sheet.
   useEffect(() => {
     if (loading) return;
     const params = new URLSearchParams(queryString);
@@ -600,6 +618,198 @@ export default function DiscoverTab() {
             })
           )}
         </div>
+      )}
+
+      {/* Published Routes section — community-built routes published to Discover.
+          Independent of the trail filter ribbon above; routes have their own
+          ride-type chips, search, and recent/likes sort. */}
+      <div className="px-4 pb-6" data-testid="discover-routes-section">
+        <div className="flex items-baseline justify-between mb-2">
+          <h2
+            className="text-[11px] font-bold uppercase tracking-widest text-amber-400"
+            style={{ letterSpacing: "0.12em" }}
+          >
+            Discover Routes
+          </h2>
+          <span className="text-[10px] text-stone-500">
+            {publishedRoutes.length}
+          </span>
+        </div>
+
+        <div className="flex gap-2 mb-2">
+          <input
+            type="search"
+            value={routeSearch}
+            onChange={(e) => setRouteSearch(e.target.value)}
+            placeholder="Search routes…"
+            data-testid="discover-routes-search"
+            className="flex-1 px-3 py-1.5 rounded-lg bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] text-stone-100 text-xs placeholder-stone-600 focus:outline-none focus:border-amber-500/60"
+          />
+          <button
+            type="button"
+            onClick={() =>
+              setRouteSort((s) => (s === "recent" ? "likes" : "recent"))
+            }
+            data-testid="discover-routes-sort"
+            className="px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-stone-700 text-stone-300 hover:border-amber-500/40"
+            title="Toggle sort"
+          >
+            {routeSort === "recent" ? "Recent" : "Top liked"}
+          </button>
+        </div>
+
+        <div className="flex gap-1.5 overflow-x-auto pb-1 mb-3 -mx-1 px-1">
+          <button
+            type="button"
+            onClick={() => setRouteRideType("")}
+            data-testid="discover-routes-ridetype-all"
+            className={
+              "shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-colors " +
+              (routeRideType === ""
+                ? "bg-amber-500/20 border-amber-500/60 text-amber-300"
+                : "border-stone-700 text-stone-400 hover:border-amber-500/40")
+            }
+          >
+            All
+          </button>
+          {RIDE_TYPES.map((rt) => (
+            <button
+              key={rt}
+              type="button"
+              onClick={() => setRouteRideType(rt)}
+              data-testid={`discover-routes-ridetype-${rt}`}
+              className={
+                "shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border transition-colors " +
+                (routeRideType === rt
+                  ? "bg-amber-500/20 border-amber-500/60 text-amber-300"
+                  : "border-stone-700 text-stone-400 hover:border-amber-500/40")
+              }
+            >
+              {RIDE_TYPE_LABEL[rt]}
+            </button>
+          ))}
+        </div>
+
+        {routesLoading ? (
+          <p className="text-center text-xs text-stone-500 py-6">
+            Loading routes…
+          </p>
+        ) : publishedRoutes.length === 0 ? (
+          <p
+            className="text-center text-xs text-stone-500 py-6"
+            data-testid="discover-routes-empty"
+          >
+            No published routes match your filters yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {publishedRoutes.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => setOpenRouteId(r.id)}
+                data-testid={`discover-route-${r.id}`}
+                className="w-full text-left bg-[hsl(22,15%,11%)] border border-[hsl(30,12%,20%)] rounded-xl p-3 hover:border-amber-500/40 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-2 mb-1">
+                  <h3 className="text-sm font-bold text-stone-100 truncate flex-1">
+                    {r.name}
+                  </h3>
+                  {r.rideType && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider text-amber-300 bg-amber-900/30 border border-amber-500/30 shrink-0">
+                      {RIDE_TYPE_LABEL[r.rideType]}
+                    </span>
+                  )}
+                </div>
+                {/* Region tag — surfaces the publisher-tagged area
+                    (e.g. "Peak District", "Snowdonia") so riders can
+                    scan the feed for routes near them without opening
+                    every card. Hidden when the route was published
+                    without a region. */}
+                {r.region && (
+                  <p
+                    className="flex items-center gap-1 text-[10px] text-emerald-300/90 mb-1 truncate"
+                    data-testid={`discover-route-region-${r.id}`}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="w-3 h-3 shrink-0"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                      <circle cx="12" cy="10" r="3" />
+                    </svg>
+                    <span className="truncate">{r.region}</span>
+                  </p>
+                )}
+                {r.ownerName && (
+                  <p
+                    className="text-[10px] text-stone-500 mb-1 truncate"
+                    data-testid={`discover-route-owner-${r.id}`}
+                  >
+                    by {r.ownerName}
+                  </p>
+                )}
+                {r.description && (
+                  <p className="text-[11px] text-stone-400 line-clamp-2 mb-1.5">
+                    {r.description}
+                  </p>
+                )}
+                <div className="flex items-center gap-3 text-[11px] text-stone-500">
+                  <span>
+                    {r.trails.length} trail
+                    {r.trails.length !== 1 ? "s" : ""}
+                  </span>
+                  {r.totalDistanceKm != null && (
+                    <span className="text-amber-400">
+                      {r.totalDistanceKm.toFixed(1)} km
+                    </span>
+                  )}
+                  <span className="ml-auto flex items-center gap-1">
+                    <svg
+                      viewBox="0 0 24 24"
+                      className={`w-3.5 h-3.5 ${r.likedByMe ? "fill-red-500 stroke-red-500" : "stroke-current"}`}
+                      fill="none"
+                      strokeWidth="2"
+                    >
+                      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+                    </svg>
+                    {r.likesCount}
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 stroke-current" fill="none" strokeWidth="2">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                    {r.commentsCount}
+                  </span>
+                </div>
+                {r.hiddenTrailCount > 0 && (
+                  <p className="text-[10px] text-amber-400/80 mt-1">
+                    {r.hiddenTrailCount} trail
+                    {r.hiddenTrailCount !== 1 ? "s" : ""} hidden
+                  </p>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {openRouteId && (
+        <RouteDetailSheet
+          routeId={openRouteId}
+          initial={
+            publishedRoutes.find((r) => r.id === openRouteId) ?? null
+          }
+          onClose={() => {
+            setOpenRouteId(null);
+            // Refresh the list so updated like/comment counts show
+            // immediately when the sheet closes.
+            void refreshPublishedRoutes();
+          }}
+        />
       )}
 
       {selectedTrail && (() => {

@@ -13,6 +13,11 @@ import {
 import { fetchTrailGpxByIds, type Trail } from "@/lib/supabase";
 import { haversineM } from "@/lib/routing";
 import type { RouteEntry, RouteWaypoint } from "@/lib/routing";
+import {
+  RIDE_TYPES,
+  RIDE_TYPE_LABEL,
+  type RideType,
+} from "@/lib/savedRoutes";
 
 const DIFFICULTY_COLORS: Record<number, string> = {
   1: "#4ade80", 2: "#86efac", 3: "#a3e635", 4: "#bef264", 5: "#fbbf24",
@@ -77,7 +82,12 @@ interface Props {
    * Returns "saved" / "limit" / "error" so the builder can surface
    * the right toast without owning the API call itself.
    */
-  onSaveRoute?: (name: string) => Promise<"saved" | "limit" | "error">;
+  onSaveRoute?: (payload: {
+    name: string;
+    description: string | null;
+    rideType: RideType | null;
+    isPublic: boolean;
+  }) => Promise<"saved" | "limit" | "error">;
   /**
    * The saved-route row currently loaded into the planner, if any. When
    * set, the builder offers an "Update <name>" affordance in addition
@@ -182,6 +192,12 @@ export default function RouteBuilder({
   // own a modal — the builder is already a full-screen sheet.
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saveName, setSaveName] = useState("");
+  // Publish-flow extras: optional description, ride-type tag, and the
+  // public toggle. We default `isPublic` to false so a careless tap on
+  // "Save" never accidentally exposes a draft route to Discover.
+  const [saveDescription, setSaveDescription] = useState("");
+  const [saveRideType, setSaveRideType] = useState<RideType | "">("");
+  const [saveIsPublic, setSaveIsPublic] = useState(false);
   const [savingRoute, setSavingRoute] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState<string | null>(null);
@@ -310,6 +326,9 @@ export default function RouteBuilder({
 
   const openSaveDialog = () => {
     setSaveName(suggestedName);
+    setSaveDescription("");
+    setSaveRideType("");
+    setSaveIsPublic(false);
     setSaveError(null);
     setShowSaveDialog(true);
   };
@@ -321,14 +340,33 @@ export default function RouteBuilder({
       setSaveError("Give your route a name");
       return;
     }
+    if (saveIsPublic && !saveRideType) {
+      // Discover relies on the ride-type filter to surface routes, so
+      // a public route without one would be functionally invisible.
+      setSaveError("Pick a ride type before publishing");
+      return;
+    }
     setSavingRoute(true);
     setSaveError(null);
-    const result = await onSaveRoute(trimmed);
+    const descTrim = saveDescription.trim();
+    const result = await onSaveRoute({
+      name: trimmed,
+      description: descTrim.length > 0 ? descTrim : null,
+      rideType: saveRideType === "" ? null : saveRideType,
+      isPublic: saveIsPublic,
+    });
     setSavingRoute(false);
     if (result === "saved") {
       setShowSaveDialog(false);
       setSaveName("");
-      setSaveToast(`Saved "${trimmed}" to My Trails`);
+      setSaveDescription("");
+      setSaveRideType("");
+      setSaveIsPublic(false);
+      setSaveToast(
+        saveIsPublic
+          ? `Published "${trimmed}" to Discover`
+          : `Saved "${trimmed}" to My Trails`,
+      );
     } else if (result === "limit") {
       setSaveError(
         "You've reached 50 saved routes. Delete one in My Trails to save a new one.",
@@ -1417,6 +1455,60 @@ export default function RouteBuilder({
               data-testid="save-route-name-input"
               className="w-full px-3 py-2.5 rounded-lg bg-[hsl(22,15%,9%)] border border-[hsl(30,12%,22%)] text-stone-100 text-sm placeholder-stone-600 focus:outline-none focus:border-amber-500/60"
             />
+
+            <label className="block text-[11px] uppercase tracking-wider text-stone-500 font-bold mt-3 mb-1">
+              Description (optional)
+            </label>
+            <textarea
+              value={saveDescription}
+              onChange={(e) => setSaveDescription(e.target.value)}
+              rows={2}
+              maxLength={2000}
+              placeholder="What's this route like?"
+              data-testid="save-route-description-input"
+              className="w-full px-3 py-2 rounded-lg bg-[hsl(22,15%,9%)] border border-[hsl(30,12%,22%)] text-stone-100 text-xs placeholder-stone-600 focus:outline-none focus:border-amber-500/60 resize-none"
+            />
+
+            <label className="block text-[11px] uppercase tracking-wider text-stone-500 font-bold mt-3 mb-1">
+              Ride type
+            </label>
+            <div className="flex flex-wrap gap-1.5" data-testid="save-route-ride-type">
+              {RIDE_TYPES.map((rt) => {
+                const active = saveRideType === rt;
+                return (
+                  <button
+                    key={rt}
+                    type="button"
+                    onClick={() => setSaveRideType(active ? "" : rt)}
+                    data-testid={`save-route-ride-type-${rt}`}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${
+                      active
+                        ? "bg-amber-500 text-stone-900 border-amber-500"
+                        : "text-stone-300 border-stone-700 bg-[hsl(22,15%,9%)] hover:border-amber-500/50"
+                    }`}
+                  >
+                    {RIDE_TYPE_LABEL[rt]}
+                  </button>
+                );
+              })}
+            </div>
+
+            <label className="flex items-start gap-2 mt-4 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={saveIsPublic}
+                onChange={(e) => setSaveIsPublic(e.target.checked)}
+                data-testid="save-route-public-toggle"
+                className="mt-0.5 w-4 h-4 accent-amber-500"
+              />
+              <span className="text-[12px] text-stone-200 leading-snug">
+                <span className="font-semibold">Publish to Discover</span>
+                <span className="block text-[11px] text-stone-500 mt-0.5">
+                  Other riders can view, like, comment, and "Follow this route" in the planner.
+                </span>
+              </span>
+            </label>
+
             {saveError && (
               <p
                 className="text-[11px] text-red-400 mt-2"

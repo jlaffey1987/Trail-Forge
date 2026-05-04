@@ -88,6 +88,12 @@ export const SyncMeResponse = zod.object({
   display_name: zod.string().nullish(),
   avatar_url: zod.string().nullish(),
   created_at: zod.string().nullish(),
+  is_moderator: zod
+    .boolean()
+    .optional()
+    .describe(
+      'True when the row carries `users.is_moderator = true`. The client\nuses this to surface moderator-only affordances (e.g. the \"Hide\"\nbutton on others\' route comments). Server endpoints still re-check\nthe flag — this field is purely a UI hint.\n',
+    ),
 });
 
 /**
@@ -191,6 +197,500 @@ export const migrateSessionSavedTrailsResponseMigratedMin = 0;
 
 export const MigrateSessionSavedTrailsResponse = zod.object({
   migrated: zod.number().min(migrateSessionSavedTrailsResponseMigratedMin),
+});
+
+/**
+ * Returns all of the rider's non-deleted saved routes hydrated with
+the trails they're permitted to see. Used by the My Routes tab.
+
+ * @summary List the caller's saved (named) routes
+ */
+export const listMySavedRoutesResponseRoutesItemLikesCountMin = 0;
+
+export const listMySavedRoutesResponseRoutesItemCommentsCountMin = 0;
+
+export const listMySavedRoutesResponseRoutesItemHiddenTrailCountMin = 0;
+
+export const ListMySavedRoutesResponse = zod.object({
+  routes: zod.array(
+    zod.object({
+      id: zod.string(),
+      userId: zod.string().nullish(),
+      name: zod.string(),
+      description: zod.string().nullish(),
+      rideType: zod
+        .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+        .nullish(),
+      region: zod.string().nullish(),
+      isPublic: zod.boolean().optional(),
+      trailIds: zod.array(zod.string()),
+      trails: zod.array(zod.record(zod.string(), zod.unknown())),
+      totalDistanceKm: zod.number().nullish(),
+      likesCount: zod
+        .number()
+        .min(listMySavedRoutesResponseRoutesItemLikesCountMin),
+      commentsCount: zod
+        .number()
+        .min(listMySavedRoutesResponseRoutesItemCommentsCountMin),
+      likedByMe: zod.boolean(),
+      hiddenTrailCount: zod
+        .number()
+        .min(listMySavedRoutesResponseRoutesItemHiddenTrailCountMin),
+      ownerName: zod.string().nullish(),
+      ownerAvatar: zod.string().nullish(),
+      createdAt: zod.string(),
+      updatedAt: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * @summary Save a new named route from the planner
+ */
+export const createMySavedRouteBodyNameMax = 200;
+
+export const CreateMySavedRouteBody = zod.object({
+  name: zod.string().min(1).max(createMySavedRouteBodyNameMax),
+  description: zod.string().nullish(),
+  rideType: zod
+    .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+    .nullish(),
+  region: zod.string().nullish(),
+  isPublic: zod.boolean().optional(),
+  trailIds: zod.array(zod.string()),
+  waypoints: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+      }),
+    )
+    .optional(),
+  entryOrder: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+        kind: zod.enum(["trail", "waypoint"]),
+      }),
+    )
+    .optional(),
+  distanceKm: zod.number().nullish(),
+});
+
+export const createMySavedRouteResponseRouteLikesCountMin = 0;
+
+export const createMySavedRouteResponseRouteCommentsCountMin = 0;
+
+export const createMySavedRouteResponseRouteHiddenTrailCountMin = 0;
+
+export const CreateMySavedRouteResponse = zod.object({
+  id: zod.string(),
+  name: zod.string(),
+  createdAt: zod.string(),
+  route: zod
+    .object({
+      id: zod.string(),
+      userId: zod.string().nullish(),
+      name: zod.string(),
+      description: zod.string().nullish(),
+      rideType: zod
+        .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+        .nullish(),
+      region: zod.string().nullish(),
+      isPublic: zod.boolean().optional(),
+      trailIds: zod.array(zod.string()),
+      trails: zod.array(zod.record(zod.string(), zod.unknown())),
+      totalDistanceKm: zod.number().nullish(),
+      likesCount: zod
+        .number()
+        .min(createMySavedRouteResponseRouteLikesCountMin),
+      commentsCount: zod
+        .number()
+        .min(createMySavedRouteResponseRouteCommentsCountMin),
+      likedByMe: zod.boolean(),
+      hiddenTrailCount: zod
+        .number()
+        .min(createMySavedRouteResponseRouteHiddenTrailCountMin),
+      ownerName: zod.string().nullish(),
+      ownerAvatar: zod.string().nullish(),
+      createdAt: zod.string(),
+      updatedAt: zod.string().nullish(),
+    })
+    .optional(),
+});
+
+/**
+ * @summary Replace the trails+waypoints+order of an existing saved route
+ */
+export const ReplaceMySavedRouteParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const replaceMySavedRouteBodyNameMax = 200;
+
+export const ReplaceMySavedRouteBody = zod.object({
+  name: zod.string().min(1).max(replaceMySavedRouteBodyNameMax),
+  description: zod.string().nullish(),
+  rideType: zod
+    .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+    .nullish(),
+  region: zod.string().nullish(),
+  isPublic: zod.boolean().optional(),
+  trailIds: zod.array(zod.string()),
+  waypoints: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+      }),
+    )
+    .optional(),
+  entryOrder: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+        kind: zod.enum(["trail", "waypoint"]),
+      }),
+    )
+    .optional(),
+  distanceKm: zod.number().nullish(),
+});
+
+export const replaceMySavedRouteResponseRouteLikesCountMin = 0;
+
+export const replaceMySavedRouteResponseRouteCommentsCountMin = 0;
+
+export const replaceMySavedRouteResponseRouteHiddenTrailCountMin = 0;
+
+export const ReplaceMySavedRouteResponse = zod.object({
+  id: zod.string(),
+  name: zod.string(),
+  createdAt: zod.string(),
+  route: zod
+    .object({
+      id: zod.string(),
+      userId: zod.string().nullish(),
+      name: zod.string(),
+      description: zod.string().nullish(),
+      rideType: zod
+        .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+        .nullish(),
+      region: zod.string().nullish(),
+      isPublic: zod.boolean().optional(),
+      trailIds: zod.array(zod.string()),
+      trails: zod.array(zod.record(zod.string(), zod.unknown())),
+      totalDistanceKm: zod.number().nullish(),
+      likesCount: zod
+        .number()
+        .min(replaceMySavedRouteResponseRouteLikesCountMin),
+      commentsCount: zod
+        .number()
+        .min(replaceMySavedRouteResponseRouteCommentsCountMin),
+      likedByMe: zod.boolean(),
+      hiddenTrailCount: zod
+        .number()
+        .min(replaceMySavedRouteResponseRouteHiddenTrailCountMin),
+      ownerName: zod.string().nullish(),
+      ownerAvatar: zod.string().nullish(),
+      createdAt: zod.string(),
+      updatedAt: zod.string().nullish(),
+    })
+    .optional(),
+});
+
+/**
+ * @summary Edit metadata (rename, description, ride type, publish flag)
+ */
+export const PatchMySavedRouteParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const patchMySavedRouteBodyNameMax = 200;
+
+export const PatchMySavedRouteBody = zod.object({
+  name: zod.string().min(1).max(patchMySavedRouteBodyNameMax).optional(),
+  description: zod.string().nullish(),
+  rideType: zod
+    .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+    .nullish(),
+  region: zod.string().nullish(),
+  isPublic: zod.boolean().optional(),
+});
+
+export const patchMySavedRouteResponseRouteLikesCountMin = 0;
+
+export const patchMySavedRouteResponseRouteCommentsCountMin = 0;
+
+export const patchMySavedRouteResponseRouteHiddenTrailCountMin = 0;
+
+export const PatchMySavedRouteResponse = zod.object({
+  id: zod.string(),
+  name: zod.string(),
+  route: zod
+    .object({
+      id: zod.string(),
+      userId: zod.string().nullish(),
+      name: zod.string(),
+      description: zod.string().nullish(),
+      rideType: zod
+        .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+        .nullish(),
+      region: zod.string().nullish(),
+      isPublic: zod.boolean().optional(),
+      trailIds: zod.array(zod.string()),
+      trails: zod.array(zod.record(zod.string(), zod.unknown())),
+      totalDistanceKm: zod.number().nullish(),
+      likesCount: zod.number().min(patchMySavedRouteResponseRouteLikesCountMin),
+      commentsCount: zod
+        .number()
+        .min(patchMySavedRouteResponseRouteCommentsCountMin),
+      likedByMe: zod.boolean(),
+      hiddenTrailCount: zod
+        .number()
+        .min(patchMySavedRouteResponseRouteHiddenTrailCountMin),
+      ownerName: zod.string().nullish(),
+      ownerAvatar: zod.string().nullish(),
+      createdAt: zod.string(),
+      updatedAt: zod.string().nullish(),
+    })
+    .optional(),
+});
+
+/**
+ * @summary Soft-delete a saved route owned by the caller
+ */
+export const DeleteMySavedRouteParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const DeleteMySavedRouteResponse = zod.object({
+  deleted: zod.boolean(),
+});
+
+/**
+ * Returns published routes hydrated with the trails the caller is
+permitted to see (private trails are stripped and counted in
+`hiddenTrailCount`). Supports filtering by ride type, free-text
+search across name/description, and sorting by recency or likes.
+
+ * @summary List published (public) routes for the Discover feed
+ */
+export const listPublicRoutesQueryLimitMax = 100;
+
+export const ListPublicRoutesQueryParams = zod.object({
+  rideType: zod
+    .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+    .optional(),
+  region: zod.coerce.string().optional(),
+  q: zod.coerce
+    .string()
+    .optional()
+    .describe("Free-text query over name + description."),
+  sort: zod.enum(["recent", "likes"]).optional(),
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(listPublicRoutesQueryLimitMax)
+    .optional(),
+});
+
+export const listPublicRoutesResponseRoutesItemLikesCountMin = 0;
+
+export const listPublicRoutesResponseRoutesItemCommentsCountMin = 0;
+
+export const listPublicRoutesResponseRoutesItemHiddenTrailCountMin = 0;
+
+export const ListPublicRoutesResponse = zod.object({
+  routes: zod.array(
+    zod.object({
+      id: zod.string(),
+      userId: zod.string().nullish(),
+      name: zod.string(),
+      description: zod.string().nullish(),
+      rideType: zod
+        .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+        .nullish(),
+      region: zod.string().nullish(),
+      isPublic: zod.boolean().optional(),
+      trailIds: zod.array(zod.string()),
+      trails: zod.array(zod.record(zod.string(), zod.unknown())),
+      totalDistanceKm: zod.number().nullish(),
+      likesCount: zod
+        .number()
+        .min(listPublicRoutesResponseRoutesItemLikesCountMin),
+      commentsCount: zod
+        .number()
+        .min(listPublicRoutesResponseRoutesItemCommentsCountMin),
+      likedByMe: zod.boolean(),
+      hiddenTrailCount: zod
+        .number()
+        .min(listPublicRoutesResponseRoutesItemHiddenTrailCountMin),
+      ownerName: zod.string().nullish(),
+      ownerAvatar: zod.string().nullish(),
+      createdAt: zod.string(),
+      updatedAt: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * @summary Fetch a single published route by id
+ */
+export const GetPublicRouteParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const getPublicRouteResponseRouteLikesCountMin = 0;
+
+export const getPublicRouteResponseRouteCommentsCountMin = 0;
+
+export const getPublicRouteResponseRouteHiddenTrailCountMin = 0;
+
+export const GetPublicRouteResponse = zod.object({
+  route: zod.object({
+    id: zod.string(),
+    userId: zod.string().nullish(),
+    name: zod.string(),
+    description: zod.string().nullish(),
+    rideType: zod
+      .enum(["adventure", "enduro", "trail", "green-laning", "other"])
+      .nullish(),
+    region: zod.string().nullish(),
+    isPublic: zod.boolean().optional(),
+    trailIds: zod.array(zod.string()),
+    trails: zod.array(zod.record(zod.string(), zod.unknown())),
+    totalDistanceKm: zod.number().nullish(),
+    likesCount: zod.number().min(getPublicRouteResponseRouteLikesCountMin),
+    commentsCount: zod
+      .number()
+      .min(getPublicRouteResponseRouteCommentsCountMin),
+    likedByMe: zod.boolean(),
+    hiddenTrailCount: zod
+      .number()
+      .min(getPublicRouteResponseRouteHiddenTrailCountMin),
+    ownerName: zod.string().nullish(),
+    ownerAvatar: zod.string().nullish(),
+    createdAt: zod.string(),
+    updatedAt: zod.string().nullish(),
+  }),
+});
+
+/**
+ * @summary Like a published route (idempotent)
+ */
+export const LikeRouteParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const likeRouteResponseLikesCountMin = 0;
+
+export const LikeRouteResponse = zod.object({
+  liked: zod.boolean(),
+  likesCount: zod.number().min(likeRouteResponseLikesCountMin),
+});
+
+/**
+ * @summary Remove your like from a published route (idempotent)
+ */
+export const UnlikeRouteParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const unlikeRouteResponseLikesCountMin = 0;
+
+export const UnlikeRouteResponse = zod.object({
+  liked: zod.boolean(),
+  likesCount: zod.number().min(unlikeRouteResponseLikesCountMin),
+});
+
+/**
+ * @summary List threaded comments on a route
+ */
+export const ListRouteCommentsParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const ListRouteCommentsResponse = zod.object({
+  comments: zod.array(
+    zod.object({
+      id: zod.string(),
+      routeId: zod.string(),
+      userId: zod.string(),
+      parentId: zod.string().nullish(),
+      body: zod.string(),
+      createdAt: zod.string(),
+      authorName: zod.string().nullish(),
+      authorAvatar: zod.string().nullish(),
+      mine: zod.boolean(),
+    }),
+  ),
+});
+
+/**
+ * @summary Post a comment or threaded reply
+ */
+export const PostRouteCommentParams = zod.object({
+  id: zod.coerce.string(),
+});
+
+export const postRouteCommentBodyBodyMax = 2000;
+
+export const PostRouteCommentBody = zod.object({
+  body: zod.string().min(1).max(postRouteCommentBodyBodyMax),
+  parentId: zod.string().nullish(),
+});
+
+export const PostRouteCommentResponse = zod.object({
+  comment: zod.object({
+    id: zod.string(),
+    routeId: zod.string(),
+    userId: zod.string(),
+    parentId: zod.string().nullish(),
+    body: zod.string(),
+    createdAt: zod.string(),
+    authorName: zod.string().nullish(),
+    authorAvatar: zod.string().nullish(),
+    mine: zod.boolean(),
+  }),
+});
+
+/**
+ * @summary Edit your own comment
+ */
+export const UpdateRouteCommentParams = zod.object({
+  id: zod.coerce.string(),
+  commentId: zod.coerce.string(),
+});
+
+export const updateRouteCommentBodyBodyMax = 2000;
+
+export const UpdateRouteCommentBody = zod.object({
+  body: zod.string().min(1).max(updateRouteCommentBodyBodyMax),
+});
+
+export const UpdateRouteCommentResponse = zod.object({
+  comment: zod.object({
+    id: zod.string(),
+    routeId: zod.string(),
+    userId: zod.string(),
+    parentId: zod.string().nullish(),
+    body: zod.string(),
+    createdAt: zod.string(),
+    authorName: zod.string().nullish(),
+    authorAvatar: zod.string().nullish(),
+    mine: zod.boolean(),
+  }),
+});
+
+/**
+ * @summary Delete a comment (author or moderator)
+ */
+export const DeleteRouteCommentParams = zod.object({
+  id: zod.coerce.string(),
+  commentId: zod.coerce.string(),
+});
+
+export const DeleteRouteCommentResponse = zod.object({
+  deleted: zod.boolean(),
+  byModerator: zod.boolean().optional(),
 });
 
 /**

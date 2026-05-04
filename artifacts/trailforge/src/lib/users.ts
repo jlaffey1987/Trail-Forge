@@ -4,6 +4,13 @@ export interface AppUser {
   display_name: string | null;
   avatar_url: string | null;
   created_at: string;
+  /**
+   * Server-managed flag — true when `users.is_moderator = true` for the
+   * caller. Surfaced so the client can show moderator-only affordances
+   * (e.g. the "Hide" button on others' route comments). Authoritative
+   * checks still happen server-side; this field is purely a UI hint.
+   */
+  is_moderator?: boolean;
 }
 
 /**

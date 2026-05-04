@@ -61,6 +61,12 @@ export interface AppUser {
   display_name?: string | null;
   avatar_url?: string | null;
   created_at?: string | null;
+  /** True when the row carries `users.is_moderator = true`. The client
+uses this to surface moderator-only affordances (e.g. the "Hide"
+button on others' route comments). Server endpoints still re-check
+the flag — this field is purely a UI hint.
+ */
+  is_moderator?: boolean;
 }
 
 export interface SaveTrailRequest {
@@ -119,6 +125,162 @@ export interface CreatedTrail {
   owner_user_id?: string | null;
 }
 
+export type PublicRouteSummaryTrailsItem = { [key: string]: unknown };
+
+export type RideType = (typeof RideType)[keyof typeof RideType];
+
+export const RideType = {
+  adventure: "adventure",
+  enduro: "enduro",
+  trail: "trail",
+  "green-laning": "green-laning",
+  other: "other",
+} as const;
+
+export interface PublicRouteSummary {
+  id: string;
+  userId?: string | null;
+  name: string;
+  description?: string | null;
+  rideType?: RideType | null;
+  region?: string | null;
+  isPublic?: boolean;
+  trailIds: string[];
+  trails: PublicRouteSummaryTrailsItem[];
+  totalDistanceKm?: number | null;
+  /** @minimum 0 */
+  likesCount: number;
+  /** @minimum 0 */
+  commentsCount: number;
+  likedByMe: boolean;
+  /** @minimum 0 */
+  hiddenTrailCount: number;
+  ownerName?: string | null;
+  ownerAvatar?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+}
+
+export interface PublicRoutesList {
+  routes: PublicRouteSummary[];
+}
+
+export interface PublicRouteEnvelope {
+  route: PublicRouteSummary;
+}
+
+export interface RouteLikeResult {
+  liked: boolean;
+  /** @minimum 0 */
+  likesCount: number;
+}
+
+export interface RouteComment {
+  id: string;
+  routeId: string;
+  userId: string;
+  parentId?: string | null;
+  body: string;
+  createdAt: string;
+  authorName?: string | null;
+  authorAvatar?: string | null;
+  mine: boolean;
+}
+
+export interface RouteCommentsList {
+  comments: RouteComment[];
+}
+
+export interface RouteCommentEnvelope {
+  comment: RouteComment;
+}
+
+export interface PostRouteCommentRequest {
+  /**
+   * @minLength 1
+   * @maxLength 2000
+   */
+  body: string;
+  parentId?: string | null;
+}
+
+export interface UpdateRouteCommentRequest {
+  /**
+   * @minLength 1
+   * @maxLength 2000
+   */
+  body: string;
+}
+
+export interface RouteCommentDeleteResult {
+  deleted: boolean;
+  byModerator?: boolean;
+}
+
+export interface PlannerWaypoint {
+  id: string;
+  [key: string]: unknown;
+}
+
+export type PlannerEntryRefKind =
+  (typeof PlannerEntryRefKind)[keyof typeof PlannerEntryRefKind];
+
+export const PlannerEntryRefKind = {
+  trail: "trail",
+  waypoint: "waypoint",
+} as const;
+
+export interface PlannerEntryRef {
+  id: string;
+  kind: PlannerEntryRefKind;
+  [key: string]: unknown;
+}
+
+export interface SaveRouteRequest {
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  name: string;
+  description?: string | null;
+  rideType?: RideType | null;
+  region?: string | null;
+  isPublic?: boolean;
+  trailIds: string[];
+  waypoints?: PlannerWaypoint[];
+  entryOrder?: PlannerEntryRef[];
+  distanceKm?: number | null;
+}
+
+export interface PatchSavedRouteRequest {
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  name?: string;
+  description?: string | null;
+  rideType?: RideType | null;
+  region?: string | null;
+  isPublic?: boolean;
+}
+
+export interface SavedRouteCreateResponse {
+  id: string;
+  name: string;
+  createdAt: string;
+  route?: PublicRouteSummary;
+}
+
+export interface SavedRoutePatchResponse {
+  id: string;
+  name: string;
+  route?: PublicRouteSummary;
+}
+
+export interface SavedRouteDeleteResult {
+  deleted: boolean;
+}
+
 export type ListMySavedTrailsParams = {
   /**
    * Device session id for guest mode.
@@ -129,3 +291,26 @@ export type ListMySavedTrailsParams = {
 export type CountSessionSavedTrailsParams = {
   sessionId: string;
 };
+
+export type ListPublicRoutesParams = {
+  rideType?: RideType;
+  region?: string;
+  /**
+   * Free-text query over name + description.
+   */
+  q?: string;
+  sort?: ListPublicRoutesSort;
+  /**
+   * @minimum 1
+   * @maximum 100
+   */
+  limit?: number;
+};
+
+export type ListPublicRoutesSort =
+  (typeof ListPublicRoutesSort)[keyof typeof ListPublicRoutesSort];
+
+export const ListPublicRoutesSort = {
+  recent: "recent",
+  likes: "likes",
+} as const;

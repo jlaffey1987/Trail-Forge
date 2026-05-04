@@ -49,6 +49,8 @@ interface QueryState {
   single: boolean;
   maybeSingle: boolean;
   upsertOnConflict: string | null;
+  countMode: "exact" | null;
+  head: boolean;
 }
 
 interface PgError {
@@ -59,6 +61,7 @@ interface PgError {
 interface QueryResult {
   data: Row | Row[] | null;
   error: PgError | null;
+  count?: number | null;
 }
 
 export class MockSupa {
@@ -126,6 +129,11 @@ export class MockSupa {
 
     if (state.op === "select") {
       let rows = table.filter(matches);
+      // Count-only query (`.select(cols, { count: 'exact', head: true })`)
+      // returns just the matched count; no row payload.
+      if (state.head && state.countMode != null) {
+        return { data: null, error: null, count: rows.length };
+      }
       if (state.order) {
         const { col, ascending } = state.order;
         rows = [...rows].sort((a, b) => {
@@ -297,13 +305,20 @@ class QueryBuilder implements PromiseLike<QueryResult> {
       single: false,
       maybeSingle: false,
       upsertOnConflict: null,
+      countMode: null,
+      head: false,
     };
   }
 
-  select(cols: string = "*"): this {
+  select(
+    cols: string = "*",
+    opts?: { count?: "exact"; head?: boolean },
+  ): this {
     if (this.state.op == null) {
       this.state.op = "select";
       this.state.cols = cols;
+      if (opts?.count != null) this.state.countMode = opts.count;
+      if (opts?.head === true) this.state.head = true;
     } else {
       // Post-mutation `.select(...)` (insert/update with returning).
       this.state.postSelectCols = cols;

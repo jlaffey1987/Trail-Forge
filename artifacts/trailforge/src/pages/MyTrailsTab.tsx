@@ -12,6 +12,7 @@ import {
   listSavedRoutes,
   deleteSavedRoute,
   renameSavedRoute,
+  RIDE_TYPE_LABEL,
   type SavedRouteSummary,
 } from "@/lib/savedRoutes";
 import {
@@ -29,6 +30,7 @@ import EditTrailDialog from "@/components/contribute/EditTrailDialog";
 import GroupsSection from "@/components/groups/GroupsSection";
 import TrailDetailSheet from "@/components/TrailDetailSheet";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
+import RouteThumbnail from "@/components/RouteThumbnail";
 import {
   unmarkCompleted,
   useCompletionItems,
@@ -74,9 +76,6 @@ function RiddenTrailsSection({
   const { items, loaded } = useCompletionItems();
   const [expanded, setExpanded] = useState(false);
 
-  // Signed-out riders see a sign-in prompt instead of the loading
-  // spinner — completions are per-user and there's nothing to fetch
-  // until they're authenticated.
   if (!signedIn) {
     return (
       <section
@@ -239,17 +238,11 @@ export default function MyTrailsTab() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  // Saved routes — named library a signed-in rider has stashed away.
-  // Loaded once per sign-in; refreshed after a load/delete so the list
-  // stays accurate without polling.
   const [savedRoutes, setSavedRoutes] = useState<SavedRouteSummary[]>([]);
   const [loadingSavedRoutes, setLoadingSavedRoutes] = useState(false);
   const [deletingRouteId, setDeletingRouteId] = useState<string | null>(null);
   const [confirmDeleteRouteId, setConfirmDeleteRouteId] = useState<string | null>(null);
-  // Inline rename dialog state. Holds the row being renamed plus the
-  // editable text — the live `savedRoutes` array isn't mutated until
-  // the server confirms the rename, so a failure leaves the original
-  // name visible.
+  const [publishingRouteId, setPublishingRouteId] = useState<string | null>(null);
   const [renamingRoute, setRenamingRoute] = useState<SavedRouteSummary | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [renamingBusy, setRenamingBusy] = useState(false);
@@ -273,13 +266,6 @@ export default function MyTrailsTab() {
 
   const handleLoadRoute = useCallback(
     (route: SavedRouteSummary) => {
-      // Rebuild a RouteEntry[] from the saved row's hydrated trails +
-      // waypoints, ordered by entryOrder. Trails the rider can no
-      // longer see (private/deleted) are silently skipped — same
-      // behaviour as the planner-route GET. setRouteEntries replaces
-      // the live store, persists to localStorage, AND triggers the
-      // debounced PUT /me/planner-route, so the swap is mirrored
-      // across devices.
       const trailById = new Map(route.trails.map((t) => [t.id, t]));
       const wpById = new Map(route.waypoints.map((w) => [w.id, w]));
       const order =
@@ -303,13 +289,8 @@ export default function MyTrailsTab() {
         }
       }
       setRouteEntries(entries);
-      // Bind this row as the "active loaded route" so the Route Builder
-      // can offer "Update <name>" on subsequent saves rather than
-      // creating a duplicate every time.
       setActiveLoadedRoute(route.id, route.name);
       setToast(`Loaded "${route.name}" into the planner`);
-      // Jump straight to the Map so the rider sees the route drawn —
-      // they can open the Planner from there if they want to edit.
       setLocation("/map");
     },
     [setLocation],
@@ -338,7 +319,7 @@ export default function MyTrailsTab() {
     }
     setRenamingBusy(true);
     setRenameError(null);
-    const result = await renameSavedRoute(renamingRoute.id, trimmed);
+    const result = await renameSavedRoute(renamingRoute.id, { name: trimmed });
     setRenamingBusy(false);
     if (result.status === "ok") {
       // Patch the local list in place so the new name shows up
@@ -356,6 +337,44 @@ export default function MyTrailsTab() {
       setRenameError("Couldn't rename route");
     }
   }, [renamingRoute, renameDraft]);
+
+  const handleTogglePublish = useCallback(
+    async (route: SavedRouteSummary) => {
+      // Block publish-without-ride-type at the source. The server enforces
+      // it too, but failing fast here gives a clearer toast and avoids a
+      // round-trip just to see the error.
+      const next = !route.isPublic;
+      if (next && !route.rideType) {
+        setToast(
+          "Pick a ride type before publishing — open the route in the planner and re-save.",
+        );
+        return;
+      }
+      setPublishingRouteId(route.id);
+      // Optimistic flip — the row visually toggles immediately.
+      setSavedRoutes((prev) =>
+        prev.map((r) => (r.id === route.id ? { ...r, isPublic: next } : r)),
+      );
+      const result = await renameSavedRoute(route.id, { isPublic: next });
+      setPublishingRouteId(null);
+      if (result.status !== "ok") {
+        // Roll back the optimistic flip if the server rejected the change.
+        setSavedRoutes((prev) =>
+          prev.map((r) =>
+            r.id === route.id ? { ...r, isPublic: route.isPublic } : r,
+          ),
+        );
+        setToast(
+          result.status === "not-found"
+            ? "Route no longer exists"
+            : "Couldn't update visibility",
+        );
+        return;
+      }
+      setToast(next ? "Route published to Discover" : "Route unpublished");
+    },
+    [],
+  );
 
   const handleDeleteRoute = useCallback(
     async (id: string) => {
@@ -721,6 +740,7 @@ export default function MyTrailsTab() {
               // the rider lost access to some trails (private/deleted).
               // Surface that so they aren't surprised when loading.
               const missing = route.trailIds.length - trailCount;
+              const isPublishingThis = publishingRouteId === route.id;
               return (
                 <div
                   key={route.id}
@@ -729,10 +749,53 @@ export default function MyTrailsTab() {
                 >
                   <div className="p-3">
                     <div className="flex items-start gap-2">
+                      {/* Tiny SVG polyline preview so a rider can spot a
+                          saved route at a glance without opening it.
+                          Renders nothing of value when the trails lack
+                          path data — the placeholder keeps the row
+                          height stable. */}
+                      <div className="shrink-0">
+                        <RouteThumbnail
+                          trails={route.trails}
+                          width={72}
+                          height={56}
+                          testIdSuffix={route.id}
+                        />
+                      </div>
                       <div className="flex-1 min-w-0">
                         <h3 className="text-sm font-bold text-stone-100 truncate">
                           {route.name}
                         </h3>
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          {route.rideType && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider text-amber-300 bg-amber-900/30 border border-amber-500/30"
+                              data-testid={`saved-route-ride-type-${route.id}`}
+                            >
+                              {RIDE_TYPE_LABEL[route.rideType]}
+                            </span>
+                          )}
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+                              route.isPublic
+                                ? "text-emerald-300 bg-emerald-900/30 border border-emerald-500/40"
+                                : "text-stone-400 bg-stone-800/60 border border-stone-700"
+                            }`}
+                            data-testid={`saved-route-visibility-${route.id}`}
+                          >
+                            {route.isPublic ? "Public" : "Private"}
+                          </span>
+                          {route.isPublic && route.likesCount > 0 && (
+                            <span className="text-[10px] text-stone-400">
+                              ♥ {route.likesCount}
+                            </span>
+                          )}
+                          {route.isPublic && route.commentsCount > 0 && (
+                            <span className="text-[10px] text-stone-400">
+                              💬 {route.commentsCount}
+                            </span>
+                          )}
+                        </div>
                         <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
                           <span className="text-[11px] text-stone-400">
                             {trailCount} trail{trailCount !== 1 ? "s" : ""}
@@ -788,6 +851,22 @@ export default function MyTrailsTab() {
                         }}
                       >
                         Load on Map
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleTogglePublish(route)}
+                        disabled={isPublishingThis}
+                        data-testid={`saved-route-publish-${route.id}`}
+                        className={
+                          "px-3 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider border transition-colors disabled:opacity-50 " +
+                          (route.isPublic
+                            ? "border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/20"
+                            : "border-amber-500/40 text-amber-300 hover:bg-amber-900/20")
+                        }
+                        aria-label={route.isPublic ? "Unpublish route" : "Publish route"}
+                        title={route.isPublic ? "Unpublish (hide from Discover)" : "Publish to Discover"}
+                      >
+                        {isPublishingThis ? "…" : route.isPublic ? "Unpub" : "Publish"}
                       </button>
                       <button
                         type="button"

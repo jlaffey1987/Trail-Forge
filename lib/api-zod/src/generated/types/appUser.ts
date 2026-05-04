@@ -12,4 +12,10 @@ export interface AppUser {
   display_name?: string | null;
   avatar_url?: string | null;
   created_at?: string | null;
+  /** True when the row carries `users.is_moderator = true`. The client
+uses this to surface moderator-only affordances (e.g. the "Hide"
+button on others' route comments). Server endpoints still re-check
+the flag — this field is purely a UI hint.
+ */
+  is_moderator?: boolean;
 }

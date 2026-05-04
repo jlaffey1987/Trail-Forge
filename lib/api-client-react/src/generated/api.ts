@@ -25,11 +25,25 @@ import type {
   ErrorEnvelope,
   HealthStatus,
   ListMySavedTrailsParams,
+  ListPublicRoutesParams,
   MigrateRequest,
   MigrateResponse,
   Ok,
+  PatchSavedRouteRequest,
+  PostRouteCommentRequest,
+  PublicRouteEnvelope,
+  PublicRoutesList,
+  RouteCommentDeleteResult,
+  RouteCommentEnvelope,
+  RouteCommentsList,
+  RouteLikeResult,
+  SaveRouteRequest,
   SaveTrailRequest,
+  SavedRouteCreateResponse,
+  SavedRouteDeleteResult,
+  SavedRoutePatchResponse,
   SavedTrailsList,
+  UpdateRouteCommentRequest,
   UploadFinalizeRequest,
   UploadFinalized,
   UploadUrlRequest,
@@ -857,6 +871,1147 @@ export const useMigrateSessionSavedTrails = <
   TContext
 > => {
   return useMutation(getMigrateSessionSavedTrailsMutationOptions(options));
+};
+
+/**
+ * Returns all of the rider's non-deleted saved routes hydrated with
+the trails they're permitted to see. Used by the My Routes tab.
+
+ * @summary List the caller's saved (named) routes
+ */
+export const getListMySavedRoutesUrl = () => {
+  return `/api/me/saved-routes`;
+};
+
+export const listMySavedRoutes = async (
+  options?: RequestInit,
+): Promise<PublicRoutesList> => {
+  return customFetch<PublicRoutesList>(getListMySavedRoutesUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListMySavedRoutesQueryKey = () => {
+  return [`/api/me/saved-routes`] as const;
+};
+
+export const getListMySavedRoutesQueryOptions = <
+  TData = Awaited<ReturnType<typeof listMySavedRoutes>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listMySavedRoutes>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListMySavedRoutesQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listMySavedRoutes>>
+  > = ({ signal }) => listMySavedRoutes({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listMySavedRoutes>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListMySavedRoutesQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listMySavedRoutes>>
+>;
+export type ListMySavedRoutesQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary List the caller's saved (named) routes
+ */
+
+export function useListMySavedRoutes<
+  TData = Awaited<ReturnType<typeof listMySavedRoutes>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listMySavedRoutes>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListMySavedRoutesQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Save a new named route from the planner
+ */
+export const getCreateMySavedRouteUrl = () => {
+  return `/api/me/saved-routes`;
+};
+
+export const createMySavedRoute = async (
+  saveRouteRequest: SaveRouteRequest,
+  options?: RequestInit,
+): Promise<SavedRouteCreateResponse> => {
+  return customFetch<SavedRouteCreateResponse>(getCreateMySavedRouteUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(saveRouteRequest),
+  });
+};
+
+export const getCreateMySavedRouteMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createMySavedRoute>>,
+    TError,
+    { data: BodyType<SaveRouteRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createMySavedRoute>>,
+  TError,
+  { data: BodyType<SaveRouteRequest> },
+  TContext
+> => {
+  const mutationKey = ["createMySavedRoute"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createMySavedRoute>>,
+    { data: BodyType<SaveRouteRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return createMySavedRoute(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateMySavedRouteMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createMySavedRoute>>
+>;
+export type CreateMySavedRouteMutationBody = BodyType<SaveRouteRequest>;
+export type CreateMySavedRouteMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Save a new named route from the planner
+ */
+export const useCreateMySavedRoute = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createMySavedRoute>>,
+    TError,
+    { data: BodyType<SaveRouteRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createMySavedRoute>>,
+  TError,
+  { data: BodyType<SaveRouteRequest> },
+  TContext
+> => {
+  return useMutation(getCreateMySavedRouteMutationOptions(options));
+};
+
+/**
+ * @summary Replace the trails+waypoints+order of an existing saved route
+ */
+export const getReplaceMySavedRouteUrl = (id: string) => {
+  return `/api/me/saved-routes/${id}`;
+};
+
+export const replaceMySavedRoute = async (
+  id: string,
+  saveRouteRequest: SaveRouteRequest,
+  options?: RequestInit,
+): Promise<SavedRouteCreateResponse> => {
+  return customFetch<SavedRouteCreateResponse>(getReplaceMySavedRouteUrl(id), {
+    ...options,
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(saveRouteRequest),
+  });
+};
+
+export const getReplaceMySavedRouteMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof replaceMySavedRoute>>,
+    TError,
+    { id: string; data: BodyType<SaveRouteRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof replaceMySavedRoute>>,
+  TError,
+  { id: string; data: BodyType<SaveRouteRequest> },
+  TContext
+> => {
+  const mutationKey = ["replaceMySavedRoute"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof replaceMySavedRoute>>,
+    { id: string; data: BodyType<SaveRouteRequest> }
+  > = (props) => {
+    const { id, data } = props ?? {};
+
+    return replaceMySavedRoute(id, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ReplaceMySavedRouteMutationResult = NonNullable<
+  Awaited<ReturnType<typeof replaceMySavedRoute>>
+>;
+export type ReplaceMySavedRouteMutationBody = BodyType<SaveRouteRequest>;
+export type ReplaceMySavedRouteMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Replace the trails+waypoints+order of an existing saved route
+ */
+export const useReplaceMySavedRoute = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof replaceMySavedRoute>>,
+    TError,
+    { id: string; data: BodyType<SaveRouteRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof replaceMySavedRoute>>,
+  TError,
+  { id: string; data: BodyType<SaveRouteRequest> },
+  TContext
+> => {
+  return useMutation(getReplaceMySavedRouteMutationOptions(options));
+};
+
+/**
+ * @summary Edit metadata (rename, description, ride type, publish flag)
+ */
+export const getPatchMySavedRouteUrl = (id: string) => {
+  return `/api/me/saved-routes/${id}`;
+};
+
+export const patchMySavedRoute = async (
+  id: string,
+  patchSavedRouteRequest: PatchSavedRouteRequest,
+  options?: RequestInit,
+): Promise<SavedRoutePatchResponse> => {
+  return customFetch<SavedRoutePatchResponse>(getPatchMySavedRouteUrl(id), {
+    ...options,
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(patchSavedRouteRequest),
+  });
+};
+
+export const getPatchMySavedRouteMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof patchMySavedRoute>>,
+    TError,
+    { id: string; data: BodyType<PatchSavedRouteRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof patchMySavedRoute>>,
+  TError,
+  { id: string; data: BodyType<PatchSavedRouteRequest> },
+  TContext
+> => {
+  const mutationKey = ["patchMySavedRoute"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof patchMySavedRoute>>,
+    { id: string; data: BodyType<PatchSavedRouteRequest> }
+  > = (props) => {
+    const { id, data } = props ?? {};
+
+    return patchMySavedRoute(id, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type PatchMySavedRouteMutationResult = NonNullable<
+  Awaited<ReturnType<typeof patchMySavedRoute>>
+>;
+export type PatchMySavedRouteMutationBody = BodyType<PatchSavedRouteRequest>;
+export type PatchMySavedRouteMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Edit metadata (rename, description, ride type, publish flag)
+ */
+export const usePatchMySavedRoute = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof patchMySavedRoute>>,
+    TError,
+    { id: string; data: BodyType<PatchSavedRouteRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof patchMySavedRoute>>,
+  TError,
+  { id: string; data: BodyType<PatchSavedRouteRequest> },
+  TContext
+> => {
+  return useMutation(getPatchMySavedRouteMutationOptions(options));
+};
+
+/**
+ * @summary Soft-delete a saved route owned by the caller
+ */
+export const getDeleteMySavedRouteUrl = (id: string) => {
+  return `/api/me/saved-routes/${id}`;
+};
+
+export const deleteMySavedRoute = async (
+  id: string,
+  options?: RequestInit,
+): Promise<SavedRouteDeleteResult> => {
+  return customFetch<SavedRouteDeleteResult>(getDeleteMySavedRouteUrl(id), {
+    ...options,
+    method: "DELETE",
+  });
+};
+
+export const getDeleteMySavedRouteMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteMySavedRoute>>,
+    TError,
+    { id: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof deleteMySavedRoute>>,
+  TError,
+  { id: string },
+  TContext
+> => {
+  const mutationKey = ["deleteMySavedRoute"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof deleteMySavedRoute>>,
+    { id: string }
+  > = (props) => {
+    const { id } = props ?? {};
+
+    return deleteMySavedRoute(id, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type DeleteMySavedRouteMutationResult = NonNullable<
+  Awaited<ReturnType<typeof deleteMySavedRoute>>
+>;
+
+export type DeleteMySavedRouteMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Soft-delete a saved route owned by the caller
+ */
+export const useDeleteMySavedRoute = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteMySavedRoute>>,
+    TError,
+    { id: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof deleteMySavedRoute>>,
+  TError,
+  { id: string },
+  TContext
+> => {
+  return useMutation(getDeleteMySavedRouteMutationOptions(options));
+};
+
+/**
+ * Returns published routes hydrated with the trails the caller is
+permitted to see (private trails are stripped and counted in
+`hiddenTrailCount`). Supports filtering by ride type, free-text
+search across name/description, and sorting by recency or likes.
+
+ * @summary List published (public) routes for the Discover feed
+ */
+export const getListPublicRoutesUrl = (params?: ListPublicRoutesParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/routes?${stringifiedParams}`
+    : `/api/routes`;
+};
+
+export const listPublicRoutes = async (
+  params?: ListPublicRoutesParams,
+  options?: RequestInit,
+): Promise<PublicRoutesList> => {
+  return customFetch<PublicRoutesList>(getListPublicRoutesUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListPublicRoutesQueryKey = (
+  params?: ListPublicRoutesParams,
+) => {
+  return [`/api/routes`, ...(params ? [params] : [])] as const;
+};
+
+export const getListPublicRoutesQueryOptions = <
+  TData = Awaited<ReturnType<typeof listPublicRoutes>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  params?: ListPublicRoutesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listPublicRoutes>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getListPublicRoutesQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listPublicRoutes>>
+  > = ({ signal }) => listPublicRoutes(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listPublicRoutes>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListPublicRoutesQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listPublicRoutes>>
+>;
+export type ListPublicRoutesQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary List published (public) routes for the Discover feed
+ */
+
+export function useListPublicRoutes<
+  TData = Awaited<ReturnType<typeof listPublicRoutes>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  params?: ListPublicRoutesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listPublicRoutes>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListPublicRoutesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Fetch a single published route by id
+ */
+export const getGetPublicRouteUrl = (id: string) => {
+  return `/api/routes/${id}`;
+};
+
+export const getPublicRoute = async (
+  id: string,
+  options?: RequestInit,
+): Promise<PublicRouteEnvelope> => {
+  return customFetch<PublicRouteEnvelope>(getGetPublicRouteUrl(id), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetPublicRouteQueryKey = (id: string) => {
+  return [`/api/routes/${id}`] as const;
+};
+
+export const getGetPublicRouteQueryOptions = <
+  TData = Awaited<ReturnType<typeof getPublicRoute>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  id: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPublicRoute>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetPublicRouteQueryKey(id);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getPublicRoute>>> = ({
+    signal,
+  }) => getPublicRoute(id, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!id,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getPublicRoute>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetPublicRouteQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getPublicRoute>>
+>;
+export type GetPublicRouteQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Fetch a single published route by id
+ */
+
+export function useGetPublicRoute<
+  TData = Awaited<ReturnType<typeof getPublicRoute>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  id: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPublicRoute>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetPublicRouteQueryOptions(id, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Like a published route (idempotent)
+ */
+export const getLikeRouteUrl = (id: string) => {
+  return `/api/routes/${id}/like`;
+};
+
+export const likeRoute = async (
+  id: string,
+  options?: RequestInit,
+): Promise<RouteLikeResult> => {
+  return customFetch<RouteLikeResult>(getLikeRouteUrl(id), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getLikeRouteMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof likeRoute>>,
+    TError,
+    { id: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof likeRoute>>,
+  TError,
+  { id: string },
+  TContext
+> => {
+  const mutationKey = ["likeRoute"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof likeRoute>>,
+    { id: string }
+  > = (props) => {
+    const { id } = props ?? {};
+
+    return likeRoute(id, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type LikeRouteMutationResult = NonNullable<
+  Awaited<ReturnType<typeof likeRoute>>
+>;
+
+export type LikeRouteMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Like a published route (idempotent)
+ */
+export const useLikeRoute = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof likeRoute>>,
+    TError,
+    { id: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof likeRoute>>,
+  TError,
+  { id: string },
+  TContext
+> => {
+  return useMutation(getLikeRouteMutationOptions(options));
+};
+
+/**
+ * @summary Remove your like from a published route (idempotent)
+ */
+export const getUnlikeRouteUrl = (id: string) => {
+  return `/api/routes/${id}/like`;
+};
+
+export const unlikeRoute = async (
+  id: string,
+  options?: RequestInit,
+): Promise<RouteLikeResult> => {
+  return customFetch<RouteLikeResult>(getUnlikeRouteUrl(id), {
+    ...options,
+    method: "DELETE",
+  });
+};
+
+export const getUnlikeRouteMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof unlikeRoute>>,
+    TError,
+    { id: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof unlikeRoute>>,
+  TError,
+  { id: string },
+  TContext
+> => {
+  const mutationKey = ["unlikeRoute"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof unlikeRoute>>,
+    { id: string }
+  > = (props) => {
+    const { id } = props ?? {};
+
+    return unlikeRoute(id, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type UnlikeRouteMutationResult = NonNullable<
+  Awaited<ReturnType<typeof unlikeRoute>>
+>;
+
+export type UnlikeRouteMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Remove your like from a published route (idempotent)
+ */
+export const useUnlikeRoute = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof unlikeRoute>>,
+    TError,
+    { id: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof unlikeRoute>>,
+  TError,
+  { id: string },
+  TContext
+> => {
+  return useMutation(getUnlikeRouteMutationOptions(options));
+};
+
+/**
+ * @summary List threaded comments on a route
+ */
+export const getListRouteCommentsUrl = (id: string) => {
+  return `/api/routes/${id}/comments`;
+};
+
+export const listRouteComments = async (
+  id: string,
+  options?: RequestInit,
+): Promise<RouteCommentsList> => {
+  return customFetch<RouteCommentsList>(getListRouteCommentsUrl(id), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListRouteCommentsQueryKey = (id: string) => {
+  return [`/api/routes/${id}/comments`] as const;
+};
+
+export const getListRouteCommentsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listRouteComments>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  id: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listRouteComments>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListRouteCommentsQueryKey(id);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listRouteComments>>
+  > = ({ signal }) => listRouteComments(id, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!id,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof listRouteComments>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListRouteCommentsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listRouteComments>>
+>;
+export type ListRouteCommentsQueryError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary List threaded comments on a route
+ */
+
+export function useListRouteComments<
+  TData = Awaited<ReturnType<typeof listRouteComments>>,
+  TError = ErrorType<ErrorEnvelope>,
+>(
+  id: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listRouteComments>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListRouteCommentsQueryOptions(id, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Post a comment or threaded reply
+ */
+export const getPostRouteCommentUrl = (id: string) => {
+  return `/api/routes/${id}/comments`;
+};
+
+export const postRouteComment = async (
+  id: string,
+  postRouteCommentRequest: PostRouteCommentRequest,
+  options?: RequestInit,
+): Promise<RouteCommentEnvelope> => {
+  return customFetch<RouteCommentEnvelope>(getPostRouteCommentUrl(id), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(postRouteCommentRequest),
+  });
+};
+
+export const getPostRouteCommentMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof postRouteComment>>,
+    TError,
+    { id: string; data: BodyType<PostRouteCommentRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof postRouteComment>>,
+  TError,
+  { id: string; data: BodyType<PostRouteCommentRequest> },
+  TContext
+> => {
+  const mutationKey = ["postRouteComment"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof postRouteComment>>,
+    { id: string; data: BodyType<PostRouteCommentRequest> }
+  > = (props) => {
+    const { id, data } = props ?? {};
+
+    return postRouteComment(id, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type PostRouteCommentMutationResult = NonNullable<
+  Awaited<ReturnType<typeof postRouteComment>>
+>;
+export type PostRouteCommentMutationBody = BodyType<PostRouteCommentRequest>;
+export type PostRouteCommentMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Post a comment or threaded reply
+ */
+export const usePostRouteComment = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof postRouteComment>>,
+    TError,
+    { id: string; data: BodyType<PostRouteCommentRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof postRouteComment>>,
+  TError,
+  { id: string; data: BodyType<PostRouteCommentRequest> },
+  TContext
+> => {
+  return useMutation(getPostRouteCommentMutationOptions(options));
+};
+
+/**
+ * @summary Edit your own comment
+ */
+export const getUpdateRouteCommentUrl = (id: string, commentId: string) => {
+  return `/api/routes/${id}/comments/${commentId}`;
+};
+
+export const updateRouteComment = async (
+  id: string,
+  commentId: string,
+  updateRouteCommentRequest: UpdateRouteCommentRequest,
+  options?: RequestInit,
+): Promise<RouteCommentEnvelope> => {
+  return customFetch<RouteCommentEnvelope>(
+    getUpdateRouteCommentUrl(id, commentId),
+    {
+      ...options,
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(updateRouteCommentRequest),
+    },
+  );
+};
+
+export const getUpdateRouteCommentMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof updateRouteComment>>,
+    TError,
+    {
+      id: string;
+      commentId: string;
+      data: BodyType<UpdateRouteCommentRequest>;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof updateRouteComment>>,
+  TError,
+  { id: string; commentId: string; data: BodyType<UpdateRouteCommentRequest> },
+  TContext
+> => {
+  const mutationKey = ["updateRouteComment"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof updateRouteComment>>,
+    { id: string; commentId: string; data: BodyType<UpdateRouteCommentRequest> }
+  > = (props) => {
+    const { id, commentId, data } = props ?? {};
+
+    return updateRouteComment(id, commentId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type UpdateRouteCommentMutationResult = NonNullable<
+  Awaited<ReturnType<typeof updateRouteComment>>
+>;
+export type UpdateRouteCommentMutationBody =
+  BodyType<UpdateRouteCommentRequest>;
+export type UpdateRouteCommentMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Edit your own comment
+ */
+export const useUpdateRouteComment = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof updateRouteComment>>,
+    TError,
+    {
+      id: string;
+      commentId: string;
+      data: BodyType<UpdateRouteCommentRequest>;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof updateRouteComment>>,
+  TError,
+  { id: string; commentId: string; data: BodyType<UpdateRouteCommentRequest> },
+  TContext
+> => {
+  return useMutation(getUpdateRouteCommentMutationOptions(options));
+};
+
+/**
+ * @summary Delete a comment (author or moderator)
+ */
+export const getDeleteRouteCommentUrl = (id: string, commentId: string) => {
+  return `/api/routes/${id}/comments/${commentId}`;
+};
+
+export const deleteRouteComment = async (
+  id: string,
+  commentId: string,
+  options?: RequestInit,
+): Promise<RouteCommentDeleteResult> => {
+  return customFetch<RouteCommentDeleteResult>(
+    getDeleteRouteCommentUrl(id, commentId),
+    {
+      ...options,
+      method: "DELETE",
+    },
+  );
+};
+
+export const getDeleteRouteCommentMutationOptions = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteRouteComment>>,
+    TError,
+    { id: string; commentId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof deleteRouteComment>>,
+  TError,
+  { id: string; commentId: string },
+  TContext
+> => {
+  const mutationKey = ["deleteRouteComment"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof deleteRouteComment>>,
+    { id: string; commentId: string }
+  > = (props) => {
+    const { id, commentId } = props ?? {};
+
+    return deleteRouteComment(id, commentId, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type DeleteRouteCommentMutationResult = NonNullable<
+  Awaited<ReturnType<typeof deleteRouteComment>>
+>;
+
+export type DeleteRouteCommentMutationError = ErrorType<ErrorEnvelope>;
+
+/**
+ * @summary Delete a comment (author or moderator)
+ */
+export const useDeleteRouteComment = <
+  TError = ErrorType<ErrorEnvelope>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof deleteRouteComment>>,
+    TError,
+    { id: string; commentId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof deleteRouteComment>>,
+  TError,
+  { id: string; commentId: string },
+  TContext
+> => {
+  return useMutation(getDeleteRouteCommentMutationOptions(options));
 };
 
 /**

@@ -16,6 +16,10 @@ tags:
     description: Authenticated user (Clerk) self endpoints.
   - name: SavedTrails
     description: Server-mediated saved-trails CRUD (ownership-enforced).
+  - name: Routes
+    description: Public published routes — list/detail, likes, threaded comments.
+  - name: SavedRoutes
+    description: Authenticated CRUD over the rider's own saved (named) routes.
 paths:
   /healthz:
     get:
@@ -308,6 +312,450 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /me/saved-routes:
+    get:
+      tags: [SavedRoutes]
+      operationId: listMySavedRoutes
+      summary: List the caller's saved (named) routes
+      description: |
+        Returns all of the rider's non-deleted saved routes hydrated with
+        the trails they're permitted to see. Used by the My Routes tab.
+      responses:
+        '200':
+          description: Saved routes (most-recent first).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicRoutesList'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to fetch saved routes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags: [SavedRoutes]
+      operationId: createMySavedRoute
+      summary: Save a new named route from the planner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveRouteRequest'
+      responses:
+        '200':
+          description: Route saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedRouteCreateResponse'
+        '400':
+          description: Invalid payload or empty trail list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Per-user saved-route limit reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Saved-routes table not yet provisioned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /me/saved-routes/{id}:
+    put:
+      tags: [SavedRoutes]
+      operationId: replaceMySavedRoute
+      summary: Replace the trails+waypoints+order of an existing saved route
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveRouteRequest'
+      responses:
+        '200':
+          description: Route replaced.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedRouteCreateResponse'
+        '400':
+          description: Invalid payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Not found or not owned by caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    patch:
+      tags: [SavedRoutes]
+      operationId: patchMySavedRoute
+      summary: Edit metadata (rename, description, ride type, publish flag)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchSavedRouteRequest'
+      responses:
+        '200':
+          description: Route updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedRoutePatchResponse'
+        '400':
+          description: Invalid payload (e.g. publishing an empty route or one without a ride type).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Not found or not owned by caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags: [SavedRoutes]
+      operationId: deleteMySavedRoute
+      summary: Soft-delete a saved route owned by the caller
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedRouteDeleteResult'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /routes:
+    get:
+      tags: [Routes]
+      operationId: listPublicRoutes
+      summary: List published (public) routes for the Discover feed
+      description: |
+        Returns published routes hydrated with the trails the caller is
+        permitted to see (private trails are stripped and counted in
+        `hiddenTrailCount`). Supports filtering by ride type, free-text
+        search across name/description, and sorting by recency or likes.
+      parameters:
+        - name: rideType
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/RideType'
+        - name: region
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Free-text query over name + description.
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [recent, likes]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Published routes (hydrated, filtered to visible trails).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicRoutesList'
+        '500':
+          description: Failed to fetch routes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /routes/{id}:
+    get:
+      tags: [Routes]
+      operationId: getPublicRoute
+      summary: Fetch a single published route by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Route detail (hydrated, viewer-aware).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicRouteEnvelope'
+        '404':
+          description: Route not found or not visible to viewer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /routes/{id}/like:
+    post:
+      tags: [Routes]
+      operationId: likeRoute
+      summary: Like a published route (idempotent)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Like recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteLikeResult'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Route not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags: [Routes]
+      operationId: unlikeRoute
+      summary: Remove your like from a published route (idempotent)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Like removed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteLikeResult'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /routes/{id}/comments:
+    get:
+      tags: [Routes]
+      operationId: listRouteComments
+      summary: List threaded comments on a route
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Comments, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteCommentsList'
+        '404':
+          description: Route not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags: [Routes]
+      operationId: postRouteComment
+      summary: Post a comment or threaded reply
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostRouteCommentRequest'
+      responses:
+        '200':
+          description: Comment posted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteCommentEnvelope'
+        '400':
+          description: Invalid payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /routes/{id}/comments/{commentId}:
+    patch:
+      tags: [Routes]
+      operationId: updateRouteComment
+      summary: Edit your own comment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: commentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRouteCommentRequest'
+      responses:
+        '200':
+          description: Comment updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteCommentEnvelope'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Comment not found or not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags: [Routes]
+      operationId: deleteRouteComment
+      summary: Delete a comment (author or moderator)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: commentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Comment removed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteCommentDeleteResult'
+        '401':
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Not allowed (not author and not a moderator).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Comment not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /storage/public-objects/{filePath}:
     get:
       tags: [Storage]
@@ -476,6 +924,13 @@ components:
         created_at:
           type: string
           nullable: true
+        is_moderator:
+          type: boolean
+          description: |
+            True when the row carries `users.is_moderator = true`. The client
+            uses this to surface moderator-only affordances (e.g. the "Hide"
+            button on others' route comments). Server endpoints still re-check
+            the flag — this field is purely a UI hint.
     SaveTrailRequest:
       type: object
       required: [trailId]
@@ -579,3 +1034,251 @@ components:
         owner_user_id:
           type: string
           nullable: true
+    PublicRouteSummary:
+      type: object
+      required: [id, name, trails, trailIds, hiddenTrailCount, likesCount, commentsCount, likedByMe, createdAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+          nullable: true
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        rideType:
+          allOf:
+            - $ref: '#/components/schemas/RideType'
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        isPublic:
+          type: boolean
+        trailIds:
+          type: array
+          items:
+            type: string
+        trails:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        totalDistanceKm:
+          type: number
+          nullable: true
+        likesCount:
+          type: integer
+          minimum: 0
+        commentsCount:
+          type: integer
+          minimum: 0
+        likedByMe:
+          type: boolean
+        hiddenTrailCount:
+          type: integer
+          minimum: 0
+        ownerName:
+          type: string
+          nullable: true
+        ownerAvatar:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+          nullable: true
+    PublicRoutesList:
+      type: object
+      required: [routes]
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicRouteSummary'
+    PublicRouteEnvelope:
+      type: object
+      required: [route]
+      properties:
+        route:
+          $ref: '#/components/schemas/PublicRouteSummary'
+    RouteLikeResult:
+      type: object
+      required: [liked, likesCount]
+      properties:
+        liked:
+          type: boolean
+        likesCount:
+          type: integer
+          minimum: 0
+    RouteComment:
+      type: object
+      required: [id, routeId, userId, body, createdAt, mine]
+      properties:
+        id:
+          type: string
+        routeId:
+          type: string
+        userId:
+          type: string
+        parentId:
+          type: string
+          nullable: true
+        body:
+          type: string
+        createdAt:
+          type: string
+        authorName:
+          type: string
+          nullable: true
+        authorAvatar:
+          type: string
+          nullable: true
+        mine:
+          type: boolean
+    RouteCommentsList:
+      type: object
+      required: [comments]
+      properties:
+        comments:
+          type: array
+          items:
+            $ref: '#/components/schemas/RouteComment'
+    RouteCommentEnvelope:
+      type: object
+      required: [comment]
+      properties:
+        comment:
+          $ref: '#/components/schemas/RouteComment'
+    PostRouteCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        parentId:
+          type: string
+          nullable: true
+    UpdateRouteCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    RouteCommentDeleteResult:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
+        byModerator:
+          type: boolean
+    RideType:
+      type: string
+      enum: [adventure, enduro, trail, green-laning, other]
+    PlannerWaypoint:
+      type: object
+      additionalProperties: true
+      required: [id]
+      properties:
+        id:
+          type: string
+    PlannerEntryRef:
+      type: object
+      additionalProperties: true
+      required: [id, kind]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [trail, waypoint]
+    SaveRouteRequest:
+      type: object
+      required: [name, trailIds]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          nullable: true
+        rideType:
+          allOf:
+            - $ref: '#/components/schemas/RideType'
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        isPublic:
+          type: boolean
+        trailIds:
+          type: array
+          items:
+            type: string
+        waypoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlannerWaypoint'
+        entryOrder:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlannerEntryRef'
+        distanceKm:
+          type: number
+          nullable: true
+    PatchSavedRouteRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          nullable: true
+        rideType:
+          allOf:
+            - $ref: '#/components/schemas/RideType'
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        isPublic:
+          type: boolean
+    SavedRouteCreateResponse:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        createdAt:
+          type: string
+        route:
+          $ref: '#/components/schemas/PublicRouteSummary'
+    SavedRoutePatchResponse:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        route:
+          $ref: '#/components/schemas/PublicRouteSummary'
+    SavedRouteDeleteResult:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean

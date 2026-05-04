@@ -8,6 +8,13 @@ interface CurrentUserState {
   user: AppUser | null;
   /** The raw Clerk user id when signed-in, otherwise null. */
   userId: string | null;
+  /**
+   * True when the synced Supabase row carries `is_moderator = true`.
+   * Mirrors the server-side flag so UI affordances (e.g. the "Hide"
+   * button on route comments) can show without an extra round-trip.
+   * Authoritative checks still happen server-side.
+   */
+  isModerator: boolean;
 }
 
 /**
@@ -66,5 +73,6 @@ export function useCurrentUser(): CurrentUserState {
     isSignedIn: !!isSignedIn,
     user: appUser,
     userId: isSignedIn && clerkUser ? clerkUser.id : null,
+    isModerator: !!appUser?.is_moderator,
   };
 }
