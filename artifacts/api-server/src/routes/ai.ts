@@ -1347,6 +1347,138 @@ router.get(
   }),
 );
 
+// Moderator uploaded a GPX file directly from a pending skip row. Parse it,
+// pre-fill an `ai_discovered_trails` entry from the skip's metadata, and
+// resolve the skip in one step. The discovery still goes through the normal
+// review queue so a moderator can approve or reject it from there.
+const UploadSkipGpxBody = z.object({
+  gpxText: z.string().min(20).max(5_000_000),
+  name: z.string().trim().min(1).max(200).optional(),
+});
+
+router.post(
+  "/admin/ai-scan-skips/:id/upload-gpx",
+  requireAdmin(async (req, res, userId) => {
+    const id = z.string().uuid().safeParse(req.params.id);
+    if (!id.success) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const parsed = UploadSkipGpxBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid GPX upload body" });
+      return;
+    }
+    const supa = getSupabaseAdmin();
+    const { data: skip, error: loadErr } = await supa
+      .from("ai_scan_skips")
+      .select("*")
+      .eq("id", id.data)
+      .maybeSingle();
+    if (loadErr) {
+      if (isMissingTableError(loadErr)) {
+        res.status(400).json({ error: "ai_scan_skips table missing — apply migration 0020" });
+        return;
+      }
+      res.status(500).json({ error: "Failed to load scan skip" });
+      return;
+    }
+    if (!skip) {
+      res.status(404).json({ error: "Scan skip not found" });
+      return;
+    }
+    if (skip.status !== "pending") {
+      res.status(409).json({ error: `Skip is already ${skip.status}` });
+      return;
+    }
+
+    const waypoints = parseGpxText(parsed.data.gpxText);
+    if (waypoints.length < 2) {
+      res.status(400).json({
+        error: "GPX has fewer than 2 valid track points — can't queue as a discovery.",
+      });
+      return;
+    }
+    const bbox = bboxFromPoints(waypoints);
+    if (!bbox) {
+      res.status(400).json({ error: "Could not compute a bounding box from the GPX." });
+      return;
+    }
+    const trailName =
+      parsed.data.name?.trim() ||
+      ((skip.extracted_name as string | null) ?? "")?.trim() ||
+      "Moderator-uploaded trail";
+    const sourceUrl = String(skip.source_url ?? "");
+
+    // If a discovery for the same source URL already exists, refuse rather
+    // than create a duplicate row in the review queue.
+    const { data: existingDiscovery } = await supa
+      .from("ai_discovered_trails")
+      .select("id, status")
+      .eq("source_url", sourceUrl)
+      .maybeSingle();
+    if (existingDiscovery) {
+      res.status(409).json({
+        error: `A discovery already exists for this post (status: ${existingDiscovery.status}).`,
+        discoveryId: existingDiscovery.id,
+      });
+      return;
+    }
+
+    const insert: Record<string, unknown> = {
+      source: "ai-forum",
+      source_url: sourceUrl,
+      source_title: skip.source_label ?? null,
+      extracted_name: trailName,
+      extracted_location: null,
+      extracted_summary: `Moderator-uploaded GPX from a forum post the scanner skipped (${skip.reason ?? "no reason recorded"}).`,
+      extracted_difficulty: null,
+      extracted_surface: null,
+      gpx_data: parsed.data.gpxText,
+      bbox_min_lat: bbox.minLat,
+      bbox_max_lat: bbox.maxLat,
+      bbox_min_lng: bbox.minLng,
+      bbox_max_lng: bbox.maxLng,
+      ai_grade: null,
+      ai_grade_rationale: null,
+    };
+    const { data: discovery, error: insErr } = await supa
+      .from("ai_discovered_trails")
+      .insert(insert)
+      .select("id")
+      .single();
+    if (insErr) {
+      if (isMissingTableError(insErr)) {
+        res.status(400).json({ error: "ai_discovered_trails table missing — apply migration 0007" });
+        return;
+      }
+      res.status(500).json({ error: insErr.message });
+      return;
+    }
+    const discoveryId = (discovery as { id?: string } | null)?.id ?? null;
+
+    const { error: updErr } = await supa
+      .from("ai_scan_skips")
+      .update({
+        status: "resolved",
+        resolved_at: new Date().toISOString(),
+        resolved_by: userId,
+        resolved_note: discoveryId
+          ? `Uploaded GPX → discovery ${discoveryId}`
+          : "Uploaded GPX (discovery id unavailable)",
+      })
+      .eq("id", id.data);
+    if (updErr) {
+      req.log?.warn?.(
+        { err: updErr, skipId: id.data, discoveryId },
+        "ai_scan_skips: discovery created but skip update failed",
+      );
+    }
+
+    res.json({ ok: true, discoveryId });
+  }),
+);
+
 router.post(
   "/admin/ai-scan-skips/:id/resolve",
   requireAdmin(async (req, res, userId) => {

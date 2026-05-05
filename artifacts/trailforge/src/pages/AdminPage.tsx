@@ -371,6 +371,44 @@ export default function AdminPage() {
     loadScanSkips();
   };
 
+  const handleUploadSkipGpx = async (id: string, file: File) => {
+    setBusy(`skip-upload-${id}`);
+    setInfo(null);
+    let gpxText: string;
+    try {
+      gpxText = await file.text();
+    } catch {
+      setBusy(null);
+      setInfo("Couldn't read the selected file.");
+      return;
+    }
+    if (gpxText.trim().length < 20) {
+      setBusy(null);
+      setInfo("That GPX file looks empty.");
+      return;
+    }
+    const r = await fetch(`/api/admin/ai-scan-skips/${id}/upload-gpx`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ gpxText }),
+    });
+    setBusy(null);
+    if (!r.ok) {
+      const j = (await r.json().catch(() => null)) as { error?: string } | null;
+      setInfo(`Upload failed: ${j?.error ?? r.status}`);
+      return;
+    }
+    const j = (await r.json()) as { discoveryId?: string | null };
+    setInfo(
+      j.discoveryId
+        ? `GPX queued as discovery ${j.discoveryId} — review it in the discovery queue below.`
+        : "GPX queued for review.",
+    );
+    loadScanSkips();
+    loadDiscoveries();
+  };
+
   const handleResolveSkip = async (id: string) => {
     setBusy(`skip-${id}`);
     const r = await fetch(`/api/admin/ai-scan-skips/${id}/resolve`, {
@@ -846,14 +884,34 @@ export default function AdminPage() {
                     </p>
                   </div>
                   {skipFilter === "pending" ? (
-                    <button
-                      onClick={() => handleResolveSkip(s.id)}
-                      disabled={busy === `skip-${s.id}`}
-                      className="px-3 py-1.5 rounded-md border border-amber-500/40 text-amber-300 text-[11px] font-bold uppercase disabled:opacity-50 shrink-0"
-                      data-testid={`admin-resolve-skip-${s.id}`}
-                    >
-                      {busy === `skip-${s.id}` ? "…" : "Mark resolved"}
-                    </button>
+                    <div className="flex flex-col gap-1.5 shrink-0">
+                      <label
+                        className={`px-3 py-1.5 rounded-md border border-emerald-500/40 text-emerald-300 text-[11px] font-bold uppercase text-center cursor-pointer ${busy === `skip-upload-${s.id}` ? "opacity-50 pointer-events-none" : "hover:bg-emerald-500/10"}`}
+                        data-testid={`admin-upload-skip-gpx-${s.id}`}
+                      >
+                        {busy === `skip-upload-${s.id}` ? "Uploading…" : "Upload GPX"}
+                        <input
+                          type="file"
+                          accept=".gpx,application/gpx+xml,application/xml,text/xml"
+                          className="hidden"
+                          data-testid={`admin-upload-skip-gpx-input-${s.id}`}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            e.target.value = "";
+                            if (f) handleUploadSkipGpx(s.id, f);
+                          }}
+                          disabled={busy === `skip-upload-${s.id}`}
+                        />
+                      </label>
+                      <button
+                        onClick={() => handleResolveSkip(s.id)}
+                        disabled={busy === `skip-${s.id}`}
+                        className="px-3 py-1.5 rounded-md border border-amber-500/40 text-amber-300 text-[11px] font-bold uppercase disabled:opacity-50"
+                        data-testid={`admin-resolve-skip-${s.id}`}
+                      >
+                        {busy === `skip-${s.id}` ? "…" : "Mark resolved"}
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               </li>
