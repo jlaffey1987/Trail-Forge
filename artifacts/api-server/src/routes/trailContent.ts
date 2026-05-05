@@ -386,10 +386,11 @@ router.delete(
       res.status(404).json({ error: "Note not found" });
       return;
     }
-    const { isModerator } = await isModeratorOrOwner(userId, trailId);
+    const { isOwner, isModerator } = await isModeratorOrOwner(userId, trailId);
+    const canModerate = isOwner || isModerator;
     const isAuthor = existing.author_user_id === userId;
-    if (!isAuthor && !isModerator) {
-      res.status(403).json({ error: "Only the author or a moderator can remove this note" });
+    if (!isAuthor && !canModerate) {
+      res.status(403).json({ error: "Only the author, trail owner, or a moderator can remove this note" });
       return;
     }
 
@@ -561,10 +562,11 @@ router.delete(
       res.status(404).json({ error: "Photo not found" });
       return;
     }
-    const { isModerator } = await isModeratorOrOwner(userId, trailId);
+    const { isOwner, isModerator } = await isModeratorOrOwner(userId, trailId);
+    const canModerate = isOwner || isModerator;
     const isAuthor = existing.author_user_id === userId;
-    if (!isAuthor && !isModerator) {
-      res.status(403).json({ error: "Only the author or a moderator can remove this photo" });
+    if (!isAuthor && !canModerate) {
+      res.status(403).json({ error: "Only the author, trail owner, or a moderator can remove this photo" });
       return;
     }
     if (isAuthor) {

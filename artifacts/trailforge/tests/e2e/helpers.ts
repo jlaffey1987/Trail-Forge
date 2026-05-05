@@ -180,26 +180,6 @@ export async function snapshotTrail(trailId: string): Promise<TrailSnapshot> {
   return data as TrailSnapshot;
 }
 
-/**
- * Toggles the e2e user's `is_moderator` flag. The trail-content DELETE
- * routes (note / photo) require moderator status — they explicitly do not
- * accept "trail owner" as sufficient — so the moderator-hide test flips
- * the bit on, runs, and flips it back off in afterEach.
- */
-export async function setUserModerator(
-  userId: string,
-  isModerator: boolean,
-): Promise<void> {
-  const supa = supabaseAdmin();
-  const { error } = await supa
-    .from("users")
-    .update({ is_moderator: isModerator })
-    .eq("id", userId);
-  if (error) {
-    throw new Error(`setUserModerator failed: ${error.message}`);
-  }
-}
-
 export async function restoreTrail(
   trailId: string,
   snap: TrailSnapshot,

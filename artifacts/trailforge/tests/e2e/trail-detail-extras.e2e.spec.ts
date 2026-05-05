@@ -7,7 +7,6 @@ import {
   cleanupSecondaryAuthorContent,
   ensureSecondaryAuthor,
   restoreTrail,
-  setUserModerator,
   signInAsE2EUser,
   snapshotTrail,
   supabaseAdmin,
@@ -123,13 +122,11 @@ async function moderatorHide(
 
 test.describe("trail detail extras @e2e", () => {
   let trailId: string;
-  let userId: string;
   let trailSnapshot: TrailSnapshot;
 
   test.beforeAll(async () => {
     const state = loadE2EState();
     trailId = state.trailId;
-    userId = state.userId;
     await ensureSecondaryAuthor();
     trailSnapshot = await snapshotTrail(trailId);
   });
@@ -145,9 +142,6 @@ test.describe("trail detail extras @e2e", () => {
     // Approve-amendment mutates the trail row — restore it so neighbouring
     // specs see the original difficulty/legal_status/etc.
     await restoreTrail(trailId, trailSnapshot);
-    // Always clear the moderator bit so the next test starts from the
-    // baseline state.
-    await setUserModerator(userId, false);
   });
 
   test("uploads a photo, the thumbnail renders, then the author deletes it", async ({
@@ -225,7 +219,7 @@ test.describe("trail detail extras @e2e", () => {
     // Seed one note + one photo + one pending amendment authored by a
     // *different* user. The X-button affordances are author-only, so the
     // hide path is exercised through the API (which the e2e user can hit
-    // because they own the trail and therefore satisfy `isModerator`).
+    // because they own the trail and therefore satisfy `canModerate`).
     const noteBody = `seeded other-rider note · ${Date.now()}`;
     const note = await seedNoteByOther(trailId, noteBody);
     const photo = await seedPhotoByOther(trailId);
@@ -262,10 +256,8 @@ test.describe("trail detail extras @e2e", () => {
     await page.getByTestId("trail-tab-amendments").click();
     await expect(page.getByTestId(`amendment-${am.id}`)).toBeVisible();
 
-    // The note/photo DELETE routes require `is_moderator` (trail ownership
-    // alone is not sufficient). Flip the bit on the e2e user so the
-    // moderator-hide path is exercisable; the afterEach restores it.
-    await setUserModerator(userId, true);
+    // Trail owners are accepted as moderators by the note/photo DELETE
+    // routes — no need to flip an extra `is_moderator` bit.
 
     // ---- Hide the note via the API (uses the e2e user's session). ----
     await moderatorHide(
