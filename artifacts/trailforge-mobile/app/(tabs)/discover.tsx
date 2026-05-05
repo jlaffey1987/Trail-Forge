@@ -462,7 +462,17 @@ export default function DiscoverTab() {
 
 function GroupRow({ group, onLeave }: { group: Group; onLeave: () => void }) {
   return (
-    <Pressable style={styles.groupRow} onLongPress={onLeave} delayLongPress={400}>
+    <Pressable
+      style={styles.groupRow}
+      onPress={() =>
+        router.push({
+          pathname: "/group/[groupId]",
+          params: { groupId: group.id },
+        })
+      }
+      onLongPress={onLeave}
+      delayLongPress={400}
+    >
       <Feather name="users" size={18} color={colors.light.primary} />
       <View style={{ flex: 1 }}>
         <Text style={styles.rowTitle}>{group.name}</Text>

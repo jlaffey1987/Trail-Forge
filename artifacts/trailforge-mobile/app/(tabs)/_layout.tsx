@@ -3,9 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useSyncMe } from "@workspace/api-client-react";
 import { Tabs } from "expo-router";
 import React, { useEffect } from "react";
-import { Platform, StyleSheet } from "react-native";
+import { Platform, StyleSheet, View } from "react-native";
 
 import { AuthGate } from "@/components/AuthGate";
+import { NotificationsBell } from "@/components/NotificationsBell";
 import { UserMenu } from "@/components/UserMenu";
 import colors from "@/constants/colors";
 import { adminWhoami } from "@/lib/api";
@@ -76,7 +77,12 @@ export default function TabLayout() {
             fontWeight: "700",
           },
           headerTintColor: colors.light.foreground,
-          headerRight: () => <UserMenu />,
+          headerRight: () => (
+            <View style={{ flexDirection: "row", alignItems: "center" }}>
+              <NotificationsBell />
+              <UserMenu />
+            </View>
+          ),
         }}
       >
         <Tabs.Screen

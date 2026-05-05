@@ -118,6 +118,8 @@ function RootLayoutNav() {
         options={{ title: "Group invite" }}
       />
       <Stack.Screen name="blocked" options={{ title: "Blocked users" }} />
+      <Stack.Screen name="activity" options={{ title: "Activity" }} />
+      <Stack.Screen name="group/[groupId]" options={{ title: "Group" }} />
     </Stack>
   );
 }

@@ -765,3 +765,228 @@ export function unblockUser(userId: string): Promise<unknown> {
     method: "DELETE",
   });
 }
+
+// ---------------------------------------------------------------------------
+// Group activity feed (notifications) — mirrors the web NotificationsBell.
+// ---------------------------------------------------------------------------
+
+export interface NotificationActor {
+  id: string;
+  display_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+}
+
+export type GroupNotification =
+  | {
+      type: "trail_shared";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      trail: { id: string; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
+      type: "member_joined";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
+      type: "member_left";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: NotificationActor;
+      subject: NotificationActor & { id: string | null };
+      removed_by_admin: boolean;
+      unread: boolean;
+    }
+  | {
+      type: "trail_unshared";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      trail: { id: string | null; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
+      type: "photo_shared";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: NotificationActor;
+      unread: boolean;
+    }
+  | {
+      type: "invite_declined";
+      id: string;
+      occurred_at: string;
+      group: { id: string; name: string };
+      actor: NotificationActor;
+      decliner_label: string;
+      unread: boolean;
+    };
+
+export interface NotificationsResponse {
+  items: GroupNotification[];
+  unreadCount: number;
+  lastReadAt: string | null;
+  nextBefore: string | null;
+}
+
+export function listMyNotifications(opts?: {
+  limit?: number;
+  before?: string | null;
+}): Promise<NotificationsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.before) params.set("before", opts.before);
+  const qs = params.toString();
+  return apiJson<NotificationsResponse>(
+    `/api/me/notifications${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function markAllNotificationsRead(): Promise<{
+  ok: boolean;
+  last_read_at: string;
+}> {
+  return apiJson<{ ok: boolean; last_read_at: string }>(
+    "/api/me/notifications/read",
+    { method: "POST" },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Group detail / member management / invite tokens / cover photo.
+// ---------------------------------------------------------------------------
+
+export interface GroupInvite {
+  id: string;
+  token: string;
+  email: string | null;
+  target_user_id?: string | null;
+  expires_at: string;
+  accepted_at: string | null;
+  created_at: string;
+  created_by_user_id: string;
+}
+
+export interface MyInvite {
+  id: string;
+  group_id: string;
+  email: string | null;
+  target_user_id: string | null;
+  expires_at: string;
+  created_at: string;
+  group: { name: string; description: string | null } | null;
+}
+
+export interface GroupDetail {
+  group: Group & { cover_photo_key: string | null };
+  callerRole: "owner" | "admin" | "member";
+  members: GroupMember[];
+  invites: GroupInvite[];
+  joinRequests: GroupJoinRequest[];
+  sharedTrailCount: number;
+}
+
+export function fetchGroupDetail(groupId: string): Promise<GroupDetail> {
+  return apiJson<GroupDetail>(`/api/groups/${encodeURIComponent(groupId)}`);
+}
+
+export function createGroupInvite(
+  groupId: string,
+  body: { email?: string | null; username?: string | null },
+): Promise<GroupInvite> {
+  const payload: Record<string, string> = {};
+  if (body.email) payload.email = body.email;
+  if (body.username) payload.username = body.username;
+  return apiJson<GroupInvite>(
+    `/api/groups/${encodeURIComponent(groupId)}/invites`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export function revokeGroupInvite(
+  groupId: string,
+  inviteId: string,
+): Promise<unknown> {
+  return apiJson(
+    `/api/groups/${encodeURIComponent(groupId)}/invites/${encodeURIComponent(inviteId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function removeGroupMember(
+  groupId: string,
+  userId: string,
+): Promise<unknown> {
+  return apiJson(
+    `/api/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function listMyInvites(): Promise<{ invites: MyInvite[] }> {
+  return apiJson<{ invites: MyInvite[] }>("/api/me/invites");
+}
+
+export function acceptMyInvite(inviteId: string): Promise<unknown> {
+  return apiJson(
+    `/api/me/invites/${encodeURIComponent(inviteId)}/accept`,
+    { method: "POST" },
+  );
+}
+
+export function declineMyInvite(inviteId: string): Promise<unknown> {
+  return apiJson(
+    `/api/me/invites/${encodeURIComponent(inviteId)}/decline`,
+    { method: "POST" },
+  );
+}
+
+export interface GroupCoverUploadTicket {
+  uploadURL: string;
+  storageKey: string;
+  objectPath: string;
+}
+
+export function requestGroupCoverUploadUrl(
+  groupId: string,
+): Promise<GroupCoverUploadTicket> {
+  return apiJson<GroupCoverUploadTicket>(
+    `/api/groups/${encodeURIComponent(groupId)}/cover/upload-url`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export function finalizeGroupCover(
+  groupId: string,
+  storageKey: string,
+): Promise<unknown> {
+  return apiJson(`/api/groups/${encodeURIComponent(groupId)}/cover`, {
+    method: "POST",
+    body: JSON.stringify({ storageKey }),
+  });
+}
+
+export function removeGroupCover(groupId: string): Promise<unknown> {
+  return apiJson(`/api/groups/${encodeURIComponent(groupId)}/cover`, {
+    method: "DELETE",
+  });
+}
+
+/** Build the absolute URL the mobile <Image> should fetch a group cover from. */
+export function groupCoverPhotoUrl(coverKey: string | null | undefined): string | null {
+  if (!coverKey) return null;
+  const base = process.env.EXPO_PUBLIC_DOMAIN
+    ? `https://${process.env.EXPO_PUBLIC_DOMAIN}`
+    : "";
+  return `${base}/api/storage/objects/${coverKey}`;
+}

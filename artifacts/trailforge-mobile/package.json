@@ -64,5 +64,8 @@
     "typescript": "~5.9.2",
     "zod": "catalog:",
     "zod-validation-error": "^3.4.0"
+  },
+  "dependencies": {
+    "expo-clipboard": "^55.0.13"
   }
 }
