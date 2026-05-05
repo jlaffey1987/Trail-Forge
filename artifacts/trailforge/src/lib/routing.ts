@@ -232,12 +232,12 @@ function buildViewbox(center: { lat: number; lng: number }): string {
 }
 
 /**
- * Round a coord to ~10km grid cells so cached results don't get reused
- * for a rider who has moved meaningfully between lookups but stay shared
- * across small position jitter.
+ * Round a coord to ~1km grid cells (0.01° ≈ 1.1km of latitude) so cached
+ * results don't get reused for a rider who has moved meaningfully between
+ * lookups but stay shared across GPS jitter on the same street.
  */
 function roundForCacheKey(n: number): string {
-  return (Math.round(n * 10) / 10).toFixed(1);
+  return (Math.round(n * 100) / 100).toFixed(2);
 }
 
 /**
