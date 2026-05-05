@@ -120,17 +120,32 @@ export default function PlannerTab() {
   // `geocodedStart`/`geocodedEnd` is just a UI cache that keeps the
   // user-typed query string (`q`) alongside the resolved point.
   //
-  // Loop-safety:
-  //   1. store→local effect bails when local pt already matches store pt
-  //      (preserves the user-typed `q` and avoids overwriting it with the
-  //      reverse-geocoded label).
-  //   2. local→store effect always pushes; the store's `setRouteStart`
-  //      no-ops when the value is structurally equal, so an echoed
-  //      update doesn't fire a second emit.
+  // Convergence model (read this before touching the effects below):
+  //
+  //   The naive version — just (a) a store→local effect and (b) a
+  //   local→store effect — INFINITE-LOOPS on mount when the store
+  //   already has a non-null value and local is null. Both effects
+  //   read the SAME render's snapshot: store→local queues
+  //   `setGeocodedStart({pt: storeStart})` for the next render, but
+  //   local→store still sees `geocodedStart === null` in the current
+  //   render and pushes `null` to the store. The store emits null,
+  //   store→local then nulls local, local→store re-pushes the value
+  //   that arrives one render later, and so on.
+  //
+  //   To break the cycle without giving up bidirectionality, the
+  //   store→local effect ARMS a one-shot `skip*PushRef` flag right
+  //   before each `setGeocoded*` call. The local→store effect, which
+  //   runs after store→local in the same effect flush AND again on
+  //   the subsequent render, consumes the flag once and skips that
+  //   one push. User-initiated changes to `geocodedStart`/`End`
+  //   (typing, geocoding, "use my location") never set the flag, so
+  //   they push to the store as usual.
   const storeStart = useRouteStart();
   const storeEnd = useRouteEnd();
   const geocodedStartRef = useRef(geocodedStart);
   const geocodedEndRef = useRef(geocodedEnd);
+  const skipStartPushRef = useRef(false);
+  const skipEndPushRef = useRef(false);
   useEffect(() => { geocodedStartRef.current = geocodedStart; }, [geocodedStart]);
   useEffect(() => { geocodedEndRef.current = geocodedEnd; }, [geocodedEnd]);
 
@@ -138,6 +153,7 @@ export default function PlannerTab() {
     const local = geocodedStartRef.current;
     if (storeStart == null) {
       if (local !== null) {
+        skipStartPushRef.current = true;
         setGeocodedStart(null);
         setStartLocation("");
       }
@@ -147,6 +163,7 @@ export default function PlannerTab() {
       return;
     }
     const label = storeStart.label?.trim() ?? "";
+    skipStartPushRef.current = true;
     setGeocodedStart({ q: label, pt: storeStart });
     setStartLocation(label);
   }, [storeStart]);
@@ -155,6 +172,7 @@ export default function PlannerTab() {
     const local = geocodedEndRef.current;
     if (storeEnd == null) {
       if (local !== null) {
+        skipEndPushRef.current = true;
         setGeocodedEnd(null);
         setEndLocation("");
       }
@@ -164,15 +182,28 @@ export default function PlannerTab() {
       return;
     }
     const label = storeEnd.label?.trim() ?? "";
+    skipEndPushRef.current = true;
     setGeocodedEnd({ q: label, pt: storeEnd });
     setEndLocation(label);
   }, [storeEnd]);
 
   useEffect(() => {
+    if (skipStartPushRef.current) {
+      // The change to `geocodedStart` originated from the store→local
+      // effect, not from the user. Consume the flag and skip — pushing
+      // back would just no-op (samePoint), but on mount with a null
+      // local snapshot it would push null and clobber the store.
+      skipStartPushRef.current = false;
+      return;
+    }
     setRouteStart(geocodedStart ? geocodedStart.pt : null);
   }, [geocodedStart]);
 
   useEffect(() => {
+    if (skipEndPushRef.current) {
+      skipEndPushRef.current = false;
+      return;
+    }
     setRouteEnd(geocodedEnd ? geocodedEnd.pt : null);
   }, [geocodedEnd]);
   // "Use my current location" UX state — surfaces a spinner on the
