@@ -1,7 +1,10 @@
 /**
- * AI tab — minimal chat UI that posts to `/api/ai/chat`. Conversation
- * history lives in component state (intentionally non-persistent for the
- * MVP; the web app does the same).
+ * AI tab — chat against /api/ai/chat. We pass the full conversation
+ * history so the server can keep context across turns, and we ground
+ * each reply in whatever trails are currently visible on the Map tab
+ * (see lib/visibleTrails.ts). When the user has trails on screen, a
+ * subtle pill at the top of the composer tells them how many trails
+ * the AI is grounding on.
  */
 import { Feather } from "@expo/vector-icons";
 import { useMutation } from "@tanstack/react-query";
@@ -19,7 +22,8 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-import { askAi } from "@/lib/api";
+import { askAi, type AiChatTurn } from "@/lib/api";
+import { useVisibleTrails } from "@/lib/visibleTrails";
 
 interface Turn {
   role: "user" | "assistant";
@@ -29,10 +33,32 @@ interface Turn {
 export default function AiTab() {
   const [messages, setMessages] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
+  const [groundOnVisible, setGroundOnVisible] = useState(true);
   const scrollRef = useRef<ScrollView | null>(null);
+  const visible = useVisibleTrails();
 
   const ask = useMutation({
-    mutationFn: (prompt: string) => askAi(prompt),
+    mutationFn: ({
+      history,
+      prompt,
+    }: {
+      history: Turn[];
+      prompt: string;
+    }) => {
+      const allTurns: AiChatTurn[] = [
+        ...history.map<AiChatTurn>((m) => ({
+          role: m.role,
+          content: m.text,
+        })),
+        { role: "user", content: prompt },
+      ];
+      return askAi(allTurns, {
+        bbox:
+          groundOnVisible && visible.bbox && visible.trailIds.length > 0
+            ? visible.bbox
+            : null,
+      });
+    },
     onSuccess: (data) => {
       setMessages((m) => [...m, { role: "assistant", text: data.reply }]);
       requestAnimationFrame(() =>
@@ -53,10 +79,14 @@ export default function AiTab() {
   function send() {
     const text = draft.trim();
     if (!text || ask.isPending) return;
+    const history = messages;
     setMessages((m) => [...m, { role: "user", text }]);
     setDraft("");
-    ask.mutate(text);
+    ask.mutate({ history, prompt: text });
   }
+
+  const groundingActive =
+    groundOnVisible && visible.bbox && visible.trailIds.length > 0;
 
   return (
     <KeyboardAvoidingView
@@ -105,6 +135,36 @@ export default function AiTab() {
           </View>
         ) : null}
       </ScrollView>
+
+      {visible.trailIds.length > 0 ? (
+        <TouchableOpacity
+          style={[
+            styles.groundPill,
+            groundingActive ? styles.groundPillOn : styles.groundPillOff,
+          ]}
+          onPress={() => setGroundOnVisible((g) => !g)}
+        >
+          <Feather
+            name={groundingActive ? "map-pin" : "map"}
+            size={12}
+            color={
+              groundingActive
+                ? colors.light.primary
+                : colors.light.mutedForeground
+            }
+          />
+          <Text
+            style={[
+              styles.groundPillText,
+              groundingActive && { color: colors.light.primary },
+            ]}
+          >
+            {groundingActive
+              ? `Grounding on ${visible.trailIds.length} visible trail${visible.trailIds.length === 1 ? "" : "s"}`
+              : "Grounding off"}
+          </Text>
+        </TouchableOpacity>
+      ) : null}
 
       <View style={styles.composer}>
         <TextInput
@@ -166,6 +226,31 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 4,
   },
   bubbleText: { color: colors.light.foreground, fontSize: 14 },
+  groundPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "center",
+    marginHorizontal: 12,
+    marginBottom: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  groundPillOn: {
+    backgroundColor: colors.light.primary + "15",
+    borderColor: colors.light.primary,
+  },
+  groundPillOff: {
+    backgroundColor: colors.light.muted,
+    borderColor: colors.light.border,
+  },
+  groundPillText: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    fontWeight: "600",
+  },
   composer: {
     flexDirection: "row",
     gap: 8,

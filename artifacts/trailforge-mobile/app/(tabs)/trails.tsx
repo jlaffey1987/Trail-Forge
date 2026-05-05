@@ -1,11 +1,9 @@
 /**
- * My Trails tab — three sections:
- *   - Saved trails (`useListMySavedTrails`)
- *   - Saved routes (`useListMySavedRoutes`)
- *   - Recently ridden (direct fetch — no generated hook yet)
- *
- * Tapping a trail navigates to `/trail/<id>`. Tapping a route navigates to
- * the planner with the route preloaded (#220).
+ * My Trails tab — three sections (saved trails, saved routes, recently
+ * ridden). Saved trails are sortable + difficulty-filterable; tapping
+ * one navigates to the detail screen with the surrounding ids passed
+ * along so the detail view can offer prev/next navigation. Tapping a
+ * saved route opens the planner with that route preloaded.
  */
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
@@ -14,7 +12,7 @@ import {
   useListMySavedTrails,
 } from "@workspace/api-client-react";
 import { router } from "expo-router";
-import React from "react";
+import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -22,6 +20,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from "react-native";
 
@@ -34,6 +33,7 @@ interface SavedTrail {
   name: string;
   difficulty: string | null;
   distance_km: number | null;
+  elevation_gain_m?: number | null;
 }
 
 interface SavedRoute {
@@ -41,6 +41,23 @@ interface SavedRoute {
   name: string;
   trail_count: number | null;
   updated_at?: string | null;
+}
+
+type SortKey = "name" | "distance" | "climb";
+type DiffFilter = "all" | "green" | "blue" | "black" | "double-black";
+
+function difficultyMatches(t: SavedTrail, f: DiffFilter): boolean {
+  if (f === "all") return true;
+  const raw = (t.difficulty ?? "").toLowerCase();
+  if (f === "green") return raw.includes("green") || raw.includes("easy");
+  if (f === "blue")
+    return (
+      raw.includes("blue") || raw.includes("intermediate") || raw === "moderate"
+    );
+  if (f === "black") return raw.includes("black") && !raw.includes("double");
+  if (f === "double-black")
+    return raw.includes("double") || raw.includes("expert");
+  return true;
 }
 
 export default function TrailsTab() {
@@ -52,6 +69,9 @@ export default function TrailsTab() {
     staleTime: 60_000,
   });
 
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [diffFilter, setDiffFilter] = useState<DiffFilter>("all");
+
   const refreshing =
     savedTrails.isFetching || savedRoutes.isFetching || recent.isFetching;
   function refetchAll() {
@@ -59,6 +79,29 @@ export default function TrailsTab() {
     void savedRoutes.refetch();
     void recent.refetch();
   }
+
+  const filteredSavedTrails = useMemo<SavedTrail[]>(() => {
+    const all =
+      (savedTrails.data as { trails?: SavedTrail[] } | undefined)?.trails ?? [];
+    const filtered = all.filter((t) => difficultyMatches(t, diffFilter));
+    const sorted = [...filtered].sort((a, b) => {
+      if (sortKey === "distance") {
+        return (b.distance_km ?? 0) - (a.distance_km ?? 0);
+      }
+      if (sortKey === "climb") {
+        return (b.elevation_gain_m ?? 0) - (a.elevation_gain_m ?? 0);
+      }
+      return a.name.localeCompare(b.name);
+    });
+    return sorted;
+  }, [savedTrails.data, sortKey, diffFilter]);
+
+  // Pre-compute the sibling-id list once so each row can open the
+  // detail screen with prev/next context (?ids=a,b,c,d).
+  const savedIdsCsv = useMemo(
+    () => filteredSavedTrails.map((t) => t.id).join(","),
+    [filteredSavedTrails],
+  );
 
   return (
     <ScrollView
@@ -75,15 +118,40 @@ export default function TrailsTab() {
       <Section
         title="Saved trails"
         loading={savedTrails.isLoading}
-        empty={(savedTrails.data as { trails?: SavedTrail[] } | undefined)
-          ?.trails?.length === 0}
+        empty={filteredSavedTrails.length === 0}
         emptyHint="Trails you save from the map appear here."
+        controls={
+          <View style={{ gap: 6 }}>
+            <ChipRow
+              options={[
+                { value: "name", label: "Name" },
+                { value: "distance", label: "Distance" },
+                { value: "climb", label: "Climb" },
+              ]}
+              value={sortKey}
+              onChange={(v) => setSortKey(v as SortKey)}
+              label="Sort"
+            />
+            <ChipRow
+              options={[
+                { value: "all", label: "All" },
+                { value: "green", label: "Green" },
+                { value: "blue", label: "Blue" },
+                { value: "black", label: "Black" },
+                { value: "double-black", label: "2×Black" },
+              ]}
+              value={diffFilter}
+              onChange={(v) => setDiffFilter(v as DiffFilter)}
+              label="Difficulty"
+            />
+          </View>
+        }
       >
-        {((savedTrails.data as { trails?: SavedTrail[] } | undefined)?.trails ??
-          []).map((t) => (
+        {filteredSavedTrails.map((t) => (
           <TrailRow
             key={t.id}
             id={t.id}
+            siblingIds={savedIdsCsv}
             name={t.name}
             difficulty={t.difficulty}
             meta={
@@ -133,17 +201,20 @@ function Section({
   loading,
   empty,
   emptyHint,
+  controls,
   children,
 }: {
   title: string;
   loading: boolean;
   empty?: boolean;
   emptyHint: string;
+  controls?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <View style={{ marginBottom: 22 }}>
       <Text style={styles.sectionTitle}>{title}</Text>
+      {controls ? <View style={{ marginBottom: 10 }}>{controls}</View> : null}
       {loading ? (
         <ActivityIndicator
           color={colors.light.primary}
@@ -160,21 +231,64 @@ function Section({
   );
 }
 
+function ChipRow({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: Array<{ value: string; label: string }>;
+  value: string;
+  onChange: (v: string) => void;
+  label: string;
+}) {
+  return (
+    <View style={styles.chipRow}>
+      <Text style={styles.chipRowLabel}>{label}</Text>
+      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap", flex: 1 }}>
+        {options.map((o) => {
+          const active = o.value === value;
+          return (
+            <TouchableOpacity
+              key={o.value}
+              onPress={() => onChange(o.value)}
+              style={[styles.chip, active && styles.chipActive]}
+            >
+              <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                {o.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function TrailRow({
   id,
   name,
   difficulty,
   meta,
+  siblingIds,
 }: {
   id: string;
   name: string;
   difficulty: string | null;
   meta: string;
+  siblingIds?: string;
 }) {
   return (
     <Pressable
       style={styles.row}
-      onPress={() => router.push(`/trail/${encodeURIComponent(id)}`)}
+      onPress={() => {
+        const path = `/trail/${encodeURIComponent(id)}` as const;
+        if (siblingIds) {
+          router.push(`${path}?ids=${encodeURIComponent(siblingIds)}`);
+        } else {
+          router.push(path);
+        }
+      }}
     >
       <View style={[styles.diffDot, { backgroundColor: difficultyColor(difficulty) }]} />
       <View style={{ flex: 1 }}>
@@ -192,7 +306,14 @@ function TrailRow({
 
 function RouteRow({ route }: { route: SavedRoute }) {
   return (
-    <Pressable style={styles.row}>
+    <Pressable
+      style={styles.row}
+      // Open the planner with the route preloaded. The planner reads
+      // the `routeId` query param on mount and hydrates from it.
+      onPress={() =>
+        router.push(`/(tabs)?routeId=${encodeURIComponent(route.id)}`)
+      }
+    >
       <Feather name="git-merge" size={18} color={colors.light.primary} />
       <View style={{ flex: 1 }}>
         <Text style={styles.rowTitle} numberOfLines={1}>
@@ -239,4 +360,26 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   emptyText: { color: colors.light.mutedForeground, fontSize: 13 },
+  chipRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  chipRowLabel: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    width: 64,
+  },
+  chip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: colors.light.card,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+  },
+  chipActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+  chipText: { color: colors.light.foreground, fontSize: 11, fontWeight: "600" },
+  chipTextActive: { color: colors.light.primaryForeground },
 });

@@ -37,6 +37,22 @@ interface PublicRoute {
   author?: string | null;
   trail_count?: number | null;
   like_count?: number | null;
+  region?: string | null;
+  difficulty?: string | null;
+}
+
+type RouteCategory = "all" | "popular" | "easy" | "moderate" | "hard";
+
+function routeMatchesCategory(r: PublicRoute, c: RouteCategory): boolean {
+  if (c === "all") return true;
+  if (c === "popular") return (r.like_count ?? 0) >= 5;
+  const d = (r.difficulty ?? "").toLowerCase();
+  if (c === "easy") return d.includes("green") || d.includes("easy");
+  if (c === "moderate")
+    return d.includes("blue") || d.includes("intermediate") || d === "moderate";
+  if (c === "hard")
+    return d.includes("black") || d.includes("expert") || d.includes("hard");
+  return true;
 }
 
 export default function DiscoverTab() {
@@ -80,8 +96,10 @@ export default function DiscoverTab() {
       ),
   });
 
-  const routes =
+  const [routeCategory, setRouteCategory] = useState<RouteCategory>("all");
+  const allRoutes =
     (routesQ.data as { routes?: PublicRoute[] } | undefined)?.routes ?? [];
+  const routes = allRoutes.filter((r) => routeMatchesCategory(r, routeCategory));
   const groups = groupsQ.data?.groups ?? [];
   const discoverable = (discoverQ.data?.items ?? []).filter(
     (g) => !g.is_member,
@@ -212,6 +230,48 @@ export default function DiscoverTab() {
           <Text style={[styles.sectionTitle, { marginTop: 24 }]}>
             Public routes
           </Text>
+          <View style={styles.categoryRibbon}>
+            {(
+              [
+                { value: "all", label: "All", icon: "list" },
+                { value: "popular", label: "Popular", icon: "trending-up" },
+                { value: "easy", label: "Easy", icon: "smile" },
+                { value: "moderate", label: "Moderate", icon: "wind" },
+                { value: "hard", label: "Hard", icon: "zap" },
+              ] as Array<{
+                value: RouteCategory;
+                label: string;
+                icon: keyof typeof Feather.glyphMap;
+              }>
+            ).map((c) => {
+              const active = c.value === routeCategory;
+              return (
+                <TouchableOpacity
+                  key={c.value}
+                  onPress={() => setRouteCategory(c.value)}
+                  style={[styles.catChip, active && styles.catChipActive]}
+                >
+                  <Feather
+                    name={c.icon}
+                    size={12}
+                    color={
+                      active
+                        ? colors.light.primaryForeground
+                        : colors.light.foreground
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.catChipText,
+                      active && styles.catChipTextActive,
+                    ]}
+                  >
+                    {c.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         </View>
       }
       renderItem={({ item }) => <RouteCard route={item} />}
@@ -357,4 +417,32 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontSize: 12,
   },
+  categoryRibbon: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  catChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: colors.light.card,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+  },
+  catChipActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+  catChipText: {
+    color: colors.light.foreground,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  catChipTextActive: { color: colors.light.primaryForeground },
 });

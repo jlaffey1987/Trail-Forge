@@ -187,27 +187,55 @@ export interface RecentlyRiddenTrail {
 export async function listRecentlyRidden(): Promise<{
   trails: RecentlyRiddenTrail[];
 }> {
-  // The API exposes completions; we hydrate trail details client-side via
-  // the search endpoint. Falls back to an empty list if the server returns
-  // a 404 (table not yet provisioned in this environment).
+  // The API exposes completions; we hydrate trail details client-side
+  // via the bbox/id-filter trail search endpoint so the user sees real
+  // names and stats (not raw trail ids). Falls back to an empty list
+  // when the completions table isn't yet provisioned (404).
+  let completionRows: Array<{ trailId: string; completedAt: string }>;
   try {
-    const { completions } = await listCompletions();
-    if (completions.length === 0) return { trails: [] };
-    // Server doesn't currently have a batch-get-by-id endpoint; the lighter
-    // path is just to return the completion stubs and let the UI label
-    // them. Production task #220 will add a proper hydrate-by-id call.
-    return {
-      trails: completions.map((c) => ({
-        id: c.trailId,
-        name: c.trailId,
-        difficulty: null,
-        distance_km: null,
-        completedAt: c.completedAt,
-      })),
-    };
+    const res = await listCompletions();
+    completionRows = res.completions;
   } catch {
     return { trails: [] };
   }
+  if (completionRows.length === 0) return { trails: [] };
+
+  // Hydrate metadata in one batch via the existing ids-filter on
+  // /api/trails/search. If hydration fails, surface stubs so the user
+  // still sees their ride history.
+  let nameById = new Map<
+    string,
+    { name: string; difficulty: string | null; distance_km: number | null }
+  >();
+  try {
+    const ids = completionRows.map((c) => c.trailId).join(",");
+    const hydrated = await searchTrailsByBbox({
+      ids,
+      limit: completionRows.length,
+    });
+    for (const t of hydrated.trails) {
+      nameById.set(t.id, {
+        name: t.name,
+        difficulty: t.difficulty,
+        distance_km: t.distance_km ?? null,
+      });
+    }
+  } catch {
+    nameById = new Map();
+  }
+
+  return {
+    trails: completionRows.map((c) => {
+      const meta = nameById.get(c.trailId);
+      return {
+        id: c.trailId,
+        name: meta?.name ?? "Trail",
+        difficulty: meta?.difficulty ?? null,
+        distance_km: meta?.distance_km ?? null,
+        completedAt: c.completedAt,
+      };
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -219,14 +247,44 @@ export interface AiChatResponse {
   citations?: Array<{ trailId: string; name: string }>;
 }
 
-export function askAi(
-  prompt: string,
-  context: { visibleTrailIds?: string[] } = {},
+export interface AiChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Grounded chat. The server's `/api/ai/chat` route accepts the full
+ * `messages` history + an optional viewport bbox so the AI can ground
+ * replies on trails the user is currently looking at. We use a typed
+ * direct-fetch helper here because the AI route is intentionally NOT
+ * in the OpenAPI spec (the server treats it as a private surface — see
+ * `routes/ai.ts`).
+ */
+export async function askAi(
+  messages: AiChatTurn[],
+  context: {
+    bbox?: {
+      minLat: number;
+      minLng: number;
+      maxLat: number;
+      maxLng: number;
+    } | null;
+  } = {},
 ): Promise<AiChatResponse> {
-  return apiJson("/api/ai/chat", {
-    method: "POST",
-    body: JSON.stringify({ prompt, ...context }),
-  });
+  const body: Record<string, unknown> = { messages };
+  if (context.bbox) body.bbox = context.bbox;
+  const raw = await apiJson<{
+    reply?: string;
+    message?: string;
+    citations?: AiChatResponse["citations"];
+  }>("/api/ai/chat", { method: "POST", body: JSON.stringify(body) });
+  // The server has shipped under both `reply` and `message` keys at
+  // various points — accept either so a transient API contract drift
+  // doesn't blank out the AI tab.
+  return {
+    reply: raw.reply ?? raw.message ?? "",
+    citations: raw.citations,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -550,14 +608,48 @@ export async function getPlannerSuggestions(req: {
   toLon: number;
   corridorKm?: number;
 }): Promise<{ suggestions: PlannerSuggestion[] }> {
-  try {
-    return await apiJson<{ suggestions: PlannerSuggestion[] }>(
-      "/api/me/planner/suggestions",
-      { method: "POST", body: JSON.stringify(req) },
-    );
-  } catch {
-    // Endpoint is task #214 — until that ships, gracefully degrade so the
-    // planner UI still loads with an empty suggestions list.
-    return { suggestions: [] };
-  }
+  // Surface real errors. Previously this swallowed every failure and
+  // returned `[]`, which masked auth / 5xx issues from the user. The
+  // planner UI now shows an explicit error state instead.
+  return apiJson<{ suggestions: PlannerSuggestion[] }>(
+    "/api/me/planner/suggestions",
+    { method: "POST", body: JSON.stringify(req) },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Admin: system-admin grant/revoke + recent activity
+// ---------------------------------------------------------------------------
+
+export interface AdminUser {
+  user_id: string;
+  email: string | null;
+  display_name: string | null;
+  granted_at: string;
+  granted_by: string | null;
+  note: string | null;
+}
+
+export function listAdmins(): Promise<{
+  items: AdminUser[];
+  envAdmins?: string[];
+  note?: string;
+}> {
+  return apiJson("/api/admin/admins");
+}
+
+export function grantAdmin(
+  userId: string,
+  note?: string,
+): Promise<unknown> {
+  return apiJson("/api/admin/admins", {
+    method: "POST",
+    body: JSON.stringify(note ? { userId, note } : { userId }),
+  });
+}
+
+export function revokeAdmin(userId: string): Promise<unknown> {
+  return apiJson(`/api/admin/admins/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
 }

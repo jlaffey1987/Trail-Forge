@@ -1,12 +1,10 @@
 /**
- * Header dropdown shown in tab screens. Provides:
- *   - Display of the current user's name + email.
- *   - A link to the Admin screen (only when the user is a moderator).
- *   - Sign-out.
+ * Header dropdown shown in tab screens. Profile info, quick links to
+ * the record-a-ride screen, and sign-out. Admin lives in the bottom
+ * tab bar as a role-gated tab — see app/(tabs)/_layout.tsx.
  */
 import { useAuth, useUser } from "@clerk/clerk-expo";
 import { Feather } from "@expo/vector-icons";
-import { useQuery } from "@tanstack/react-query";
 import { router } from "expo-router";
 import React, { useState } from "react";
 import {
@@ -19,23 +17,11 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-import { adminWhoami } from "@/lib/api";
 
 export function UserMenu() {
   const { user } = useUser();
-  const { signOut, isSignedIn } = useAuth();
+  const { signOut } = useAuth();
   const [open, setOpen] = useState(false);
-
-  // The `adminWhoami` lookup also doubles as the "is the API reachable"
-  // health-check on app launch. We keep its result for an hour because
-  // moderator status rarely changes.
-  const { data: admin } = useQuery({
-    queryKey: ["admin-whoami"],
-    queryFn: adminWhoami,
-    staleTime: 60 * 60 * 1000,
-    retry: false,
-    enabled: !!isSignedIn,
-  });
 
   if (!user) return null;
 
@@ -84,16 +70,6 @@ export function UserMenu() {
                 router.push("/record");
               }}
             />
-            {admin?.isModerator ? (
-              <MenuItem
-                icon="shield"
-                label="Admin"
-                onPress={() => {
-                  setOpen(false);
-                  router.push("/admin");
-                }}
-              />
-            ) : null}
             <View style={styles.divider} />
             <MenuItem
               icon="log-out"

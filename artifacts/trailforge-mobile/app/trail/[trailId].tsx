@@ -1,12 +1,16 @@
 /**
- * Single-trail detail screen. Fetched via `useSearchTrails` filtered by
- * id (the API doesn't yet expose a get-by-id route in the OpenAPI spec).
- * Renders the same TrailDetailSheet layout used by the map tap.
+ * Single-trail detail screen. Fetched via the bbox/id-filter trail
+ * search (the API doesn't yet expose a get-by-id route in the spec).
+ *
+ * When opened from the Trails tab the URL carries `?ids=a,b,c,d` —
+ * those siblings power the prev/next navigation buttons so the user
+ * can flip through their saved trails without bouncing back to the
+ * list each time.
  */
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import { router, useLocalSearchParams } from "expo-router";
-import React from "react";
+import React, { useMemo } from "react";
 import {
   ActivityIndicator,
   ScrollView,
@@ -14,29 +18,52 @@ import {
   Text,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from "react-native";
 
 import { ElevationChart } from "@/components/ElevationChart";
 import colors from "@/constants/colors";
 import { searchTrailsByBbox } from "@/lib/api";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
-import { useWindowDimensions } from "react-native";
 
 export default function TrailDetailScreen() {
-  const { trailId } = useLocalSearchParams<{ trailId: string }>();
+  const { trailId, ids } = useLocalSearchParams<{
+    trailId: string;
+    ids?: string;
+  }>();
   const id = String(trailId ?? "");
   const { width } = useWindowDimensions();
 
-  // Filter the search endpoint by trail id. The backend honours `ids` as
-  // a comma-separated list — that param isn't yet in the OpenAPI spec,
-  // so we call the typed direct-fetch helper rather than the generated
-  // hook (which would require a spec change to accept `ids`).
+  const siblingIds = useMemo<string[]>(() => {
+    if (!ids) return [];
+    return String(ids)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }, [ids]);
+
+  const currentIdx = siblingIds.indexOf(id);
+  const prevId = currentIdx > 0 ? siblingIds[currentIdx - 1] : null;
+  const nextId =
+    currentIdx >= 0 && currentIdx < siblingIds.length - 1
+      ? siblingIds[currentIdx + 1]
+      : null;
+
   const q = useQuery({
     queryKey: ["trail-by-id", id],
     queryFn: () => searchTrailsByBbox({ ids: id, limit: 1 }),
     enabled: id.length > 0,
   });
   const trail = q.data?.trails?.[0];
+
+  function navigateTo(targetId: string) {
+    const path = `/trail/${encodeURIComponent(targetId)}` as const;
+    if (siblingIds.length > 0) {
+      router.replace(`${path}?ids=${encodeURIComponent(siblingIds.join(","))}`);
+    } else {
+      router.replace(path);
+    }
+  }
 
   if (q.isLoading) {
     return (
@@ -63,6 +90,30 @@ export default function TrailDetailScreen() {
       style={styles.container}
       contentContainerStyle={{ padding: 18, paddingBottom: 80 }}
     >
+      {siblingIds.length > 1 ? (
+        <View style={styles.navBar}>
+          <TouchableOpacity
+            onPress={() => prevId && navigateTo(prevId)}
+            disabled={!prevId}
+            style={[styles.navBtn, !prevId && { opacity: 0.4 }]}
+          >
+            <Feather name="chevron-left" size={16} color={colors.light.foreground} />
+            <Text style={styles.navBtnText}>Prev</Text>
+          </TouchableOpacity>
+          <Text style={styles.navCounter}>
+            {currentIdx + 1} / {siblingIds.length}
+          </Text>
+          <TouchableOpacity
+            onPress={() => nextId && navigateTo(nextId)}
+            disabled={!nextId}
+            style={[styles.navBtn, !nextId && { opacity: 0.4 }]}
+          >
+            <Text style={styles.navBtnText}>Next</Text>
+            <Feather name="chevron-right" size={16} color={colors.light.foreground} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
       <Text style={styles.h1}>{trail.name}</Text>
 
       <View style={styles.badges}>
@@ -178,4 +229,25 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: 6,
   },
+  navBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+  },
+  navBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  navBtnText: { color: colors.light.foreground, fontWeight: "600", fontSize: 13 },
+  navCounter: { color: colors.light.mutedForeground, fontSize: 12 },
 });

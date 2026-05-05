@@ -8,7 +8,11 @@
  */
 import { Feather } from "@expo/vector-icons";
 import { useMutation } from "@tanstack/react-query";
-import { useCreateMySavedRoute } from "@workspace/api-client-react";
+import {
+  useCreateMySavedRoute,
+  useListMySavedRoutes,
+} from "@workspace/api-client-react";
+import { useLocalSearchParams } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -39,11 +43,67 @@ interface Endpoint {
   lon: number;
 }
 
+interface SavedRoutePreload {
+  id: string;
+  name: string;
+  trail_ids?: string[] | null;
+  trailIds?: string[] | null;
+  waypoints?: Array<{
+    id?: string;
+    lat: number;
+    lon: number;
+    label?: string | null;
+  }> | null;
+}
+
 export default function PlannerTab() {
+  // When the Trails tab navigates here with `?routeId=…`, hydrate the
+  // form from that saved route so the user can pick up where they left
+  // off. We use the existing list-mine query (no per-id GET in the
+  // spec) and grab the matching record once it loads.
+  const { routeId } = useLocalSearchParams<{ routeId?: string }>();
+  const savedRoutes = useListMySavedRoutes({
+    query: {
+      queryKey: ["list-my-saved-routes-for-preload"],
+      enabled: !!routeId,
+    },
+  });
+
   const [from, setFrom] = useState<Endpoint | null>(null);
   const [to, setTo] = useState<Endpoint | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [routeName, setRouteName] = useState("");
+  const [hydratedFor, setHydratedFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!routeId || hydratedFor === routeId) return;
+    const list =
+      (savedRoutes.data as { routes?: SavedRoutePreload[] } | undefined)
+        ?.routes ?? [];
+    const match = list.find((r) => r.id === routeId);
+    if (!match) return;
+    const ids = match.trail_ids ?? match.trailIds ?? [];
+    const wps = match.waypoints ?? [];
+    const fromWp = wps[0];
+    const toWp = wps[wps.length - 1];
+    setRouteName(match.name);
+    setSelected(ids);
+    if (fromWp) {
+      setFrom({
+        label: fromWp.label ?? "Start",
+        lat: fromWp.lat,
+        lon: fromWp.lon,
+      });
+    }
+    if (toWp && wps.length > 1) {
+      setTo({
+        label: toWp.label ?? "End",
+        lat: toWp.lat,
+        lon: toWp.lon,
+      });
+    }
+    setHydratedFor(routeId);
+  }, [routeId, savedRoutes.data, hydratedFor]);
 
   const suggestionsMut = useMutation({
     mutationFn: getPlannerSuggestions,

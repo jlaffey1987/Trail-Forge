@@ -1,4 +1,5 @@
 import { Feather } from "@expo/vector-icons";
+import { useQuery } from "@tanstack/react-query";
 import { useSyncMe } from "@workspace/api-client-react";
 import { Tabs } from "expo-router";
 import React, { useEffect } from "react";
@@ -7,6 +8,7 @@ import { Platform, StyleSheet } from "react-native";
 import { AuthGate } from "@/components/AuthGate";
 import { UserMenu } from "@/components/UserMenu";
 import colors from "@/constants/colors";
+import { adminWhoami } from "@/lib/api";
 import { registerForPushAndSubscribe } from "@/lib/pushSetup";
 
 /**
@@ -32,6 +34,16 @@ function PostLoginBootstrap() {
 }
 
 export default function TabLayout() {
+  // Whoami doubles as a tab-visibility check. We only render the
+  // role-gated Admin tab when the API confirms the user is a moderator.
+  const adminQ = useQuery({
+    queryKey: ["admin-whoami"],
+    queryFn: adminWhoami,
+    staleTime: 60 * 60 * 1000,
+    retry: false,
+  });
+  const isAdmin = adminQ.data?.isModerator === true;
+
   return (
     <AuthGate>
       <PostLoginBootstrap />
@@ -112,6 +124,20 @@ export default function TabLayout() {
             title: "Messages",
             tabBarIcon: ({ color }) => (
               <Feather name="mail" size={20} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="admin"
+          options={{
+            title: "Admin",
+            // Hide the tab entirely until whoami confirms moderator
+            // status. We can't actually unmount the screen file (Expo
+            // Router would 404), so we set href:null which removes it
+            // from the tab bar without unregistering it.
+            href: isAdmin ? "/admin" : null,
+            tabBarIcon: ({ color }) => (
+              <Feather name="shield" size={20} color={color} />
             ),
           }}
         />

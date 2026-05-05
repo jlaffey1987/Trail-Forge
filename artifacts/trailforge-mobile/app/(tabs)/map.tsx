@@ -29,6 +29,7 @@ import {
 import colors from "@/constants/colors";
 import { searchTrailsByBbox, type MapTrail as ApiTrail } from "@/lib/api";
 import { difficultyColor } from "@/lib/trailColors";
+import { publishVisibleTrails } from "@/lib/visibleTrails";
 
 type DifficultyFilter = "all" | "green" | "blue" | "black" | "double-black";
 
@@ -85,6 +86,21 @@ export default function MapTab() {
     const all = trailsQ.data?.trails ?? [];
     return all.filter((t) => matchesDifficulty(t, difficultyFilter));
   }, [trailsQ.data, difficultyFilter]);
+
+  // Publish the currently-visible viewport so the AI tab can ground
+  // replies on what the user is actually looking at. Cap the id list so
+  // we don't blow up the JSON payload sent to /api/ai/chat.
+  useEffect(() => {
+    publishVisibleTrails({
+      bbox: {
+        minLng: region.longitude - region.longitudeDelta / 2,
+        maxLng: region.longitude + region.longitudeDelta / 2,
+        minLat: region.latitude - region.latitudeDelta / 2,
+        maxLat: region.latitude + region.latitudeDelta / 2,
+      },
+      trailIds: trails.slice(0, 20).map((t) => t.id),
+    });
+  }, [region, trails]);
 
   useEffect(() => {
     void (async () => {

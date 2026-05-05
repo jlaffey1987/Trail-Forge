@@ -28,21 +28,27 @@ import colors from "@/constants/colors";
 import {
   adminWhoami,
   approveDiscoveredTrail,
+  grantAdmin,
+  listAdmins,
   listDiscoveredTrails,
   rejectDiscoveredTrail,
+  revokeAdmin,
+  type AdminUser,
   type DiscoveredTrail,
 } from "@/lib/api";
 
 type StatusFilter = "pending" | "approved" | "rejected";
+type AdminTab = "queue" | "users";
 
 export default function AdminScreen() {
   const me = useQuery({ queryKey: ["admin-whoami"], queryFn: adminWhoami });
+  const [tab, setTab] = useState<AdminTab>("queue");
   const [status, setStatus] = useState<StatusFilter>("pending");
   const qc = useQueryClient();
   const queueQ = useQuery({
     queryKey: ["admin-discovery", status],
     queryFn: () => listDiscoveredTrails(status),
-    enabled: !!me.data?.isModerator,
+    enabled: !!me.data?.isModerator && tab === "queue",
   });
 
   const [rejectFor, setRejectFor] = useState<DiscoveredTrail | null>(null);
@@ -98,54 +104,82 @@ export default function AdminScreen() {
 
   return (
     <View style={styles.container}>
-      <Stack.Screen options={{ title: "Moderation queue" }} />
+      <Stack.Screen options={{ title: "Admin" }} />
       <View style={styles.tabs}>
-        {(["pending", "approved", "rejected"] as StatusFilter[]).map((s) => (
+        {(["queue", "users"] as AdminTab[]).map((t) => (
           <TouchableOpacity
-            key={s}
-            onPress={() => setStatus(s)}
-            style={[styles.tab, status === s && styles.tabActive]}
+            key={t}
+            onPress={() => setTab(t)}
+            style={[styles.tab, tab === t && styles.tabActive]}
           >
             <Text
-              style={[styles.tabText, status === s && styles.tabTextActive]}
+              style={[styles.tabText, tab === t && styles.tabTextActive]}
             >
-              {s}
+              {t === "queue" ? "Queue" : "Users"}
             </Text>
           </TouchableOpacity>
         ))}
       </View>
 
-      {queueQ.data?.note ? (
-        <Text style={styles.note}>{queueQ.data.note}</Text>
-      ) : null}
+      {tab === "queue" ? (
+        <>
+          <View style={[styles.tabs, { paddingTop: 6 }]}>
+            {(["pending", "approved", "rejected"] as StatusFilter[]).map((s) => (
+              <TouchableOpacity
+                key={s}
+                onPress={() => setStatus(s)}
+                style={[
+                  styles.subTab,
+                  status === s && styles.subTabActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.subTabText,
+                    status === s && styles.subTabTextActive,
+                  ]}
+                >
+                  {s}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
 
-      <FlatList
-        data={items}
-        keyExtractor={(d) => d.id}
-        contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
-        refreshControl={
-          <RefreshControl
-            refreshing={queueQ.isFetching}
-            onRefresh={() => void queueQ.refetch()}
-            tintColor={colors.light.primary}
+          {queueQ.data?.note ? (
+            <Text style={styles.note}>{queueQ.data.note}</Text>
+          ) : null}
+
+          <FlatList
+            data={items}
+            keyExtractor={(d) => d.id}
+            contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
+            refreshControl={
+              <RefreshControl
+                refreshing={queueQ.isFetching}
+                onRefresh={() => void queueQ.refetch()}
+                tintColor={colors.light.primary}
+              />
+            }
+            ListEmptyComponent={
+              queueQ.isLoading ? (
+                <ActivityIndicator color={colors.light.primary} />
+              ) : (
+                <Text style={styles.empty}>Nothing to review.</Text>
+              )
+            }
+            renderItem={({ item }) => (
+              <DiscoveryCard
+                trail={item}
+                onApprove={() => approveMut.mutate(item.id)}
+                onReject={() => setRejectFor(item)}
+                busy={approveMut.isPending}
+              />
+            )}
           />
-        }
-        ListEmptyComponent={
-          queueQ.isLoading ? (
-            <ActivityIndicator color={colors.light.primary} />
-          ) : (
-            <Text style={styles.empty}>Nothing to review.</Text>
-          )
-        }
-        renderItem={({ item }) => (
-          <DiscoveryCard
-            trail={item}
-            onApprove={() => approveMut.mutate(item.id)}
-            onReject={() => setRejectFor(item)}
-            busy={approveMut.isPending}
-          />
-        )}
-      />
+        </>
+      ) : (
+        <AdminUsersPanel />
+      )}
 
       <RejectModal
         trail={rejectFor}
@@ -156,6 +190,171 @@ export default function AdminScreen() {
         busy={rejectMut.isPending}
       />
     </View>
+  );
+}
+
+function AdminUsersPanel() {
+  const qc = useQueryClient();
+  const adminsQ = useQuery({ queryKey: ["admin-users"], queryFn: listAdmins });
+  const [newUserId, setNewUserId] = useState("");
+  const [newNote, setNewNote] = useState("");
+
+  const grantMut = useMutation({
+    mutationFn: ({ userId, note }: { userId: string; note?: string }) =>
+      grantAdmin(userId, note),
+    onSuccess: () => {
+      setNewUserId("");
+      setNewNote("");
+      void qc.invalidateQueries({ queryKey: ["admin-users"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Grant failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  const revokeMut = useMutation({
+    mutationFn: (userId: string) => revokeAdmin(userId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-users"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Revoke failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  const items: AdminUser[] = adminsQ.data?.items ?? [];
+
+  function confirmRevoke(u: AdminUser) {
+    Alert.alert(
+      "Revoke admin?",
+      `Remove admin access from ${u.email ?? u.user_id}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Revoke",
+          style: "destructive",
+          onPress: () => revokeMut.mutate(u.user_id),
+        },
+      ],
+    );
+  }
+
+  return (
+    <FlatList
+      data={items}
+      keyExtractor={(u) => u.user_id}
+      contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
+      refreshControl={
+        <RefreshControl
+          refreshing={adminsQ.isFetching}
+          onRefresh={() => void adminsQ.refetch()}
+          tintColor={colors.light.primary}
+        />
+      }
+      ListHeaderComponent={
+        <View style={{ marginBottom: 14 }}>
+          <Text style={styles.sectionTitle}>Grant admin access</Text>
+          <Text style={styles.body}>
+            Paste the user id of someone you want to make a moderator.
+          </Text>
+          <TextInput
+            value={newUserId}
+            onChangeText={setNewUserId}
+            placeholder="user_xxx"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={styles.modalInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TextInput
+            value={newNote}
+            onChangeText={setNewNote}
+            placeholder="Note (optional)"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={styles.modalInput}
+          />
+          <TouchableOpacity
+            disabled={grantMut.isPending || !newUserId.trim()}
+            onPress={() =>
+              grantMut.mutate({
+                userId: newUserId.trim(),
+                note: newNote.trim() || undefined,
+              })
+            }
+            style={[
+              styles.btn,
+              { marginTop: 12 },
+              (grantMut.isPending || !newUserId.trim()) && { opacity: 0.5 },
+            ]}
+          >
+            <Text style={styles.btnText}>
+              {grantMut.isPending ? "Granting…" : "Grant"}
+            </Text>
+          </TouchableOpacity>
+
+          {adminsQ.data?.note ? (
+            <Text style={[styles.note, { paddingHorizontal: 0, marginTop: 12 }]}>
+              {adminsQ.data.note}
+            </Text>
+          ) : null}
+          {adminsQ.data?.envAdmins?.length ? (
+            <Text style={[styles.note, { paddingHorizontal: 0 }]}>
+              Env-pinned admins (cannot be revoked):
+              {" "}
+              {adminsQ.data.envAdmins.join(", ")}
+            </Text>
+          ) : null}
+
+          <Text style={[styles.sectionTitle, { marginTop: 22 }]}>
+            Current admins ({items.length})
+          </Text>
+        </View>
+      }
+      ListEmptyComponent={
+        adminsQ.isLoading ? (
+          <ActivityIndicator color={colors.light.primary} />
+        ) : (
+          <Text style={styles.empty}>No admins recorded in the database.</Text>
+        )
+      }
+      renderItem={({ item }) => (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>
+            {item.display_name ?? item.email ?? item.user_id}
+          </Text>
+          <Text style={styles.cardMeta}>
+            {item.email ? `${item.email} • ` : ""}
+            {item.user_id}
+          </Text>
+          <Text style={styles.cardMeta}>
+            Granted {new Date(item.granted_at).toLocaleDateString()}
+            {item.granted_by ? ` by ${item.granted_by}` : ""}
+          </Text>
+          {item.note ? (
+            <Text style={[styles.cardMeta, { fontStyle: "italic" }]}>
+              "{item.note}"
+            </Text>
+          ) : null}
+          <TouchableOpacity
+            onPress={() => confirmRevoke(item)}
+            disabled={revokeMut.isPending}
+            style={[
+              styles.actionBtn,
+              styles.rejectBtn,
+              { marginTop: 10, alignSelf: "flex-start", flex: 0, paddingHorizontal: 16 },
+              revokeMut.isPending && { opacity: 0.5 },
+            ]}
+          >
+            <Feather name="user-x" size={14} color={colors.light.foreground} />
+            <Text style={styles.actionTextDark}>Revoke</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+    />
   );
 }
 
@@ -317,6 +516,31 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   tabTextActive: { color: colors.light.primaryForeground },
+  subTab: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+  },
+  subTabActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+  subTabText: {
+    color: colors.light.foreground,
+    fontWeight: "600",
+    textTransform: "capitalize",
+    fontSize: 11,
+  },
+  subTabTextActive: { color: colors.light.primaryForeground },
+  sectionTitle: {
+    color: colors.light.foreground,
+    fontWeight: "700",
+    fontSize: 15,
+    marginBottom: 6,
+  },
   card: {
     backgroundColor: colors.light.card,
     borderColor: colors.light.border,
