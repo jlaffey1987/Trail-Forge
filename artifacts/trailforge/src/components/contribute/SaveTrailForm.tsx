@@ -3,6 +3,7 @@ import type { Waypoint } from "@/lib/gpx";
 import { distanceKmFromWaypoints, bboxFromWaypoints } from "@/lib/gpx";
 import type { CreateTrailInput, TrailPrivacy } from "@/lib/supabase";
 import { type Group, listMyGroups } from "@/lib/groups";
+import { toast } from "@/hooks/use-toast";
 
 const TRAIL_TYPES: { value: string; label: string }[] = [
   { value: "BOAT", label: "BOAT" },
@@ -220,12 +221,22 @@ export default function SaveTrailForm({
         console.warn("[save-trail] onSave failed:", result.error);
         setSubmitting(false);
         setSubmitStep("");
-        setError(result.error ?? "Could not save trail");
+        const msg = result.error ?? "Could not save trail";
+        setError(msg);
+        toast({
+          title: "Couldn't save trail",
+          description: msg,
+          variant: "destructive",
+        });
         return;
       }
       console.log("[save-trail] saved");
       setSubmitting(false);
       setSubmitStep("");
+      toast({
+        title: "Trail saved",
+        description: `${trimmedName} is now in your trails.`,
+      });
     } catch (err) {
       console.error("[save-trail] handleSubmit threw:", err);
       setSubmitting(false);
@@ -235,6 +246,11 @@ export default function SaveTrailForm({
           ? `Save failed: ${err.message}`
           : "Save failed. Please try again.";
       setError(message);
+      toast({
+        title: "Couldn't save trail",
+        description: message,
+        variant: "destructive",
+      });
     }
   };
 

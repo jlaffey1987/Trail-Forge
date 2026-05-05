@@ -21,6 +21,7 @@ import TrailDetailSheet from "@/components/TrailDetailSheet";
 import RouteDetailSheet from "@/components/RouteDetailSheet";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import GlossaryDialog from "@/components/GlossaryDialog";
+import { toast } from "@/hooks/use-toast";
 import {
   listPublishedRoutes,
   type ListPublishedRoutesParams,
@@ -179,9 +180,19 @@ export default function DiscoverTab() {
     const res = await requestToJoinGroup(group.id, msg);
     setJoiningGroupId(null);
     if ("error" in res) {
-      setJoinError(res.error || "Could not send request");
+      const errMsg = res.error || "Could not send request";
+      setJoinError(errMsg);
+      toast({
+        title: "Couldn't request to join",
+        description: errMsg,
+        variant: "destructive",
+      });
       return;
     }
+    toast({
+      title: "Request sent",
+      description: `Your request to join ${group.name} is pending approval.`,
+    });
     setDiscoverableGroups((cur) =>
       cur.map((g) =>
         g.id === group.id ? { ...g, my_status: "pending" as const } : g,

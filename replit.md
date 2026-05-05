@@ -59,6 +59,7 @@ The project is structured as a pnpm monorepo.
     - PlannerTab detects `?fromSelection=1`, reads the pre-assembled route from sessionStorage, and displays it in navigation view — no start/end address entry required.
     - Edge cases: geolocation denied falls back to first-trail start, missing geometry shows error, OSRM failure shows warning, column-missing DB schemas handled with `select("*")` fallback.
 - **In-app Chat:** Group and direct messaging with real-time updates, read receipts, and user blocking.
+- **Toasts:** A single shadcn `<Toaster />` is mounted once in `App.tsx` (alongside `WouterRouter`). User-facing actions (saving a trail, requesting to join a group, approving/rejecting amendments) emit success and failure feedback via `toast({ title, description, variant })` from `@/hooks/use-toast` instead of inline error banners or `window.alert`. Use `variant: "destructive"` for failures. Inline errors should only stay if they appear inside an open dialog where in-context feedback adds value.
 
 **Backend (api-server):**
 - Express API server.

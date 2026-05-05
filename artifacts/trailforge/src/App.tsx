@@ -28,6 +28,7 @@ import ChatInboxPage from "@/pages/ChatInboxPage";
 import ChatThreadPage from "@/pages/ChatThreadPage";
 import AdminPage from "@/pages/AdminPage";
 import IntroSplash from "@/components/IntroSplash";
+import { Toaster } from "@/components/ui/toaster";
 import { syncCurrentUser } from "@/lib/users";
 import { autoAcceptEmailInvites } from "@/lib/groups";
 import { setPlannerRouteUserId } from "@/lib/plannerRouteStore";
@@ -573,6 +574,7 @@ export default function App() {
     <WouterRouter base={basePath}>
       <IntroSplash />
       <ClerkProviderWithRoutes />
+      <Toaster />
     </WouterRouter>
   );
 }

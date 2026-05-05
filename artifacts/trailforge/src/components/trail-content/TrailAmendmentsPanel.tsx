@@ -10,6 +10,7 @@ import {
 } from "@/lib/trailContent";
 import { type Trail } from "@/lib/supabase";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { toast } from "@/hooks/use-toast";
 
 interface Props {
   trail: Trail;
@@ -193,16 +194,32 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
     try {
       const ok = await decideAmendment(trail.id, am.id, decision, reasonText);
       if (!ok) {
-        setDecideError(
+        const errMsg =
           decision === "approve"
             ? "Could not approve this amendment. Please try again."
-            : "Could not reject this amendment. Please try again.",
-        );
+            : "Could not reject this amendment. Please try again.";
+        // Keep the inline banner inside the reject dialog so the moderator
+        // sees the error in context, but always emit a toast too.
+        if (decision === "reject" && rejecting) {
+          setDecideError(errMsg);
+        }
+        toast({
+          title: decision === "approve" ? "Approve failed" : "Reject failed",
+          description: errMsg,
+          variant: "destructive",
+        });
         return false;
       }
       const rows = await fetchTrailAmendments(trail.id);
       setItems(rows);
       onCountsChanged?.();
+      toast({
+        title: decision === "approve" ? "Amendment approved" : "Amendment rejected",
+        description:
+          decision === "approve"
+            ? "The proposed change is now live on this trail."
+            : "The author will see your decision.",
+      });
       return true;
     } finally {
       setDeciding(false);
@@ -267,23 +284,6 @@ export default function TrailAmendmentsPanel({ trail, onCountsChanged, canModera
           <span className="text-[11px] text-stone-500">Sign in to propose</span>
         )}
       </div>
-
-      {decideError && !rejecting ? (
-        <div
-          className="rounded-lg border border-red-600/40 bg-red-900/20 px-3 py-2 text-[11px] text-red-300 flex items-start justify-between gap-2"
-          role="alert"
-          data-testid="amendment-decide-error"
-        >
-          <span>{decideError}</span>
-          <button
-            onClick={() => setDecideError(null)}
-            className="text-red-300/80 hover:text-red-200 text-[10px] uppercase tracking-wider"
-            data-testid="amendment-decide-error-dismiss"
-          >
-            Dismiss
-          </button>
-        </div>
-      ) : null}
 
       {showForm ? (
         <div className="bg-[hsl(22,15%,12%)] border border-[hsl(30,12%,18%)] rounded-lg p-3 space-y-2">
