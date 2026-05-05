@@ -14,6 +14,7 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from "react-native";
 
@@ -69,6 +70,20 @@ export default function MessagesTab() {
           onRefresh={() => void q.refetch()}
           tintColor={colors.light.primary}
         />
+      }
+      ListHeaderComponent={
+        <TouchableOpacity
+          style={styles.blockedLink}
+          onPress={() => router.push("/blocked")}
+        >
+          <Feather name="user-x" size={14} color={colors.light.mutedForeground} />
+          <Text style={styles.blockedLinkText}>Manage blocked users</Text>
+          <Feather
+            name="chevron-right"
+            size={16}
+            color={colors.light.mutedForeground}
+          />
+        </TouchableOpacity>
       }
       ListEmptyComponent={
         q.isLoading ? (
@@ -204,5 +219,21 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
     paddingHorizontal: 32,
+  },
+  blockedLink: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: colors.light.muted,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  blockedLinkText: {
+    flex: 1,
+    color: colors.light.foreground,
+    fontSize: 13,
+    fontWeight: "600",
   },
 });

@@ -105,7 +105,6 @@ function RootLayoutNav() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="sign-in" options={{ headerShown: false }} />
       <Stack.Screen name="record" options={{ title: "Record ride" }} />
-      <Stack.Screen name="admin" options={{ title: "Admin" }} />
       <Stack.Screen
         name="trail/[trailId]"
         options={{ title: "Trail", presentation: "modal" }}
@@ -118,6 +117,7 @@ function RootLayoutNav() {
         name="invite/[token]"
         options={{ title: "Group invite" }}
       />
+      <Stack.Screen name="blocked" options={{ title: "Blocked users" }} />
     </Stack>
   );
 }

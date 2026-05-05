@@ -10,6 +10,7 @@ import { UserMenu } from "@/components/UserMenu";
 import colors from "@/constants/colors";
 import { adminWhoami } from "@/lib/api";
 import { registerForPushAndSubscribe } from "@/lib/pushSetup";
+import { rehydrate as rehydrateRecording } from "@/lib/recording";
 
 /**
  * Mirror the Clerk user into Supabase + register for Expo push on launch.
@@ -26,6 +27,11 @@ function PostLoginBootstrap() {
     // Registering for push is idempotent — if the user already granted
     // permission and the token hasn't changed, nothing happens server-side.
     void registerForPushAndSubscribe();
+    // Rehydrate any in-progress ride from AsyncStorage so a crash or
+    // process kill during recording doesn't lose the user's points. The
+    // record screen subscribes to recording state on mount and will
+    // immediately reflect the restored buffer.
+    void rehydrateRecording();
     // We deliberately want this to run exactly once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

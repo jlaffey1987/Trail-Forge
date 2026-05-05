@@ -737,3 +737,31 @@ export function shareTrailToGroups(
     body: JSON.stringify({ group_ids: groupIds }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Block list — for chat parity. The block-list screen lets the user review
+// and manage who they've blocked. Blocking from a thread happens via the
+// server-side message-send guardrails; the mobile UI surfaces the inverse.
+// ---------------------------------------------------------------------------
+
+export interface BlockedUser {
+  user_id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+}
+
+export function listMyBlocks(): Promise<{ blocks: BlockedUser[] }> {
+  return apiJson<{ blocks: BlockedUser[] }>("/api/users/me/blocks");
+}
+
+export function blockUser(userId: string): Promise<unknown> {
+  return apiJson(`/api/users/${encodeURIComponent(userId)}/block`, {
+    method: "POST",
+  });
+}
+
+export function unblockUser(userId: string): Promise<unknown> {
+  return apiJson(`/api/users/${encodeURIComponent(userId)}/block`, {
+    method: "DELETE",
+  });
+}

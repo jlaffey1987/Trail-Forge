@@ -9,7 +9,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Stack, router } from "expo-router";
+import { router } from "expo-router";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
@@ -90,7 +90,6 @@ export default function AdminScreen() {
   if (!me.data?.isModerator) {
     return (
       <View style={styles.center}>
-        <Stack.Screen options={{ title: "Admin" }} />
         <Text style={styles.h1}>403</Text>
         <Text style={styles.body}>You don't have admin access.</Text>
         <TouchableOpacity onPress={() => router.back()} style={styles.btn}>
@@ -104,7 +103,6 @@ export default function AdminScreen() {
 
   return (
     <View style={styles.container}>
-      <Stack.Screen options={{ title: "Admin" }} />
       <View style={styles.tabs}>
         {(["queue", "users"] as AdminTab[]).map((t) => (
           <TouchableOpacity
