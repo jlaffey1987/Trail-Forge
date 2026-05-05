@@ -9,6 +9,7 @@ import groupsRouter from "./groups";
 import aiRouter from "./ai";
 import pushRouter from "./push";
 import chatRouter from "./chat";
+import geocodeRouter from "./geocode";
 
 const router: IRouter = Router();
 
@@ -22,5 +23,6 @@ router.use(groupsRouter);
 router.use(aiRouter);
 router.use(pushRouter);
 router.use(chatRouter);
+router.use(geocodeRouter);
 
 export default router;

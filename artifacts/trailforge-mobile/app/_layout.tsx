@@ -20,6 +20,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import colors from "@/constants/colors";
 import { tokenCache } from "@/lib/clerkTokenCache";
 import { setSharedBearerGetter } from "@/lib/api";
+import { subscribeToNotificationTaps } from "@/lib/notificationRouting";
 
 // ---------------------------------------------------------------------------
 // Module-level wiring (runs once per JS bundle, before React mounts).
@@ -92,6 +93,10 @@ function ApiAuthBridge({ children }: { children: React.ReactNode }) {
 }
 
 function RootLayoutNav() {
+  // Notification taps — mounted inside the Stack tree so expo-router's
+  // navigation context is live when the listener fires.
+  useEffect(() => subscribeToNotificationTaps(), []);
+
   return (
     <Stack
       screenOptions={{

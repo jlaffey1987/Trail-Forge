@@ -1,13 +1,11 @@
 /**
- * Direct-fetch helpers for API endpoints not yet covered by the
- * generated `@workspace/api-client-react` hooks (chat, AI, groups, admin,
- * push subscribe, recently-ridden, completions). Every helper:
- *   1. Uses the absolute API base built from EXPO_PUBLIC_DOMAIN.
- *   2. Attaches the Clerk bearer token from the auth-token getter the
- *      app installs in `_layout.tsx` via `setAuthTokenGetter`. We mirror
- *      that getter into a module-level cache here so non-react-query call
- *      sites (notification handlers, background tasks) can authenticate
- *      without going through React.
+ * Direct-fetch helpers for backend endpoints not yet declared in
+ * `lib/api-spec/openapi.yaml`. Where the spec covers an endpoint we use
+ * the generated `@workspace/api-client-react` hooks instead (saved
+ * routes, saved trails, etc). New product endpoints should land in the
+ * spec first; these helpers are only for routes the contract hasn't
+ * formalised. Auth bearer is mirrored from the getter installed in
+ * `_layout.tsx` via `setAuthTokenGetter`.
  */
 
 let _bearerGetter: (() => Promise<string | null> | string | null) | null = null;

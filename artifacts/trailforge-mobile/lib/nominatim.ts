@@ -1,14 +1,9 @@
 /**
- * Address autocomplete via OpenStreetMap Nominatim. Same provider the web
- * planner uses so suggestions match between surfaces.
- *
- * Nominatim's usage policy requires an identifying User-Agent and rate
- * limiting; we send a TrailForge-specific UA and debounce calls in the
- * UI layer (see `app/(tabs)/index.tsx`).
+ * Address autocomplete via the backend's `/api/geocode/*` proxy. The
+ * server controls the Nominatim User-Agent and rate-limiting so we
+ * never call the OSM service directly from the device.
  */
-
-const NOMINATIM_URL = "https://nominatim.openstreetmap.org";
-const USER_AGENT = "TrailForge-Mobile/1.0 (https://trailforge.app)";
+import { apiJson } from "@/lib/api";
 
 export interface NominatimResult {
   place_id: number;
@@ -18,15 +13,28 @@ export interface NominatimResult {
 }
 
 export async function geocode(query: string): Promise<NominatimResult[]> {
-  if (!query.trim()) return [];
-  const url = `${NOMINATIM_URL}/search?format=jsonv2&limit=5&q=${encodeURIComponent(query)}`;
+  const q = query.trim();
+  if (!q) return [];
   try {
-    const res = await fetch(url, {
-      headers: { "user-agent": USER_AGENT, accept: "application/json" },
-    });
-    if (!res.ok) return [];
-    return (await res.json()) as NominatimResult[];
+    const res = await apiJson<{ results: NominatimResult[] }>(
+      `/api/geocode/search?q=${encodeURIComponent(q)}&limit=5`,
+    );
+    return Array.isArray(res.results) ? res.results : [];
   } catch {
     return [];
+  }
+}
+
+export async function reverseGeocode(
+  lat: number,
+  lon: number,
+): Promise<{ display_name?: string } | null> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  try {
+    return await apiJson<{ display_name?: string }>(
+      `/api/geocode/reverse?lat=${lat}&lon=${lon}`,
+    );
+  } catch {
+    return null;
   }
 }
