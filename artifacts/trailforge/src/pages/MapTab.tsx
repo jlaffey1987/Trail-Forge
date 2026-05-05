@@ -34,15 +34,19 @@ import {
   bboxesIntersect,
 } from "@/lib/trailLayer";
 import {
-  setRouteTrails as setPlannerRouteTrails,
+  useRouteTrails,
+  addRouteTrail,
+  removeRouteTrail,
+  setRouteTrails,
+  clearPlannerRoute,
+  useRouteStart,
+  useRouteEnd,
+  setRouteStart,
+  setRouteEnd,
+  getRouteStart,
+  getRouteEnd,
+  PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
-import {
-  useMapSelection,
-  addSelectedTrail,
-  removeSelectedTrail,
-  setSelectedTrails,
-  clearSelection,
-} from "@/lib/mapSelectionStore";
 import {
   HYBRID_LABEL_TILE_URL,
   HYBRID_LABEL_TILE_ATTRIBUTION,
@@ -70,6 +74,18 @@ declare global {
 }
 
 type MapMode = "explore" | "draw" | "record";
+type DropPinMode = null | "start" | "end";
+
+/** HTML-escape user-controlled text before injecting into Leaflet popups. */
+function escHtml(s: string | null | undefined): string {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 const TILE_URLS: Record<BaseMap, string> = {
   satellite:
@@ -137,7 +153,9 @@ export default function MapTab() {
   const [currentZoom, setCurrentZoom] = useState(7);
   const [, setCurrentBbox] = useState<MapBbox | null>(null);
 
-  const routeTrails = useMapSelection();
+  const [routeTrails] = useRouteTrails();
+  const routeStart = useRouteStart();
+  const routeEnd = useRouteEnd();
   const routeIdSet = useMemo(() => new Set(routeTrails.map((t) => t.id)), [routeTrails]);
   const highlightIdSet = useMemo(() => {
     const s = new Set(routeIdSet);
@@ -145,6 +163,22 @@ export default function MapTab() {
     return s;
   }, [routeIdSet, highlightedTrailId]);
   const routeConnectorsRef = useRef<import("leaflet").Polyline[]>([]);
+  // A/B start/end markers and live road-routed polyline layers — managed
+  // in dedicated effects below so the user's pan/zoom is never disturbed
+  // by route mutations.
+  const startMarkerRef = useRef<import("leaflet").Marker | null>(null);
+  const endMarkerRef = useRef<import("leaflet").Marker | null>(null);
+  const livePolylineRef = useRef<import("leaflet").Polyline[]>([]);
+  const [hasLivePolyline, setHasLivePolyline] = useState(false);
+  const liveRouteSeqRef = useRef(0);
+  const liveRouteDebounceRef = useRef<number | null>(null);
+  const [liveRouteLoading, setLiveRouteLoading] = useState(false);
+  // Drop-pin armed mode: while non-null, the next map click in Explore
+  // sets the start (A) or destination (B). The ref shadow keeps the
+  // long-lived map-click handler in sync without re-binding.
+  const [dropPinMode, setDropPinMode] = useState<DropPinMode>(null);
+  const dropPinModeRef = useRef<DropPinMode>(null);
+  useEffect(() => { dropPinModeRef.current = dropPinMode; }, [dropPinMode]);
 
   // "+ Add Trail" / contribute flows
   const [showAddMenu, setShowAddMenu] = useState(false);
@@ -371,6 +405,34 @@ export default function MapTab() {
     labelLayerRef.current = labelLayer;
 
     map.on("click", (e: import("leaflet").LeafletMouseEvent) => {
+      // Drop-pin armed in Explore mode → set start (A) or destination (B)
+      // and disarm. Reverse-geocode in the background so the pin keeps a
+      // friendly label even when the rider hasn't typed an address.
+      if (mapModeRef.current === "explore" && dropPinModeRef.current) {
+        const which = dropPinModeRef.current;
+        setDropPinMode(null);
+        const { lat, lng } = e.latlng;
+        const fallback: GeoPoint = { lat, lng, label: "Pinned location" };
+        if (which === "start") setRouteStart(fallback);
+        else setRouteEnd(fallback);
+        void (async () => {
+          try {
+            const place = await reverseGeocode(lat, lng);
+            if (!place) return;
+            // Only replace if the pin hasn't been moved/cleared in the
+            // meantime — guards against a race with another drop or a
+            // Planner-side update.
+            if (which === "start") {
+              const cur = getRouteStart();
+              if (cur && cur.lat === lat && cur.lng === lng) setRouteStart(place);
+            } else {
+              const cur = getRouteEnd();
+              if (cur && cur.lat === lat && cur.lng === lng) setRouteEnd(place);
+            }
+          } catch { /* network jitter — keep the "Pinned location" fallback */ }
+        })();
+        return;
+      }
       if (mapModeRef.current !== "draw") return;
       const { lat, lng } = e.latlng;
       const id = Date.now();
@@ -684,7 +746,10 @@ export default function MapTab() {
     });
     routeConnectorsRef.current = [];
 
-    if (routeTrails.length < 2) return;
+    // When the live road-routed polyline is rendered, the dashed straight
+    // connectors become noise — the cyan road-route already shows the real
+    // travel between trails. Skip drawing them in that case.
+    if (routeTrails.length < 2 || hasLivePolyline) return;
 
     const newLines: import("leaflet").Polyline[] = [];
     try {
@@ -724,16 +789,168 @@ export default function MapTab() {
       console.error("[MapTab] route connector render failed:", err);
     }
     routeConnectorsRef.current = newLines;
-  }, [routeTrails]);
+  }, [routeTrails, hasLivePolyline]);
+
+  // ---------------------------------------------------------------------------
+  // Live route editor: A/B markers, road-routed polyline, drop-pin cursor.
+  // These effects intentionally NEVER call fitBounds — the rider's pan/zoom
+  // is sacred. Use the "Fit" pill button to opt-in.
+  // ---------------------------------------------------------------------------
+
+  // Render A/B start/end markers in step with the planner-route store.
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    const map = mapRef.current;
+
+    if (startMarkerRef.current) {
+      try { startMarkerRef.current.remove(); } catch { /**/ }
+      startMarkerRef.current = null;
+    }
+    if (endMarkerRef.current) {
+      try { endMarkerRef.current.remove(); } catch { /**/ }
+      endMarkerRef.current = null;
+    }
+
+    if (routeStart) {
+      const html = `<div style="background:#10b981;width:28px;height:28px;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;color:#fff;">A</div>`;
+      const m = L.marker([routeStart.lat, routeStart.lng], {
+        icon: L.divIcon({ html, iconSize: [28, 28], iconAnchor: [14, 14], className: "" }),
+        zIndexOffset: 900,
+      }).addTo(map);
+      const lbl = routeStart.label?.trim();
+      if (lbl) m.bindPopup(`<b>Start</b><br>${escHtml(lbl)}`);
+      startMarkerRef.current = m;
+    }
+    if (routeEnd) {
+      const html = `<div style="background:#dc2626;width:28px;height:28px;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;color:#fff;">B</div>`;
+      const m = L.marker([routeEnd.lat, routeEnd.lng], {
+        icon: L.divIcon({ html, iconSize: [28, 28], iconAnchor: [14, 14], className: "" }),
+        zIndexOffset: 900,
+      }).addTo(map);
+      const lbl = routeEnd.label?.trim();
+      if (lbl) m.bindPopup(`<b>Destination</b><br>${escHtml(lbl)}`);
+      endMarkerRef.current = m;
+    }
+  }, [routeStart, routeEnd]);
+
+  // Live road-routed polyline. Debounced 300ms to coalesce rapid edits
+  // (e.g. typing in the Planner inputs while the Map is mounted), and
+  // sequence-guarded so a stale assembleMultiModalRoute response can't
+  // clobber a fresher one.
+  useEffect(() => {
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    const map = mapRef.current;
+
+    // Need a start AND at least one trail to compute a meaningful route.
+    // (End is optional; assembleMultiModalRoute handles it.)
+    const canCompute = routeStart != null && routeTrails.length > 0;
+    if (!canCompute) {
+      // CRITICAL: bump the sequence so any in-flight assembleMultiModalRoute
+      // promise from a previous dependency set is forced stale. Without this,
+      // a slow response could resolve AFTER the route was cleared and re-add
+      // cyan polylines on top of an empty route. Same reason `liveRouteDebounceRef`
+      // is also cancelled — a queued recompute would be just as wrong.
+      liveRouteSeqRef.current += 1;
+      if (liveRouteDebounceRef.current != null) {
+        window.clearTimeout(liveRouteDebounceRef.current);
+        liveRouteDebounceRef.current = null;
+      }
+      livePolylineRef.current.forEach((pl) => { try { pl.remove(); } catch { /**/ } });
+      livePolylineRef.current = [];
+      setHasLivePolyline(false);
+      setLiveRouteLoading(false);
+      return;
+    }
+
+    if (liveRouteDebounceRef.current != null) {
+      window.clearTimeout(liveRouteDebounceRef.current);
+    }
+    const seq = ++liveRouteSeqRef.current;
+    setLiveRouteLoading(true);
+
+    liveRouteDebounceRef.current = window.setTimeout(() => {
+      liveRouteDebounceRef.current = null;
+      void (async () => {
+        try {
+          const entries = routeTrails.map((t) => ({ kind: "trail" as const, trail: t }));
+          const route: AssembledRoute = await assembleMultiModalRoute(routeStart, routeEnd, entries);
+          if (seq !== liveRouteSeqRef.current) return;
+
+          livePolylineRef.current.forEach((pl) => { try { pl.remove(); } catch { /**/ } });
+          livePolylineRef.current = [];
+
+          const newLines: import("leaflet").Polyline[] = [];
+          for (const sec of route.sections) {
+            if (sec.kind !== "road") continue;
+            const coords = sec.route.polyline;
+            if (coords.length < 2) continue;
+            const pl = L.polyline(
+              coords.map((p) => [p.lat, p.lng] as [number, number]),
+              {
+                color: "#38bdf8",
+                weight: 4,
+                opacity: 0.9,
+                pane: "trailsPane",
+                interactive: false,
+              },
+            ).addTo(map);
+            newLines.push(pl);
+          }
+          livePolylineRef.current = newLines;
+          setHasLivePolyline(newLines.length > 0);
+        } catch (err) {
+          if (seq !== liveRouteSeqRef.current) return;
+          // eslint-disable-next-line no-console
+          console.warn("[MapTab] live route assembly failed:", err);
+          // Don't clobber whatever's currently rendered — a transient
+          // network blip shouldn't blank the screen.
+        } finally {
+          if (seq === liveRouteSeqRef.current) setLiveRouteLoading(false);
+        }
+      })();
+    }, 300);
+
+    return () => {
+      // Bump sequence on cleanup so an already-launched async response
+      // from THIS effect run is forced stale before the next run (or
+      // unmount) — guards against the same stale-overwrite class that
+      // motivated the seq-guard in the first place.
+      liveRouteSeqRef.current += 1;
+      if (liveRouteDebounceRef.current != null) {
+        window.clearTimeout(liveRouteDebounceRef.current);
+        liveRouteDebounceRef.current = null;
+      }
+    };
+  }, [routeStart, routeEnd, routeTrails]);
+
+  // Crosshair cursor while drop-pin mode is armed so the rider knows the
+  // next click will drop a pin, not pan.
+  useEffect(() => {
+    const el = mapContainerRef.current;
+    if (!el) return;
+    if (dropPinMode) {
+      el.style.cursor = "crosshair";
+    } else {
+      el.style.cursor = "";
+    }
+    return () => { if (el) el.style.cursor = ""; };
+  }, [dropPinMode]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (fetchDebounceRef.current != null) window.clearTimeout(fetchDebounceRef.current);
+      if (liveRouteDebounceRef.current != null) window.clearTimeout(liveRouteDebounceRef.current);
       trailLayerHandleRef.current?.clear();
       clusterLayerHandleRef.current?.clear();
-      routeConnectorsRef.current.forEach((pl) => pl.remove());
+      routeConnectorsRef.current.forEach((pl) => { try { pl.remove(); } catch { /**/ } });
       routeConnectorsRef.current = [];
+      livePolylineRef.current.forEach((pl) => { try { pl.remove(); } catch { /**/ } });
+      livePolylineRef.current = [];
+      if (startMarkerRef.current) { try { startMarkerRef.current.remove(); } catch { /**/ } startMarkerRef.current = null; }
+      if (endMarkerRef.current) { try { endMarkerRef.current.remove(); } catch { /**/ } endMarkerRef.current = null; }
     };
   }, []);
 
@@ -845,10 +1062,16 @@ export default function MapTab() {
 
   const handleToggleSearchTrail = useCallback((trail: Trail) => {
     if (routeIdSet.has(trail.id)) {
-      removeSelectedTrail(trail.id);
-    } else {
-      addSelectedTrail(trail);
+      removeRouteTrail(trail.id);
+      return;
     }
+    const result = addRouteTrail(trail);
+    if (result === "atLimit") {
+      setBuildError(`Route is full (max ${PLANNER_MAX_TRAILS} trails). Remove one first.`);
+      setTimeout(() => setBuildError(null), 4000);
+    }
+    // "duplicate" is a no-op — the trail is already in the route, which
+    // matches what the user clicked, so nothing to surface.
   }, [routeIdSet]);
 
   const handleFlyToTrail = useCallback((trail: Trail) => {
@@ -868,11 +1091,37 @@ export default function MapTab() {
 
   const handlePlanInPlanner = useCallback(() => {
     if (routeTrails.length === 0) return;
-    setPlannerRouteTrails(routeTrails);
+    // The route is now shared via plannerRouteStore — no copy needed.
+    // Just navigate to the Planner with the build flag set.
     const params = new URLSearchParams(window.location.search);
     params.set("build", "1");
     setLocation(`/?${params.toString()}`);
-  }, [routeTrails, setLocation]);
+  }, [routeTrails.length, setLocation]);
+
+  const handleFitRoute = useCallback(() => {
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    const pts: [number, number][] = [];
+    if (routeStart) pts.push([routeStart.lat, routeStart.lng]);
+    if (routeEnd) pts.push([routeEnd.lat, routeEnd.lng]);
+    for (const t of routeTrails) {
+      const ll = getTrailLatLngs(t);
+      for (const p of ll) pts.push([p[0], p[1]]);
+    }
+    if (pts.length === 0) return;
+    if (pts.length === 1) {
+      mapRef.current.setView(pts[0], 12);
+      return;
+    }
+    try {
+      mapRef.current.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom: 14 });
+    } catch { /* ignore degenerate bounds */ }
+  }, [routeStart, routeEnd, routeTrails]);
+
+  const handleClearRoute = useCallback(() => {
+    clearPlannerRoute();
+    setDropPinMode(null);
+  }, []);
 
   const handleBuildRoute = useCallback(() => {
     if (routeTrails.length === 0) return;
@@ -1309,9 +1558,9 @@ ${trkpts}
       {mapMode === "explore" && (
         <MapRoutePanel
           trails={routeTrails}
-          onReorder={(next) => setSelectedTrails(next)}
-          onRemove={(id) => removeSelectedTrail(id)}
-          onClear={() => clearSelection()}
+          onReorder={(next) => setRouteTrails(next)}
+          onRemove={(id) => removeRouteTrail(id)}
+          onClear={() => handleClearRoute()}
           onBuildRoute={handleBuildRoute}
           onPlanInPlanner={handlePlanInPlanner}
           onSelectTrail={(trail) => {
@@ -1321,6 +1570,93 @@ ${trkpts}
           building={building}
           buildError={buildError}
         />
+      )}
+
+      {/* Live route editor pill — Set A / Set B drop-pin affordance plus
+          status (N trails) and Fit / Clear actions. Only shown in Explore;
+          kept above the bottom nav (~5rem) so it never collides. */}
+      {mapMode === "explore" && (
+        <div
+          className="absolute left-3 z-[1000] pointer-events-auto"
+          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 5rem)" }}
+          data-testid="map-route-editor-pill"
+        >
+          <div className="flex items-center gap-1.5 bg-black/80 backdrop-blur border border-stone-700/70 rounded-full shadow-lg px-1.5 py-1.5 text-[11px] font-bold text-stone-100">
+            <button
+              type="button"
+              onClick={() => setDropPinMode((m) => (m === "start" ? null : "start"))}
+              className={`flex items-center gap-1 px-2 py-1 rounded-full transition-colors ${
+                dropPinMode === "start"
+                  ? "bg-emerald-500 text-white"
+                  : routeStart
+                  ? "bg-emerald-700/40 text-emerald-100 hover:bg-emerald-700/60"
+                  : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+              }`}
+              aria-label={dropPinMode === "start" ? "Cancel set start" : routeStart ? "Move start" : "Set start"}
+              data-testid="map-set-start-btn"
+            >
+              <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-500 text-white text-[9px] font-black border border-white/40">A</span>
+              <span>{dropPinMode === "start" ? "Tap map…" : routeStart ? "Move A" : "Set A"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setDropPinMode((m) => (m === "end" ? null : "end"))}
+              className={`flex items-center gap-1 px-2 py-1 rounded-full transition-colors ${
+                dropPinMode === "end"
+                  ? "bg-red-500 text-white"
+                  : routeEnd
+                  ? "bg-red-700/40 text-red-100 hover:bg-red-700/60"
+                  : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+              }`}
+              aria-label={dropPinMode === "end" ? "Cancel set destination" : routeEnd ? "Move destination" : "Set destination"}
+              data-testid="map-set-end-btn"
+            >
+              <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-black border border-white/40">B</span>
+              <span>{dropPinMode === "end" ? "Tap map…" : routeEnd ? "Move B" : "Set B"}</span>
+            </button>
+            {(routeStart || routeEnd || routeTrails.length > 0) && (
+              <>
+                <span className="w-px h-5 bg-stone-700 mx-0.5" aria-hidden="true" />
+                <span
+                  className="px-1.5 text-[10px] uppercase tracking-wider text-stone-300 flex items-center gap-1"
+                  data-testid="map-editing-route-status"
+                >
+                  {liveRouteLoading && (
+                    <span className="w-2.5 h-2.5 border border-cyan-500/40 border-t-cyan-400 rounded-full animate-spin" />
+                  )}
+                  <span>
+                    <span className="text-cyan-300">{routeTrails.length}</span> trail{routeTrails.length !== 1 ? "s" : ""}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleFitRoute}
+                  className="flex items-center gap-1 px-2 py-1 rounded-full bg-stone-800 text-stone-200 hover:bg-stone-700 transition-colors"
+                  aria-label="Fit map to route"
+                  data-testid="map-fit-route-btn"
+                >
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <path d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4" />
+                  </svg>
+                  <span>Fit</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearRoute}
+                  className="flex items-center gap-1 px-2 py-1 rounded-full bg-red-900/60 text-red-100 hover:bg-red-900/80 transition-colors"
+                  aria-label="Clear route"
+                  data-testid="map-clear-route-btn"
+                >
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  <span>Clear</span>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Start chooser dialog */}

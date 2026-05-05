@@ -1,6 +1,6 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { type Trail } from "@/lib/supabase";
-import { type RouteEntry, type RouteWaypoint } from "@/lib/routing";
+import { type GeoPoint, type RouteEntry, type RouteWaypoint } from "@/lib/routing";
 import { PLANNER_MAX_TRAILS } from "@workspace/planner-shared";
 
 export { PLANNER_MAX_TRAILS } from "@workspace/planner-shared";
@@ -32,10 +32,40 @@ interface StoredRoute {
   trails: Trail[];
   waypoints: RouteWaypoint[];
   entryOrder: StoredEntryRef[];
+  // Start/end are local-only — we deliberately do NOT push them to
+  // /api/me/planner-route (the server contract has no slot for them).
+  // Each device persists its own A/B pins; sign-out clears them along
+  // with the rest of the route.
+  start: GeoPoint | null;
+  end: GeoPoint | null;
 }
 
 function emptyStored(): StoredRoute {
-  return { ownerId: null, trails: [], waypoints: [], entryOrder: [] };
+  return {
+    ownerId: null,
+    trails: [],
+    waypoints: [],
+    entryOrder: [],
+    start: null,
+    end: null,
+  };
+}
+
+function parseGeoPoint(v: unknown): GeoPoint | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const lat = typeof o.lat === "number" ? o.lat : null;
+  const lng = typeof o.lng === "number" ? o.lng : null;
+  if (lat == null || lng == null) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const label = typeof o.label === "string" ? o.label : undefined;
+  return label !== undefined ? { lat, lng, label } : { lat, lng };
+}
+
+function samePoint(a: GeoPoint | null, b: GeoPoint | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.lat === b.lat && a.lng === b.lng && (a.label ?? null) === (b.label ?? null);
 }
 
 function loadStored(): StoredRoute {
@@ -52,6 +82,8 @@ function loadStored(): StoredRoute {
         trails,
         waypoints: [],
         entryOrder: trails.map((t) => ({ kind: "trail", id: t.id })),
+        start: null,
+        end: null,
       };
     }
     if (parsed && typeof parsed === "object") {
@@ -79,7 +111,14 @@ function loadStored(): StoredRoute {
         ...trails.map((t) => ({ kind: "trail" as const, id: t.id })),
         ...waypoints.map((w) => ({ kind: "waypoint" as const, id: w.id })),
       ];
-      return { ownerId, trails, waypoints, entryOrder: order ?? fallback };
+      return {
+        ownerId,
+        trails,
+        waypoints,
+        entryOrder: order ?? fallback,
+        start: parseGeoPoint(obj.start),
+        end: parseGeoPoint(obj.end),
+      };
     }
   } catch {
     /**/
@@ -96,12 +135,21 @@ const initial = loadStored();
 let routeTrails: Trail[] = [];
 let routeWaypoints: RouteWaypoint[] = [];
 let entryOrder: StoredEntryRef[] = [];
+let routeStart: GeoPoint | null = null;
+let routeEnd: GeoPoint | null = null;
 let localOwnerId: string | null = initial.ownerId;
 let pendingRestore: StoredRoute | null =
-  initial.trails.length > 0 || initial.waypoints.length > 0 ? initial : null;
+  initial.trails.length > 0 ||
+  initial.waypoints.length > 0 ||
+  initial.start !== null ||
+  initial.end !== null
+    ? initial
+    : null;
 
 const trailListeners = new Set<(trails: Trail[]) => void>();
 const entryListeners = new Set<(entries: RouteEntry[]) => void>();
+const startListeners = new Set<(pt: GeoPoint | null) => void>();
+const endListeners = new Set<(pt: GeoPoint | null) => void>();
 
 // ---------------------------------------------------------------------------
 // Active loaded saved-route tracking
@@ -197,6 +245,8 @@ function persist() {
       trails: routeTrails,
       waypoints: routeWaypoints,
       entryOrder,
+      start: routeStart,
+      end: routeEnd,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -225,6 +275,26 @@ function emit() {
   for (const l of entryListeners) {
     try {
       l(entries);
+    } catch {
+      /**/
+    }
+  }
+}
+
+function emitStart() {
+  for (const l of startListeners) {
+    try {
+      l(routeStart);
+    } catch {
+      /**/
+    }
+  }
+}
+
+function emitEnd() {
+  for (const l of endListeners) {
+    try {
+      l(routeEnd);
     } catch {
       /**/
     }
@@ -322,6 +392,10 @@ export function setPlannerRouteUserId(userId: string | null): void {
     routeTrails = [];
     routeWaypoints = [];
     entryOrder = [];
+    const hadStart = routeStart !== null;
+    const hadEnd = routeEnd !== null;
+    routeStart = null;
+    routeEnd = null;
     localOwnerId = null;
     pendingRestore = null;
     clearStorage();
@@ -329,12 +403,20 @@ export function setPlannerRouteUserId(userId: string | null): void {
     // a different rider on the same device must not see it.
     clearActiveLoadedRoute();
     emit();
+    if (hadStart) emitStart();
+    if (hadEnd) emitEnd();
   } else if (pendingRestore !== null) {
     routeTrails = pendingRestore.trails;
     routeWaypoints = pendingRestore.waypoints;
     entryOrder = pendingRestore.entryOrder;
+    const startChanged = !samePoint(routeStart, pendingRestore.start);
+    const endChanged = !samePoint(routeEnd, pendingRestore.end);
+    routeStart = pendingRestore.start;
+    routeEnd = pendingRestore.end;
     pendingRestore = null;
     emit();
+    if (startChanged) emitStart();
+    if (endChanged) emitEnd();
   }
 
   currentUserId = userId;
@@ -449,12 +531,18 @@ export function setRouteTrails(next: Trail[]) {
     routeTrails = [];
     routeWaypoints = [];
     entryOrder = [];
+    const hadStart = routeStart !== null;
+    const hadEnd = routeEnd !== null;
+    routeStart = null;
+    routeEnd = null;
     // Clearing the route also unbinds any "Update <name>" affordance —
     // the rider has explicitly walked away from the loaded saved route.
     clearActiveLoadedRoute();
     noteWrite();
     persist();
     emit();
+    if (hadStart) emitStart();
+    if (hadEnd) emitEnd();
     scheduleCloudSync();
     return;
   }
@@ -716,4 +804,82 @@ export function useRouteEntries(): RouteEntry[] {
     return subscribeRouteEntries(setEntries);
   }, []);
   return entries;
+}
+
+// ---------------------------------------------------------------------------
+// Start / End ("A" / "B") pins
+//
+// Both the Planner address inputs and the Map's drop-pin affordance write
+// here so the two surfaces stay in lock-step. The setters are no-ops when
+// the new value is structurally equal to the current one — that's what
+// keeps the Planner ⇄ store ⇄ Map mirror loops stable without per-caller
+// "skip next echo" guards.
+//
+// We deliberately persist these to localStorage only. The cloud
+// `/api/me/planner-route` schema currently has no slot for start/end and
+// changing it is out of scope for this task; each device keeps its own
+// A/B until the rider clears the route.
+// ---------------------------------------------------------------------------
+
+export function getRouteStart(): GeoPoint | null {
+  return routeStart;
+}
+
+export function getRouteEnd(): GeoPoint | null {
+  return routeEnd;
+}
+
+export function setRouteStart(pt: GeoPoint | null): void {
+  if (samePoint(routeStart, pt)) return;
+  routeStart = pt;
+  noteWrite();
+  persist();
+  emitStart();
+}
+
+export function setRouteEnd(pt: GeoPoint | null): void {
+  if (samePoint(routeEnd, pt)) return;
+  routeEnd = pt;
+  noteWrite();
+  persist();
+  emitEnd();
+}
+
+export function subscribeRouteStart(
+  listener: (pt: GeoPoint | null) => void,
+): () => void {
+  startListeners.add(listener);
+  return () => {
+    startListeners.delete(listener);
+  };
+}
+
+export function subscribeRouteEnd(
+  listener: (pt: GeoPoint | null) => void,
+): () => void {
+  endListeners.add(listener);
+  return () => {
+    endListeners.delete(listener);
+  };
+}
+
+export function useRouteStart(): GeoPoint | null {
+  const [pt, setPt] = useState<GeoPoint | null>(routeStart);
+  useEffect(() => subscribeRouteStart(setPt), []);
+  return pt;
+}
+
+export function useRouteEnd(): GeoPoint | null {
+  const [pt, setPt] = useState<GeoPoint | null>(routeEnd);
+  useEffect(() => subscribeRouteEnd(setPt), []);
+  return pt;
+}
+
+/**
+ * Wipe the entire planner route — trails, waypoints, AND start/end pins.
+ * `setRouteTrails([])` already does the same thing today; this is a more
+ * intention-revealing alias for the Map tab's "Clear route" affordance.
+ */
+export function clearPlannerRoute(): void {
+  setRouteTrails([]);
 }

@@ -22,6 +22,10 @@ import {
   addRouteWaypoint,
   removeRouteWaypoint,
   setRouteEntries,
+  setRouteStart,
+  setRouteEnd,
+  useRouteStart,
+  useRouteEnd,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
 import { createSavedRoute, updateSavedRoute } from "@/lib/savedRoutes";
@@ -109,6 +113,68 @@ export default function PlannerTab() {
   // Cache geocoded points so we don't re-geocode if unchanged
   const [geocodedStart, setGeocodedStart] = useState<{ q: string; pt: GeoPoint } | null>(null);
   const [geocodedEnd, setGeocodedEnd] = useState<{ q: string; pt: GeoPoint } | null>(null);
+
+  // Bidirectional mirror with the shared planner-route store so the Map
+  // tab's drop-pin / "Set A" / "Set B" affordance updates these inputs and
+  // vice-versa. The store is the canonical source of truth; the local
+  // `geocodedStart`/`geocodedEnd` is just a UI cache that keeps the
+  // user-typed query string (`q`) alongside the resolved point.
+  //
+  // Loop-safety:
+  //   1. store→local effect bails when local pt already matches store pt
+  //      (preserves the user-typed `q` and avoids overwriting it with the
+  //      reverse-geocoded label).
+  //   2. local→store effect always pushes; the store's `setRouteStart`
+  //      no-ops when the value is structurally equal, so an echoed
+  //      update doesn't fire a second emit.
+  const storeStart = useRouteStart();
+  const storeEnd = useRouteEnd();
+  const geocodedStartRef = useRef(geocodedStart);
+  const geocodedEndRef = useRef(geocodedEnd);
+  useEffect(() => { geocodedStartRef.current = geocodedStart; }, [geocodedStart]);
+  useEffect(() => { geocodedEndRef.current = geocodedEnd; }, [geocodedEnd]);
+
+  useEffect(() => {
+    const local = geocodedStartRef.current;
+    if (storeStart == null) {
+      if (local !== null) {
+        setGeocodedStart(null);
+        setStartLocation("");
+      }
+      return;
+    }
+    if (local && local.pt.lat === storeStart.lat && local.pt.lng === storeStart.lng) {
+      return;
+    }
+    const label = storeStart.label?.trim() ?? "";
+    setGeocodedStart({ q: label, pt: storeStart });
+    setStartLocation(label);
+  }, [storeStart]);
+
+  useEffect(() => {
+    const local = geocodedEndRef.current;
+    if (storeEnd == null) {
+      if (local !== null) {
+        setGeocodedEnd(null);
+        setEndLocation("");
+      }
+      return;
+    }
+    if (local && local.pt.lat === storeEnd.lat && local.pt.lng === storeEnd.lng) {
+      return;
+    }
+    const label = storeEnd.label?.trim() ?? "";
+    setGeocodedEnd({ q: label, pt: storeEnd });
+    setEndLocation(label);
+  }, [storeEnd]);
+
+  useEffect(() => {
+    setRouteStart(geocodedStart ? geocodedStart.pt : null);
+  }, [geocodedStart]);
+
+  useEffect(() => {
+    setRouteEnd(geocodedEnd ? geocodedEnd.pt : null);
+  }, [geocodedEnd]);
   // "Use my current location" UX state — surfaces a spinner on the
   // chip while we ask for GPS + reverse-geocode, plus an inline error
   // notice if the browser refuses or fails.
