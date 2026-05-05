@@ -803,6 +803,173 @@ export function haversineM(a: { lat: number; lng: number }, b: { lat: number; ln
   return 2 * R * Math.asin(Math.sqrt(x));
 }
 
+// ---------------------------------------------------------------------------
+// Corridor-based trail suggestions ("Suggest trails for this trip")
+//
+// Given a planned start (A) and end (B), pick a small, well-spaced set of
+// trails that fall within a corridor around the great-circle line A→B.
+// Used by the Planner's "Suggest trails for this trip" affordance — the
+// rider supplies addresses + filters and we surface the most likely
+// candidates without making them pan around the map.
+//
+// Geometry is done with an equirectangular projection centred on the
+// mean latitude of A,B (km/° ≈ 111.32 for latitude, 111.32·cos(lat) for
+// longitude). For UK/Ireland trips (max ~1000 km) this is accurate to
+// well under our 15 km corridor half-width — the cross-track error from
+// flat-Earth approximation at 55°N over a 1000 km baseline is < 1 km.
+// ---------------------------------------------------------------------------
+
+const KM_PER_DEG_LAT = 111.32;
+/** Default half-width of the suggestion corridor, in km. */
+export const SUGGEST_CORRIDOR_KM = 15;
+/** Default cap on the number of trails returned by `selectTrailsAlongCorridor`. */
+export const SUGGEST_MAX_TRAILS = 5;
+
+export interface CorridorSelectionOptions {
+  /** Half-width of the corridor (perpendicular distance) in km. Defaults to {@link SUGGEST_CORRIDOR_KM}. */
+  corridorKm?: number;
+  /** Maximum number of trails to return. Defaults to {@link SUGGEST_MAX_TRAILS}. */
+  maxTrails?: number;
+  /** Trail ids to skip (e.g. trails already manually added by the rider). */
+  excludeIds?: ReadonlySet<string>;
+}
+
+function trailMidpoint(trail: Trail): GeoPoint | null {
+  // Slim trails carry a bbox without needing GPX hydration — use that
+  // to avoid forcing every candidate through `getTrailLatLngs` (which
+  // can fall back to parsing GPX).
+  const minLat = trail.bbox_min_lat;
+  const maxLat = trail.bbox_max_lat;
+  const minLng = trail.bbox_min_lng;
+  const maxLng = trail.bbox_max_lng;
+  if (
+    minLat != null &&
+    maxLat != null &&
+    minLng != null &&
+    maxLng != null &&
+    Number.isFinite(minLat) &&
+    Number.isFinite(maxLat) &&
+    Number.isFinite(minLng) &&
+    Number.isFinite(maxLng)
+  ) {
+    return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
+  }
+  const pts = getTrailLatLngs(trail);
+  if (pts.length === 0) return null;
+  const m = pts[Math.floor(pts.length / 2)];
+  return { lat: m[0], lng: m[1] };
+}
+
+interface ScoredCandidate {
+  trail: Trail;
+  alongKm: number;
+  perpendicularKm: number;
+}
+
+/**
+ * Pick a spaced selection of trails that lie within `corridorKm` of the
+ * great-circle line from `start` to `end`. Up to `maxTrails` are returned
+ * in along-track order (start → end) so the planner list reads
+ * geographically left-to-right.
+ *
+ * Algorithm:
+ *  1. Project each trail's mid-point onto the A→B line in a local
+ *     equirectangular frame; reject anything whose perpendicular distance
+ *     exceeds `corridorKm`.
+ *  2. Bucket survivors by along-track progress (`maxTrails` buckets).
+ *  3. From each bucket pick the trail closest to the corridor centre.
+ *  4. Backfill any unfilled slots from leftovers sorted by perpendicular
+ *     distance — keeps the count up when riders' trips are short or the
+ *     candidates cluster in a few hot-spots.
+ */
+export function selectTrailsAlongCorridor(
+  start: GeoPoint,
+  end: GeoPoint,
+  trails: Trail[],
+  opts: CorridorSelectionOptions = {},
+): Trail[] {
+  const corridorKm = Math.max(0, opts.corridorKm ?? SUGGEST_CORRIDOR_KM);
+  const maxTrails = Math.max(0, Math.floor(opts.maxTrails ?? SUGGEST_MAX_TRAILS));
+  const excludeIds = opts.excludeIds ?? new Set<string>();
+  if (maxTrails === 0 || trails.length === 0) return [];
+
+  const meanLat = ((start.lat + end.lat) / 2) * (Math.PI / 180);
+  const kmPerDegLng = KM_PER_DEG_LAT * Math.cos(meanLat);
+  const bx = (end.lng - start.lng) * kmPerDegLng;
+  const by = (end.lat - start.lat) * KM_PER_DEG_LAT;
+  const totalKm = Math.hypot(bx, by);
+
+  const scored: ScoredCandidate[] = [];
+  for (const t of trails) {
+    if (excludeIds.has(t.id)) continue;
+    const m = trailMidpoint(t);
+    if (!m) continue;
+    const px = (m.lng - start.lng) * kmPerDegLng;
+    const py = (m.lat - start.lat) * KM_PER_DEG_LAT;
+    let alongKm: number;
+    let perpKm: number;
+    if (totalKm < 0.01) {
+      // Degenerate "trip" with start ≈ end — treat distance from start as
+      // the perpendicular score so closeness to the pin still wins.
+      alongKm = 0;
+      perpKm = Math.hypot(px, py);
+    } else {
+      const t01 = (px * bx + py * by) / (totalKm * totalKm);
+      const tc = Math.max(0, Math.min(1, t01));
+      const cx = tc * bx;
+      const cy = tc * by;
+      perpKm = Math.hypot(px - cx, py - cy);
+      alongKm = tc * totalKm;
+    }
+    if (perpKm > corridorKm) continue;
+    scored.push({ trail: t, alongKm, perpendicularKm: perpKm });
+  }
+
+  if (scored.length === 0) return [];
+
+  // Short trips (or maxTrails=1) — no point bucketing, just take the
+  // closest-to-centreline candidates.
+  if (totalKm < 1 || maxTrails === 1) {
+    return [...scored]
+      .sort((a, b) => a.perpendicularKm - b.perpendicularKm)
+      .slice(0, maxTrails)
+      .sort((a, b) => a.alongKm - b.alongKm)
+      .map((s) => s.trail);
+  }
+
+  const buckets: ScoredCandidate[][] = Array.from({ length: maxTrails }, () => []);
+  for (const s of scored) {
+    const idx = Math.min(
+      maxTrails - 1,
+      Math.max(0, Math.floor((s.alongKm / totalKm) * maxTrails)),
+    );
+    buckets[idx].push(s);
+  }
+
+  const picked: ScoredCandidate[] = [];
+  const pickedIds = new Set<string>();
+  for (const b of buckets) {
+    if (b.length === 0) continue;
+    b.sort((x, y) => x.perpendicularKm - y.perpendicularKm);
+    picked.push(b[0]);
+    pickedIds.add(b[0].trail.id);
+  }
+
+  if (picked.length < maxTrails) {
+    const leftovers = scored
+      .filter((s) => !pickedIds.has(s.trail.id))
+      .sort((a, b) => a.perpendicularKm - b.perpendicularKm);
+    for (const s of leftovers) {
+      if (picked.length >= maxTrails) break;
+      picked.push(s);
+      pickedIds.add(s.trail.id);
+    }
+  }
+
+  picked.sort((a, b) => a.alongKm - b.alongKm);
+  return picked.map((s) => s.trail);
+}
+
 export function maneuverArrow(type: string, modifier?: string): string {
   // Returns SVG path data for a maneuver arrow
   if (type === "depart") return "M12 2L12 22M5 9l7-7 7 7";

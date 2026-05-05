@@ -38,6 +38,12 @@ interface StoredRoute {
   // with the rest of the route.
   start: GeoPoint | null;
   end: GeoPoint | null;
+  // Trail ids most recently added by the "Suggest trails for this trip"
+  // affordance. Local-only — the cloud route schema treats every trail
+  // the same. Lets us replace just the previous suggestions on a re-run
+  // without disturbing the rider's manually-curated picks. Pruned in
+  // `emit()` whenever a suggested trail leaves `routeTrails`.
+  suggestedTrailIds: string[];
 }
 
 function emptyStored(): StoredRoute {
@@ -48,6 +54,7 @@ function emptyStored(): StoredRoute {
     entryOrder: [],
     start: null,
     end: null,
+    suggestedTrailIds: [],
   };
 }
 
@@ -84,6 +91,7 @@ function loadStored(): StoredRoute {
         entryOrder: trails.map((t) => ({ kind: "trail", id: t.id })),
         start: null,
         end: null,
+        suggestedTrailIds: [],
       };
     }
     if (parsed && typeof parsed === "object") {
@@ -111,6 +119,15 @@ function loadStored(): StoredRoute {
         ...trails.map((t) => ({ kind: "trail" as const, id: t.id })),
         ...waypoints.map((w) => ({ kind: "waypoint" as const, id: w.id })),
       ];
+      // Suggested ids are intersected with the stored trail set on
+      // load — anything stale (e.g. trail deleted while offline) is
+      // silently dropped so the runtime sync invariant holds.
+      const trailIdSet = new Set(trails.map((t) => t.id));
+      const suggestedTrailIds = Array.isArray(obj.suggestedTrailIds)
+        ? (obj.suggestedTrailIds as unknown[]).filter(
+            (id): id is string => typeof id === "string" && trailIdSet.has(id),
+          )
+        : [];
       return {
         ownerId,
         trails,
@@ -118,6 +135,7 @@ function loadStored(): StoredRoute {
         entryOrder: order ?? fallback,
         start: parseGeoPoint(obj.start),
         end: parseGeoPoint(obj.end),
+        suggestedTrailIds,
       };
     }
   } catch {
@@ -137,6 +155,11 @@ let routeWaypoints: RouteWaypoint[] = [];
 let entryOrder: StoredEntryRef[] = [];
 let routeStart: GeoPoint | null = null;
 let routeEnd: GeoPoint | null = null;
+// Trail ids added by the most recent "Suggest trails for this trip"
+// run. Owned by `replaceSuggestedTrails` (writes) and `emit()` (prunes
+// ids that have left the route — e.g. rider deleted them via the panel).
+// Persisted locally only; cloud sync ignores it.
+let suggestedTrailIds: Set<string> = new Set();
 let localOwnerId: string | null = initial.ownerId;
 let pendingRestore: StoredRoute | null =
   initial.trails.length > 0 ||
@@ -150,6 +173,7 @@ const trailListeners = new Set<(trails: Trail[]) => void>();
 const entryListeners = new Set<(entries: RouteEntry[]) => void>();
 const startListeners = new Set<(pt: GeoPoint | null) => void>();
 const endListeners = new Set<(pt: GeoPoint | null) => void>();
+const suggestedListeners = new Set<(ids: ReadonlySet<string>) => void>();
 
 // ---------------------------------------------------------------------------
 // Active loaded saved-route tracking
@@ -247,6 +271,7 @@ function persist() {
       entryOrder,
       start: routeStart,
       end: routeEnd,
+      suggestedTrailIds: Array.from(suggestedTrailIds),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -263,7 +288,42 @@ function clearStorage() {
   }
 }
 
+/**
+ * Drop suggested ids that are no longer present in `routeTrails` — keeps
+ * the suggestion-vs-manual partition honest after the rider deletes a
+ * suggested trail via the route builder, the saved-route picker, or
+ * `setRouteTrails([])`. Returns `true` when something changed so the
+ * caller can decide whether to re-emit / re-persist.
+ */
+function syncSuggestedToTrails(): boolean {
+  if (suggestedTrailIds.size === 0) return false;
+  const inRoute = new Set(routeTrails.map((t) => t.id));
+  let changed = false;
+  for (const id of Array.from(suggestedTrailIds)) {
+    if (!inRoute.has(id)) {
+      suggestedTrailIds.delete(id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function emitSuggested() {
+  const snapshot = new Set(suggestedTrailIds);
+  for (const l of suggestedListeners) {
+    try {
+      l(snapshot);
+    } catch {
+      /**/
+    }
+  }
+}
+
 function emit() {
+  // Prune any suggested ids that no longer back a trail in the route
+  // BEFORE we publish trail/entry updates. That way subscribers see a
+  // self-consistent (trails, suggestedIds) pair on every emission.
+  const suggestedChanged = syncSuggestedToTrails();
   for (const l of trailListeners) {
     try {
       l(routeTrails);
@@ -279,6 +339,7 @@ function emit() {
       /**/
     }
   }
+  if (suggestedChanged) emitSuggested();
 }
 
 function emitStart() {
@@ -396,6 +457,11 @@ export function setPlannerRouteUserId(userId: string | null): void {
     const hadEnd = routeEnd !== null;
     routeStart = null;
     routeEnd = null;
+    // The previous rider's "Suggest trails for this trip" state is local
+    // only; wipe it when ownership changes so the next rider doesn't see
+    // mystery "Suggested" badges on trails that aren't there.
+    const hadSuggested = suggestedTrailIds.size > 0;
+    suggestedTrailIds = new Set();
     localOwnerId = null;
     pendingRestore = null;
     clearStorage();
@@ -405,6 +471,7 @@ export function setPlannerRouteUserId(userId: string | null): void {
     emit();
     if (hadStart) emitStart();
     if (hadEnd) emitEnd();
+    if (hadSuggested) emitSuggested();
   } else if (pendingRestore !== null) {
     routeTrails = pendingRestore.trails;
     routeWaypoints = pendingRestore.waypoints;
@@ -413,10 +480,22 @@ export function setPlannerRouteUserId(userId: string | null): void {
     const endChanged = !samePoint(routeEnd, pendingRestore.end);
     routeStart = pendingRestore.start;
     routeEnd = pendingRestore.end;
+    // Only restore suggested ids that survived into the restored trail
+    // list — guards against a corrupt persisted snapshot referencing a
+    // trail that's no longer there.
+    const restoredTrailIds = new Set(pendingRestore.trails.map((t) => t.id));
+    const restoredSuggested = pendingRestore.suggestedTrailIds.filter((id) =>
+      restoredTrailIds.has(id),
+    );
+    const suggestedChanged =
+      suggestedTrailIds.size !== restoredSuggested.length ||
+      restoredSuggested.some((id) => !suggestedTrailIds.has(id));
+    suggestedTrailIds = new Set(restoredSuggested);
     pendingRestore = null;
     emit();
     if (startChanged) emitStart();
     if (endChanged) emitEnd();
+    if (suggestedChanged) emitSuggested();
   }
 
   currentUserId = userId;
@@ -504,6 +583,12 @@ export function resetPlannerRouteCloudState(): void {
     syncTimer = null;
   }
   pendingRestore = null;
+  // Local suggestion partition is meaningless without a route — clear
+  // it so test isolation isn't broken by leftover ids from prior runs.
+  if (suggestedTrailIds.size > 0) {
+    suggestedTrailIds = new Set();
+    emitSuggested();
+  }
 }
 
 export function getRouteTrails(): Trail[] {
@@ -804,6 +889,138 @@ export function useRouteEntries(): RouteEntry[] {
     return subscribeRouteEntries(setEntries);
   }, []);
   return entries;
+}
+
+// ---------------------------------------------------------------------------
+// "Suggest trails for this trip" partition
+//
+// The Planner offers a one-tap button that picks ~5 trails along the
+// corridor between the rider's A and B pins. Re-running the suggestion
+// must replace the *previous* suggestions but leave anything the rider
+// added manually (Find Trails, Map tab, saved route load) untouched.
+//
+// We track this with a local-only set of trail ids — the cloud schema
+// has no notion of "where did this trail come from", so the partition
+// lives purely on-device. `emit()` keeps the set honest by pruning ids
+// that have left `routeTrails` for any reason (manual remove, swap,
+// Clear route).
+// ---------------------------------------------------------------------------
+
+/**
+ * Snapshot of the currently-suggested trail ids. Mostly useful for tests
+ * and one-off reads; subscribe via {@link useSuggestedTrails} for live
+ * updates inside React components.
+ */
+export function getSuggestedTrailIds(): ReadonlySet<string> {
+  return new Set(suggestedTrailIds);
+}
+
+export function subscribeSuggestedTrails(
+  listener: (ids: ReadonlySet<string>) => void,
+): () => void {
+  suggestedListeners.add(listener);
+  return () => {
+    suggestedListeners.delete(listener);
+  };
+}
+
+/** React hook for the suggested-vs-manual partition of the planner route. */
+export function useSuggestedTrails(): ReadonlySet<string> {
+  const [ids, setIds] = useState<ReadonlySet<string>>(
+    () => new Set(suggestedTrailIds),
+  );
+  useEffect(() => subscribeSuggestedTrails(setIds), []);
+  return ids;
+}
+
+export interface ReplaceSuggestedTrailsResult {
+  /** Trail ids that were actually inserted into the route. */
+  addedIds: string[];
+  /** Trail ids dropped because the route would have exceeded {@link PLANNER_MAX_TRAILS}. */
+  skippedIds: string[];
+  /** Manual trails that survived the swap (i.e. anything not in the previous suggestion set). */
+  preservedManualCount: number;
+}
+
+/**
+ * Replace the most recent set of suggested trails with `next`. Manual
+ * trails (anything not in the prior suggestion set) are preserved at the
+ * head of the route; new suggestions are appended after them, capped at
+ * {@link PLANNER_MAX_TRAILS}. Returns a summary the caller can use to
+ * surface "added 5 trails" or "skipped 2 (route is full)" UX.
+ *
+ * Implementation note: we update `suggestedTrailIds` BEFORE calling
+ * `setRouteTrails` so the in-emit `syncSuggestedToTrails()` sees the
+ * new ids as still present in the route and doesn't immediately prune
+ * them. The trailing `emitSuggested()` is required because
+ * `setRouteTrails` only emits suggested when the sync actually pruned
+ * something — adding new ids alone doesn't trigger it.
+ */
+export function replaceSuggestedTrails(
+  next: Trail[],
+): ReplaceSuggestedTrailsResult {
+  const prevSuggested = suggestedTrailIds;
+  const manualTrails = routeTrails.filter((t) => !prevSuggested.has(t.id));
+  const manualIds = new Set(manualTrails.map((t) => t.id));
+
+  // De-dupe `next` against itself and against any manual trail the
+  // rider has already curated — never quietly demote a manual trail
+  // into a "suggested" one.
+  const seen = new Set<string>(manualIds);
+  const candidates: Trail[] = [];
+  for (const t of next) {
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    candidates.push(t);
+  }
+
+  const slotsLeft = Math.max(0, PLANNER_MAX_TRAILS - manualTrails.length);
+  const added = candidates.slice(0, slotsLeft);
+  const skipped = candidates.slice(slotsLeft);
+  const finalTrails = [...manualTrails, ...added];
+
+  // Update the partition BEFORE setRouteTrails fires emit()/sync(). The
+  // sync routine only prunes ids that are absent from routeTrails, so
+  // the new set will pass through untouched.
+  suggestedTrailIds = new Set(added.map((t) => t.id));
+
+  if (finalTrails.length === 0) {
+    // setRouteTrails([]) is a "clear the whole route" shortcut — it
+    // wipes start, end, waypoints, and the active loaded-route
+    // binding. That's the correct UX for the toolbar "Clear" button
+    // but **not** for a Suggest re-run that simply found no new
+    // candidates: the rider would lose their A and B pins. Take the
+    // surgical path here that drops only the trail partition while
+    // preserving everything else, mirroring setRouteTrails's own
+    // orphan-waypoint handling so unanchored stops drift to the end
+    // of the entry list rather than disappearing.
+    const orphanWaypoints: StoredEntryRef[] = entryOrder.filter(
+      (r) => r.kind === "waypoint",
+    );
+    const orderedWpIds = new Set(orphanWaypoints.map((r) => r.id));
+    routeTrails = [];
+    routeWaypoints = routeWaypoints.filter((w) => orderedWpIds.has(w.id));
+    entryOrder = orphanWaypoints;
+    noteWrite();
+    persist();
+    emit();
+    emitSuggested();
+    scheduleCloudSync();
+  } else {
+    // setRouteTrails handles entryOrder repair, waypoint cluster
+    // preservation, persist + cloud sync, and emits trail/entry.
+    setRouteTrails(finalTrails);
+    // Always notify suggestion subscribers — `emit()` only re-fires
+    // the suggested channel when the sync mutated the set (e.g. on
+    // prune). Adding new ids alone doesn't trigger it.
+    emitSuggested();
+  }
+
+  return {
+    addedIds: added.map((t) => t.id),
+    skippedIds: skipped.map((t) => t.id),
+    preservedManualCount: manualTrails.length,
+  };
 }
 
 // ---------------------------------------------------------------------------

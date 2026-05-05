@@ -11,6 +11,9 @@ import {
   reverseGeocode,
   assembleMultiModalRoute,
   orderTrailsNearestNeighbour,
+  selectTrailsAlongCorridor,
+  SUGGEST_CORRIDOR_KM,
+  SUGGEST_MAX_TRAILS,
   type GeoPoint,
   type AssembledRoute,
   type RouteWaypoint,
@@ -26,6 +29,8 @@ import {
   setRouteEnd,
   useRouteStart,
   useRouteEnd,
+  useSuggestedTrails,
+  replaceSuggestedTrails,
   PLANNER_MAX_TRAILS,
 } from "@/lib/plannerRouteStore";
 import { createSavedRoute, updateSavedRoute } from "@/lib/savedRoutes";
@@ -95,6 +100,25 @@ export default function PlannerTab() {
   );
   const [showRouteBuilder, setShowRouteBuilder] = useState(false);
   const activeLoadedRoute = useActiveLoadedRoute();
+  // Trail ids inserted by the most recent "Suggest trails for this trip"
+  // run. Used to render a "Suggested" badge on result cards so the
+  // rider can see at a glance which entries came from the corridor
+  // picker vs trails they added themselves.
+  const suggestedIds = useSuggestedTrails();
+
+  // ---- "Suggest trails for this trip" state -------------------------------
+  // The button has three terminal states the rider needs to see clearly:
+  //   - success → toast-style banner ("Added 5 trails along your route")
+  //   - empty   → "no candidates in corridor — try widening filters"
+  //   - error   → fetch failure with a Retry affordance
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestNotice, setSuggestNotice] = useState<
+    | { kind: "success"; added: number; skipped: number }
+    | { kind: "empty" }
+    | { kind: "full" }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
 
   // Currently-open trail detail sheet (opened by tapping a search-result
   // card's name). Tracked separately from the result list so prev/next
@@ -419,6 +443,109 @@ export default function PlannerTab() {
     }
     await Promise.all(tasks);
   };
+
+  // ---- "Suggest trails for this trip" handler ----------------------------
+  // Pulls candidate trails from a generously-padded bbox around A↔B, then
+  // hands them to `selectTrailsAlongCorridor` which keeps only the ones
+  // within ~15 km of the great-circle line and spaces them along the
+  // route. Manual trails the rider already curated are preserved
+  // (`replaceSuggestedTrails` in the store handles that contract).
+  const handleSuggestTrails = useCallback(async () => {
+    if (!storeStart || !storeEnd) return;
+    setSuggesting(true);
+    setSuggestNotice(null);
+    try {
+      // Build a bbox that covers the corridor with margin on every side.
+      // Lat: 1° ≈ 111.32 km (constant). Lng: cos(midLat)·111.32 km/°.
+      const latPadDeg = SUGGEST_CORRIDOR_KM / 111.32;
+      const meanLat = (storeStart.lat + storeEnd.lat) / 2;
+      const lngPadDeg = SUGGEST_CORRIDOR_KM /
+        Math.max(0.01, 111.32 * Math.cos((meanLat * Math.PI) / 180));
+      const bbox = {
+        minLat: Math.min(storeStart.lat, storeEnd.lat) - latPadDeg,
+        maxLat: Math.max(storeStart.lat, storeEnd.lat) + latPadDeg,
+        minLng: Math.min(storeStart.lng, storeEnd.lng) - lngPadDeg,
+        maxLng: Math.max(storeStart.lng, storeEnd.lng) + lngPadDeg,
+      };
+      const trailTypes: string[] = [];
+      if (overlays.boats) trailTypes.push("BOAT");
+      if (overlays.greenLanes) trailTypes.push("Green Lane");
+
+      const { trails } = await fetchTrailsInBbox(bbox, {
+        difficulties: difficulty.length > 0 ? difficulty : undefined,
+        trailTypes: trailTypes.length > 0 ? trailTypes : undefined,
+        limit: 200,
+      });
+
+      // Reference-only "ai-approximated" trails are never navigable
+      // (PlannerTab guards against them everywhere — see line 287/659/872).
+      // Filtering them out here means the suggestion picker never wastes
+      // a slot on a trail the rider can't actually use.
+      const candidates = trails.filter(
+        (t) => t.verification_status !== "ai-approximated",
+      );
+
+      // Manual trails are anything NOT in the previous suggestion set.
+      // We compute it locally so this calculation is consistent with
+      // `replaceSuggestedTrails`'s own partition (it does the same).
+      const manualIds = new Set(
+        routeTrails.filter((t) => !suggestedIds.has(t.id)).map((t) => t.id),
+      );
+      const slotsLeft = Math.max(0, PLANNER_MAX_TRAILS - manualIds.size);
+      const maxTrails = Math.min(SUGGEST_MAX_TRAILS, slotsLeft);
+
+      // If the rider has filled the route with manual trails, the picker
+      // can't add anything regardless of corridor matches. Surface that
+      // distinct reason so they don't go widen filters in vain. We
+      // intentionally do NOT call replaceSuggestedTrails here — there
+      // are no suggested trails to clear (manual at cap implies
+      // suggested set is already empty).
+      if (maxTrails === 0) {
+        setSuggestNotice({ kind: "full" });
+        return;
+      }
+
+      const picked = selectTrailsAlongCorridor(storeStart, storeEnd, candidates, {
+        maxTrails,
+        excludeIds: manualIds,
+      });
+
+      // Always route through replaceSuggestedTrails — even when the
+      // pick list is empty. That call is what removes the *previous*
+      // suggestion set from the route; skipping it on empty would
+      // leave stale suggestions in place after the rider tightens
+      // filters or moves a pin into trail-free territory. The store
+      // handles the empty case surgically (preserving A/B + waypoints).
+      const result = replaceSuggestedTrails(picked);
+      if (result.addedIds.length === 0) {
+        setSuggestNotice({ kind: "empty" });
+      } else {
+        setSuggestNotice({
+          kind: "success",
+          added: result.addedIds.length,
+          skipped: result.skippedIds.length,
+        });
+      }
+    } catch (err) {
+      setSuggestNotice({
+        kind: "error",
+        message:
+          err instanceof Error && err.message
+            ? `Couldn't reach Supabase: ${err.message}`
+            : "Couldn't reach Supabase. Check your connection and try again.",
+      });
+    } finally {
+      setSuggesting(false);
+    }
+  }, [
+    storeStart,
+    storeEnd,
+    overlays.boats,
+    overlays.greenLanes,
+    difficulty,
+    routeTrails,
+    suggestedIds,
+  ]);
 
   const handleSave = async (trail: Trail) => {
     if (!isSignedIn || !userId) {
@@ -1388,6 +1515,100 @@ export default function PlannerTab() {
             </div>
           </div>
 
+          {/* "Suggest trails for this trip" — full-width affordance above
+              the Find Trails / Build Nav grid. Disabled until both A and B
+              pins are set since the corridor pick only makes sense between
+              two points. The button replaces the previous suggestion set
+              and leaves manual trails alone (handled by the store). */}
+          <div>
+            <button
+              type="button"
+              onClick={() => void handleSuggestTrails()}
+              disabled={suggesting || !storeStart || !storeEnd}
+              data-testid="planner-suggest-trails"
+              title={
+                !storeStart || !storeEnd
+                  ? "Set start and destination addresses to suggest trails along your trip"
+                  : undefined
+              }
+              className="w-full py-3 rounded-xl text-sm font-bold uppercase tracking-wider border-2 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/20 hover:border-amber-400 hover:text-amber-200"
+            >
+              {suggesting ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-amber-400/40 border-t-amber-300 rounded-full animate-spin"></span>
+                  Picking trails along your route…
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2v4" />
+                    <path d="M12 18v4" />
+                    <path d="m4.93 4.93 2.83 2.83" />
+                    <path d="m16.24 16.24 2.83 2.83" />
+                    <path d="M2 12h4" />
+                    <path d="M18 12h4" />
+                    <path d="m4.93 19.07 2.83-2.83" />
+                    <path d="m16.24 7.76 2.83-2.83" />
+                  </svg>
+                  Suggest trails for this trip
+                </>
+              )}
+            </button>
+            {suggestNotice && (
+              <div
+                className={`mt-2 rounded-lg px-3 py-2 flex items-start gap-2 ${
+                  suggestNotice.kind === "success"
+                    ? "bg-amber-500/10 border border-amber-500/30"
+                    : suggestNotice.kind === "empty" || suggestNotice.kind === "full"
+                      ? "bg-stone-800/60 border border-stone-700"
+                      : "bg-red-900/30 border border-red-600/50"
+                }`}
+                data-testid="planner-suggest-notice"
+                role={suggestNotice.kind === "error" ? "alert" : "status"}
+              >
+                {suggestNotice.kind === "success" && (
+                  <p className="text-[11px] text-amber-200 leading-snug flex-1">
+                    Added {suggestNotice.added} trail{suggestNotice.added !== 1 ? "s" : ""} along your corridor.
+                    {suggestNotice.skipped > 0
+                      ? ` ${suggestNotice.skipped} more couldn't fit — your route is at the ${PLANNER_MAX_TRAILS}-trail cap.`
+                      : ""}
+                  </p>
+                )}
+                {suggestNotice.kind === "empty" && (
+                  <p className="text-[11px] text-stone-300 leading-snug flex-1">
+                    No trails along this corridor. Try widening your difficulty filters or removing the BOAT / Green Lane toggle.
+                  </p>
+                )}
+                {suggestNotice.kind === "full" && (
+                  <p className="text-[11px] text-stone-300 leading-snug flex-1">
+                    Your route is at the {PLANNER_MAX_TRAILS}-trail cap — remove a manual trail to make room for suggestions.
+                  </p>
+                )}
+                {suggestNotice.kind === "error" && (
+                  <>
+                    <p className="text-[11px] text-red-200 leading-snug flex-1">{suggestNotice.message}</p>
+                    <button
+                      type="button"
+                      onClick={() => void handleSuggestTrails()}
+                      className="text-[10px] px-2 py-0.5 rounded border border-red-500/60 text-red-100 hover:bg-red-600/20 active:bg-red-600/30"
+                      data-testid="planner-suggest-retry"
+                    >
+                      Retry
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSuggestNotice(null)}
+                  aria-label="Dismiss notice"
+                  className="text-stone-400 hover:text-stone-200 text-sm leading-none ml-1"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+          </div>
+
           {/* Find Trails + Build Navigation Buttons */}
           <div className="grid grid-cols-2 gap-2">
             <button
@@ -1524,6 +1745,15 @@ export default function PlannerTab() {
                               </span>
                             )}
                             <h3 className="text-sm font-bold text-stone-100 leading-tight">{trail.name}</h3>
+                            {inRoute && suggestedIds.has(trail.id) && (
+                              <span
+                                className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 shrink-0"
+                                title="Picked by Suggest trails for this trip"
+                                data-testid={`planner-suggested-badge-${trail.id}`}
+                              >
+                                Suggested
+                              </span>
+                            )}
                           </div>
                           <p className="text-xs text-stone-500">{trail.terrain || "Off-road"}</p>
                         </button>
@@ -1740,6 +1970,38 @@ export default function PlannerTab() {
               </button>
             </div>
           </div>
+
+          {/* "Refine on Map" CTA — visible whenever the route has any
+              trails. Hands the rider over to the Map tab in build mode
+              (`?build=1`) so they can fine-tune the suggestion picks
+              against the full trail catalog with the larger viewport.
+              App.tsx already wires `?build=1` to open the Build Route
+              affordance on mount. */}
+          {routeTrails.length > 0 && (
+            <div
+              className="px-2 pt-2"
+              style={{
+                borderLeft: "1.5px solid #d4870c60",
+                borderRight: "1.5px solid #d4870c60",
+                background: "hsl(22,15%,14%)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setLocation("/map?build=1")}
+                disabled={planningTrip}
+                data-testid="planner-refine-on-map"
+                className="w-full py-2 rounded-lg text-[11px] font-bold uppercase tracking-wider border border-amber-500/40 bg-amber-500/5 text-amber-300 hover:bg-amber-500/15 hover:border-amber-400 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6" />
+                  <line x1="8" y1="2" x2="8" y2="18" />
+                  <line x1="16" y1="6" x2="16" y2="22" />
+                </svg>
+                Refine on Map
+              </button>
+            </div>
+          )}
 
           {/* Two action buttons */}
           <div className="grid grid-cols-2 gap-1.5"

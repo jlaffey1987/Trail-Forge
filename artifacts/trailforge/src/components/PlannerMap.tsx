@@ -299,7 +299,20 @@ export default function PlannerMap({
     [map],
   );
 
-  // Start/end markers + initial fit-to-content. Intentionally NOT dependent
+  // ---- Fit-bounds gating --------------------------------------------------
+  // The Planner is a "preview" surface: the rider mostly cares about A/B and
+  // the route they're building. Toggling a trail in the Find Trails list, or
+  // adding/removing a fuel/campsite waypoint, used to refit the map and rip
+  // the user out of any pan/zoom they had going. We now only refit when the
+  // *frame* genuinely changes — first paint with content, an A/B pin moved,
+  // or the rider tapped the explicit "Fit" button below.
+  const prevStartRef = useRef<{ lat: number; lng: number } | null>(null);
+  const prevEndRef = useRef<{ lat: number; lng: number } | null>(null);
+  const hasInitiallyFitRef = useRef<boolean>(false);
+  const [fitNonce, setFitNonce] = useState(0);
+  const prevFitNonceRef = useRef<number>(0);
+
+  // Start/end markers + (gated) fit-to-content. Intentionally NOT dependent
   // on `currentZoom` so user-driven zooming (e.g. drilling into a cluster)
   // doesn't immediately refit and snap back out.
   useEffect(() => {
@@ -356,14 +369,43 @@ export default function PlannerMap({
       for (const w of waypoints) allBounds.push([w.lat, w.lng]);
     }
 
-    if (allBounds.length > 1) {
-      try {
-        map.fitBounds(allBounds, { padding: [40, 40], maxZoom: 13 });
-      } catch {/* ignore */}
-    } else if (allBounds.length === 1) {
-      map.setView(allBounds[0], 12);
+    // Decide whether this re-render warrants a refit. Comparing by
+    // {lat,lng} (not object identity) so a re-geocode that yields the
+    // same coordinates doesn't refit.
+    const startKey = start ? { lat: start.lat, lng: start.lng } : null;
+    const endKey = end ? { lat: end.lat, lng: end.lng } : null;
+    const startChanged =
+      (startKey === null) !== (prevStartRef.current === null) ||
+      (startKey !== null &&
+        prevStartRef.current !== null &&
+        (startKey.lat !== prevStartRef.current.lat ||
+          startKey.lng !== prevStartRef.current.lng));
+    const endChanged =
+      (endKey === null) !== (prevEndRef.current === null) ||
+      (endKey !== null &&
+        prevEndRef.current !== null &&
+        (endKey.lat !== prevEndRef.current.lat ||
+          endKey.lng !== prevEndRef.current.lng));
+    const fitClicked = prevFitNonceRef.current !== fitNonce;
+    const initialFitNeeded =
+      !hasInitiallyFitRef.current && allBounds.length > 0;
+
+    prevStartRef.current = startKey;
+    prevEndRef.current = endKey;
+    prevFitNonceRef.current = fitNonce;
+
+    if (startChanged || endChanged || fitClicked || initialFitNeeded) {
+      if (allBounds.length > 1) {
+        try {
+          map.fitBounds(allBounds, { padding: [40, 40], maxZoom: 13 });
+          hasInitiallyFitRef.current = true;
+        } catch {/* ignore */}
+      } else if (allBounds.length === 1) {
+        map.setView(allBounds[0], 12);
+        hasInitiallyFitRef.current = true;
+      }
     }
-  }, [start, end, trails, waypoints, map]);
+  }, [start, end, trails, waypoints, map, fitNonce]);
 
   // Render waypoint markers — separate effect so adding/removing a
   // waypoint doesn't trigger a fitBounds (which would rip the user out
@@ -764,9 +806,28 @@ export default function PlannerMap({
         <div className="relative" style={{ height: "320px" }}>
           <div ref={setContainerRef} className="absolute inset-0 bg-stone-900" />
           {/* Floating POI buttons — top-right of the map. Stacked vertically
-              so they don't fight with the "add destination" hint banner. */}
+              so they don't fight with the "add destination" hint banner.
+              The first item is a "Fit to route" affordance — toggling
+              individual trails no longer refits automatically (see the
+              gated fitBounds effect above), so the rider needs an
+              explicit way to reframe everything in one tap. */}
           {leafletLoaded && (
             <div className="absolute top-2 right-2 z-[600] flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={() => setFitNonce((n) => n + 1)}
+                data-testid="planner-map-fit"
+                title="Fit map to route"
+                aria-label="Fit map to route"
+                className="w-9 h-9 rounded-full border-2 border-stone-700 bg-stone-900/85 hover:bg-amber-600/30 backdrop-blur shadow-lg flex items-center justify-center transition-colors"
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 8V5a2 2 0 0 1 2-2h3" />
+                  <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                  <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                  <path d="M21 16v3a2 2 0 0 1-2 2h-3" />
+                </svg>
+              </button>
               <button
                 type="button"
                 onClick={() => void togglePoi("fuel")}
