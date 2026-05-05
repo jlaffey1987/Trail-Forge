@@ -624,6 +624,19 @@ export default function PlannerTab() {
         // to do — surface a soft error so the overlay clears its state.
         return { ok: false, error: "That trail is no longer in your route." };
       }
+      // Snapshot the pre-removal state so an Undo tap (within the
+      // toast window) can restore the trail at its exact original
+      // position by re-running route assembly against the same inputs.
+      // We deliberately freeze start/end at remove-time too — by the
+      // time the rider taps Undo, those values are still the right
+      // anchors for the trail they removed.
+      const originalEntries = routeEntries.map((e) =>
+        e.kind === "trail"
+          ? { kind: "trail" as const, trail: e.trail }
+          : { kind: "waypoint" as const, waypoint: e.waypoint },
+      );
+      const undoStart = assembledRoute.start;
+      const undoEnd = assembledRoute.end;
       // Build the new entry list with the trail filtered out, preserving
       // the ordering and waypoint placement of every surviving stop.
       const newEntries = routeEntries
@@ -653,7 +666,39 @@ export default function PlannerTab() {
         // in their existing positions relative to the remaining trails.
         setRouteEntries(newEntries);
         setAssembledRoute(newRoute);
-        return { ok: true };
+        // Hand NavigationView an undo callback that re-runs route
+        // assembly against the snapshotted entries. Same
+        // recompute-first / commit-on-success contract: a re-routing
+        // failure leaves the post-remove route on screen so the rider
+        // can keep navigating.
+        const undo = async (
+          undoProgress: (step: number, total: number, label: string) => void,
+        ): Promise<{ ok: true } | { ok: false; error: string }> => {
+          try {
+            const restored = await assembleMultiModalRoute(
+              undoStart,
+              undoEnd,
+              originalEntries,
+              undoProgress,
+            );
+            if (restored.sections.length === 0) {
+              return {
+                ok: false,
+                error:
+                  "Couldn't restore the trail. Re-add it from the planner.",
+              };
+            }
+            setRouteEntries(originalEntries);
+            setAssembledRoute(restored);
+            return { ok: true };
+          } catch {
+            return {
+              ok: false,
+              error: "Network error while restoring. Please try again.",
+            };
+          }
+        };
+        return { ok: true, undo };
       } catch {
         return {
           ok: false,

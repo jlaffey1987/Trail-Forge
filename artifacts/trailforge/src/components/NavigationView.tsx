@@ -84,9 +84,19 @@ const ROAD_COLOR = "#3b82f6";
 const TRAIL_COLOR = "#f97316";
 const ROAD_DEEP = "#1d4ed8";
 
-/** Result returned by the removal callback the parent supplies. */
+/** Result returned by the removal callback the parent supplies.
+ *
+ * On success the parent may attach an `undo` callback that restores the
+ * removed trail at its original position by re-running route assembly
+ * against the pre-removal entry list. NavigationView shows an "Undo"
+ * toast for ~8 seconds whenever this is provided. */
 export type RemoveTrailSectionResult =
-  | { ok: true }
+  | {
+      ok: true;
+      undo?: (
+        onProgress: (step: number, total: number, label: string) => void,
+      ) => Promise<{ ok: true } | { ok: false; error: string }>;
+    }
   | { ok: false; error: string };
 
 /** Result returned by the swap callback the parent supplies. Same
@@ -150,6 +160,22 @@ export default function NavigationView({
     wasRiding: boolean;
   } | null>(null);
   const [removalError, setRemovalError] = useState<string | null>(null);
+
+  // Undo state for the post-removal "Trail removed — Undo" toast. The
+  // toast lives for ~8s after a successful remove and carries the
+  // parent-supplied callback that restores the trail at its original
+  // position. While `undoing` is set we render an inline progress
+  // strip in the toast (mirrors the `removing` overlay's affordance)
+  // and pause live GPS until the rebuild settles.
+  const UNDO_TOAST_MS = 8000;
+  const [undoToast, setUndoToast] = useState<{
+    trailName: string;
+    undo: (
+      onProgress: (step: number, total: number, label: string) => void,
+    ) => Promise<{ ok: true } | { ok: false; error: string }>;
+    undoing: { pct: number; label: string } | null;
+  } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Swap flow state. The picker fetches asynchronously, so
   // `swapAlternates === null` means "loading"; `[]` means "loaded but
@@ -256,6 +282,10 @@ export default function NavigationView({
       if (rerouteToastTimerRef.current) {
         clearTimeout(rerouteToastTimerRef.current);
         rerouteToastTimerRef.current = null;
+      }
+      if (undoTimerRef.current) {
+        clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
       }
     };
   }, []);
@@ -681,9 +711,16 @@ export default function NavigationView({
   // dismissible error banner explains why so the rider can retry.
   const handleConfirmRemove = async (trailId: string, trailName: string) => {
     if (!onRemoveTrailSection) return;
-    if (removing || swapping) return;
+    if (removing || swapping || undoToast?.undoing) return;
     setPendingRemoval(null);
     setRemovalError(null);
+    // A new remove supersedes any pending undo from a previous one —
+    // the snapshot it carries no longer matches the live route.
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    setUndoToast(null);
     const wasRiding = riding;
     if (wasRiding) setRiding(false);
     setRemoving({
@@ -708,6 +745,20 @@ export default function NavigationView({
         // resume riding if the rider had GPS on.
         setActiveSection(null);
         if (wasRiding) setRiding(true);
+        // Surface the post-remove undo toast if the parent wired one
+        // up. It auto-dismisses after UNDO_TOAST_MS so the rider
+        // isn't stuck looking at it for the rest of the trip.
+        if (result.undo) {
+          setUndoToast({
+            trailName,
+            undo: result.undo,
+            undoing: null,
+          });
+          undoTimerRef.current = setTimeout(() => {
+            setUndoToast(null);
+            undoTimerRef.current = null;
+          }, UNDO_TOAST_MS);
+        }
       } else {
         setRemovalError(result.error);
         if (wasRiding) setRiding(true);
@@ -723,12 +774,53 @@ export default function NavigationView({
     }
   };
 
+  // Replay the parent-supplied undo callback to restore the trail at
+  // its original position. Mirrors handleConfirmRemove: pause GPS,
+  // run the rebuild, resume on success or surface the error banner
+  // on failure. The toast itself doubles as the progress affordance.
+  const handleUndo = async () => {
+    if (!undoToast || undoToast.undoing) return;
+    if (removing || swapping || undoToast?.undoing) return;
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    const wasRiding = riding;
+    if (wasRiding) setRiding(false);
+    setRemovalError(null);
+    setUndoToast({ ...undoToast, undoing: { pct: 0, label: "Restoring trail..." } });
+    try {
+      const result = await undoToast.undo((step, total, label) => {
+        const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+        setUndoToast((prev) =>
+          prev ? { ...prev, undoing: { pct, label } } : prev,
+        );
+      });
+      setUndoToast(null);
+      if (result.ok) {
+        setActiveSection(null);
+        if (wasRiding) setRiding(true);
+      } else {
+        setRemovalError(result.error);
+        if (wasRiding) setRiding(true);
+      }
+    } catch (err) {
+      setUndoToast(null);
+      setRemovalError(
+        err instanceof Error
+          ? err.message
+          : "Couldn't restore the trail. Please try again.",
+      );
+      if (wasRiding) setRiding(true);
+    }
+  };
+
   // Open the alternates picker for the given trail and start fetching
   // candidates. We snapshot the trail name so the picker header reads
   // "Swap <name>" even after the picker is dismissed mid-fetch.
   const handleOpenSwapPicker = async (trailId: string, trailName: string) => {
     if (!onFetchSwapAlternates) return;
-    if (removing || swapping) return;
+    if (removing || swapping || undoToast?.undoing) return;
     setSwapError(null);
     setSwapPickerFor({ trailId, trailName });
     setSwapAlternates(null);
@@ -759,7 +851,7 @@ export default function NavigationView({
     newTrail: Trail,
   ) => {
     if (!onSwapTrailSection) return;
-    if (removing || swapping) return;
+    if (removing || swapping || undoToast?.undoing) return;
     setSwapPickerFor(null);
     setSwapAlternates(null);
     setSwapError(null);
@@ -1447,6 +1539,66 @@ export default function NavigationView({
           </div>
         )}
 
+        {/* Post-removal undo toast — sits at the same anchor as the
+            removal error banner. Auto-dismisses after UNDO_TOAST_MS;
+            tapping Undo replays the parent-supplied callback to
+            restore the trail at its original position. */}
+        {undoToast && (
+          <div
+            className="absolute bottom-2 left-2 right-2 z-[500]"
+            data-testid="nav-remove-trail-undo"
+          >
+            <div className="rounded-lg bg-stone-900/95 border border-amber-500/50 backdrop-blur shadow-lg px-3 py-2 flex items-center gap-2">
+              <svg viewBox="0 0 24 24" className="w-4 h-4 text-amber-300 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1.5 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5 6"/>
+              </svg>
+              <p
+                className="flex-1 text-[11px] text-stone-100 leading-tight truncate"
+                title={undoToast.trailName}
+              >
+                <span className="font-bold">{undoToast.trailName}</span>
+                <span className="text-stone-300"> removed</span>
+              </p>
+              {undoToast.undoing ? (
+                <div
+                  className="flex items-center gap-1.5 shrink-0"
+                  data-testid="nav-remove-trail-undo-progress"
+                >
+                  <span className="w-3 h-3 border-2 border-amber-300/30 border-t-amber-300 rounded-full animate-spin"></span>
+                  <span className="text-[10px] text-amber-200 max-w-[110px] truncate">
+                    {undoToast.undoing.label}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void handleUndo()}
+                    data-testid="nav-remove-trail-undo-button"
+                    className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 hover:bg-amber-500/35 text-amber-200 border border-amber-400/60"
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (undoTimerRef.current) {
+                        clearTimeout(undoTimerRef.current);
+                        undoTimerRef.current = null;
+                      }
+                      setUndoToast(null);
+                    }}
+                    aria-label="Dismiss"
+                    data-testid="nav-remove-trail-undo-dismiss"
+                    className="text-stone-400 hover:text-stone-200 text-base leading-none -mt-0.5"
+                  >×</button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Removal error banner — sits over the map so it's visible
             no matter which tab is active in the bottom panel. */}
         {removalError && (
@@ -1496,10 +1648,10 @@ export default function NavigationView({
             route={activeRoute}
             activeSection={activeSection}
             onSelect={setActiveSection}
-            canRemoveTrails={!!onRemoveTrailSection && !removing && !swapping}
+            canRemoveTrails={!!onRemoveTrailSection && !removing && !swapping && !undoToast?.undoing}
             removingTrailId={removing?.trailId ?? null}
             onRequestRemoveTrail={(trailId, trailName) => {
-              if (removing || swapping) return;
+              if (removing || swapping || undoToast?.undoing) return;
               const trailSec = activeRoute.sections.find(
                 (s) => s.kind === "trail" && s.trail.id === trailId,
               );
