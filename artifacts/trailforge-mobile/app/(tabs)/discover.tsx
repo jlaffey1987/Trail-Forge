@@ -6,7 +6,9 @@
 import { Feather } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useListPublicRoutes } from "@workspace/api-client-react";
-import React, { useState } from "react";
+import * as Location from "expo-location";
+import { router } from "expo-router";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -23,13 +25,16 @@ import {
 import colors from "@/constants/colors";
 import {
   createGroup,
+  fetchCommunityTrails,
   leaveGroup,
   listDiscoverableGroups,
   listMyGroups,
   requestGroupJoin,
   type DiscoverableGroup,
   type Group,
+  type MapTrail,
 } from "@/lib/api";
+import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 
 interface PublicRoute {
   id: string;
@@ -39,6 +44,61 @@ interface PublicRoute {
   like_count?: number | null;
   region?: string | null;
   difficulty?: string | null;
+}
+
+// Mirrors the web Discover taxonomy exactly:
+// `FILTERS = ["All", "Featured", "BOATs", "Green Lanes", "Nearby"]`.
+type TrailCategory = "All" | "Featured" | "BOATs" | "Green Lanes" | "Nearby";
+const TRAIL_FILTERS: TrailCategory[] = [
+  "All",
+  "Featured",
+  "BOATs",
+  "Green Lanes",
+  "Nearby",
+];
+const NEARBY_RADIUS_KM = 50;
+
+function haversineKm(
+  a: { lat: number; lon: number },
+  b: { lat: number; lon: number },
+): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function trailMatchesCategory(
+  t: MapTrail,
+  c: TrailCategory,
+  near: { lat: number; lon: number } | null,
+): boolean {
+  if (c === "All") return true;
+  // "Featured" is approximated as well-described public trails — the API
+  // doesn't yet expose a featured flag, so we use "has photos OR a
+  // measured distance" as the proxy. Web parity item.
+  if (c === "Featured")
+    return (
+      (t.photo_urls?.length ?? 0) > 0 ||
+      (typeof t.distance_km === "number" && t.distance_km > 0)
+    );
+  if (c === "BOATs") return t.legal_status === "BOAT";
+  if (c === "Green Lanes") return t.legal_status === "Green Lane";
+  if (c === "Nearby") {
+    if (!near) return false;
+    if (t.centroid_lat == null || t.centroid_lon == null) return false;
+    return (
+      haversineKm(near, { lat: t.centroid_lat, lon: t.centroid_lon }) <=
+      NEARBY_RADIUS_KM
+    );
+  }
+  return true;
 }
 
 type RouteCategory = "all" | "popular" | "easy" | "moderate" | "hard";
@@ -95,6 +155,40 @@ export default function DiscoverTab() {
         err instanceof Error ? err.message : "Unknown error",
       ),
   });
+
+  // Community trails — the headline content of Discover, mirroring the
+  // web. We pull a single page (limit=120 server-side) and filter
+  // locally; the Featured/BOATs/Green Lanes/Nearby ribbon is purely a
+  // client-side filter so chip-flipping is instant.
+  const trailsQ = useQuery({
+    queryKey: ["community-trails"],
+    queryFn: fetchCommunityTrails,
+    staleTime: 60_000,
+  });
+  const [trailCategory, setTrailCategory] = useState<TrailCategory>("All");
+
+  // Lightweight one-shot location fetch for "Nearby". We don't hold a
+  // watcher open — Discover doesn't need live updates.
+  const [near, setNear] = useState<{ lat: number; lon: number } | null>(null);
+  useEffect(() => {
+    void (async () => {
+      const fg = await Location.getForegroundPermissionsAsync();
+      if (fg.status !== "granted") return;
+      const last = await Location.getLastKnownPositionAsync();
+      if (last) {
+        setNear({
+          lat: last.coords.latitude,
+          lon: last.coords.longitude,
+        });
+      }
+    })();
+  }, []);
+
+  const allTrails = trailsQ.data?.trails ?? [];
+  const trails = useMemo(
+    () => allTrails.filter((t) => trailMatchesCategory(t, trailCategory, near)),
+    [allTrails, trailCategory, near],
+  );
 
   const [routeCategory, setRouteCategory] = useState<RouteCategory>("all");
   const allRoutes =
@@ -154,7 +248,85 @@ export default function DiscoverTab() {
         <View style={{ marginBottom: 22 }}>
           <Text style={styles.h1}>Discover</Text>
 
-          <Text style={styles.sectionTitle}>My groups</Text>
+          <Text style={styles.sectionTitle}>Community trails</Text>
+          <View style={styles.categoryRibbon}>
+            {TRAIL_FILTERS.map((f) => {
+              const active = f === trailCategory;
+              const disabled = f === "Nearby" && !near;
+              return (
+                <TouchableOpacity
+                  key={f}
+                  onPress={() => !disabled && setTrailCategory(f)}
+                  disabled={disabled}
+                  style={[
+                    styles.catChip,
+                    active && styles.catChipActive,
+                    disabled && { opacity: 0.4 },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.catChipText,
+                      active && styles.catChipTextActive,
+                    ]}
+                  >
+                    {f}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {trailCategory === "Nearby" && !near ? (
+            <Text style={styles.helper}>
+              Enable location on the Map tab to use Nearby.
+            </Text>
+          ) : null}
+          {trailsQ.isLoading ? (
+            <ActivityIndicator
+              color={colors.light.primary}
+              style={{ marginTop: 6 }}
+            />
+          ) : trails.length === 0 ? (
+            <Text style={styles.emptyText}>
+              No trails match this filter yet.
+            </Text>
+          ) : (
+            trails.slice(0, 30).map((t) => (
+              <Pressable
+                key={t.id}
+                style={styles.trailRow}
+                onPress={() =>
+                  router.push(`/trail/${encodeURIComponent(t.id)}`)
+                }
+              >
+                <View
+                  style={[
+                    styles.diffDot,
+                    { backgroundColor: difficultyColor(t.difficulty) },
+                  ]}
+                />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.trailRowTitle} numberOfLines={1}>
+                    {t.name}
+                  </Text>
+                  <Text style={styles.trailRowMeta}>
+                    {difficultyLabel(t.difficulty)}
+                    {t.distance_km != null
+                      ? ` • ${t.distance_km.toFixed(1)} km`
+                      : ""}
+                    {t.legal_status ? ` • ${t.legal_status}` : ""}
+                  </Text>
+                </View>
+                <Feather
+                  name="chevron-right"
+                  size={18}
+                  color={colors.light.mutedForeground}
+                />
+              </Pressable>
+            ))
+          )}
+
+          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>My groups</Text>
           {groupsQ.isLoading ? (
             <ActivityIndicator color={colors.light.primary} />
           ) : groups.length === 0 ? (
@@ -445,4 +617,28 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   catChipTextActive: { color: colors.light.primaryForeground },
+  trailRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: colors.light.card,
+    borderRadius: 10,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    marginBottom: 6,
+  },
+  diffDot: { width: 12, height: 12, borderRadius: 6 },
+  trailRowTitle: { color: colors.light.foreground, fontWeight: "600" },
+  trailRowMeta: {
+    color: colors.light.mutedForeground,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  helper: {
+    color: colors.light.mutedForeground,
+    fontSize: 12,
+    marginBottom: 8,
+  },
 });

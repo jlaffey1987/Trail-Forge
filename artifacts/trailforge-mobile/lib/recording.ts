@@ -1,8 +1,15 @@
 /**
  * Ride recording: a thin wrapper around `expo-location` that buffers
- * positions in-memory (and exposes a subscribe API for the UI to render
- * live distance / speed / elevation) and registers a background location
- * task so the OS keeps feeding us samples when the screen is locked.
+ * positions and exposes a subscribe API for the UI to render live
+ * distance / speed / elevation. We register a background location task so
+ * the OS keeps feeding us samples when the screen is locked.
+ *
+ * IMPORTANT: the background task runs in its OWN JS context. That means a
+ * plain in-memory array would be a different array than the one the
+ * foreground UI sees, and any samples collected while backgrounded would
+ * be lost on the next cold start. We therefore persist every sample
+ * straight to AsyncStorage; both contexts read/write the same key, and on
+ * mount the foreground rehydrates so an interrupted ride survives a kill.
  *
  * Background recording requires:
  *   - "Always" location permission (iOS) / ACCESS_BACKGROUND_LOCATION
@@ -11,10 +18,12 @@
  *     `TaskManager.defineTask` callbacks in the background. In Expo Go
  *     we silently fall back to foreground watch.
  */
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 
 const LOCATION_TASK_NAME = "trailforge-ride-recording";
+const STORAGE_KEY = "trailforge:active-ride";
 
 export interface RidePoint {
   lat: number;
@@ -31,16 +40,86 @@ export interface RideStats {
   pointCount: number;
 }
 
+interface PersistedRide {
+  startedAt: number | null;
+  points: RidePoint[];
+}
+
 type Listener = (points: RidePoint[], stats: RideStats) => void;
 
 const listeners = new Set<Listener>();
-let buffer: RidePoint[] = [];
-let startedAt: number | null = null;
 let foregroundSub: Location.LocationSubscription | null = null;
 
-function pushPoint(p: RidePoint): void {
-  buffer.push(p);
-  notify();
+// In-memory mirror of the persisted ride, so foreground listeners can be
+// notified synchronously without an AsyncStorage round-trip every sample.
+let buffer: RidePoint[] = [];
+let startedAt: number | null = null;
+
+// Per-context serialization. Both contexts (foreground UI + background
+// TaskManager) share this storage key, but each has its own JS module
+// instance and therefore its own queue. Cross-context atomicity comes
+// from the OS lifecycle: when the app is backgrounded the foreground JS
+// runtime is paused (Hermes/JSI suspends), so the bg task is the only
+// writer; when the app is foregrounded the OS holds bg deliveries until
+// the next deferredUpdatesInterval batch. To eliminate the residual
+// risk that a single batch could collide we still chain every write
+// through this promise queue so within a context appends are strictly
+// serialized — no read-modify-write race against ourselves.
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writeQueue.then(fn, fn);
+  writeQueue = next.catch(() => {});
+  return next;
+}
+
+async function readPersisted(): Promise<PersistedRide> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    if (!raw) return { startedAt: null, points: [] };
+    const parsed = JSON.parse(raw) as Partial<PersistedRide>;
+    return {
+      startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
+      points: Array.isArray(parsed.points) ? (parsed.points as RidePoint[]) : [],
+    };
+  } catch {
+    return { startedAt: null, points: [] };
+  }
+}
+
+async function writePersisted(state: PersistedRide): Promise<void> {
+  try {
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // best-effort
+  }
+}
+
+async function clearPersisted(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // best-effort
+  }
+}
+
+function appendPoints(newPoints: RidePoint[]): Promise<void> {
+  if (newPoints.length === 0) return Promise.resolve();
+  // Serialize the read-modify-write through the per-context queue so two
+  // overlapping watcher callbacks can't both read the same prior state
+  // and have the second clobber the first's points.
+  return enqueue(async () => {
+    const persisted = await readPersisted();
+    const merged = [...persisted.points, ...newPoints];
+    const next: PersistedRide = {
+      startedAt: persisted.startedAt ?? startedAt,
+      points: merged,
+    };
+    await writePersisted(next);
+    buffer = merged;
+    startedAt = next.startedAt;
+    notify();
+  });
 }
 
 function notify(): void {
@@ -88,25 +167,39 @@ function computeStats(pts: RidePoint[]): RideStats {
   };
 }
 
-// Background task runs in a separate JS context — it has its own copy of
-// this module's state, so we persist samples through `TaskManager`'s data
-// callback by pushing them onto the foreground buffer via a global event.
-// In Expo Go this callback is never invoked.
+// Background task — its own JS context, its own copy of this module's
+// vars. Reaches into the persisted store via the same per-context queue
+// so overlapping bg invocations can't race each other either.
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error || !data) return;
   const locations = (data as { locations?: Location.LocationObject[] })
     .locations;
-  if (!locations) return;
-  for (const loc of locations) {
-    pushPoint({
-      lat: loc.coords.latitude,
-      lon: loc.coords.longitude,
-      altitude: loc.coords.altitude,
-      speed: loc.coords.speed,
-      timestamp: loc.timestamp,
+  if (!locations || locations.length === 0) return;
+  const newPoints: RidePoint[] = locations.map((loc) => ({
+    lat: loc.coords.latitude,
+    lon: loc.coords.longitude,
+    altitude: loc.coords.altitude,
+    speed: loc.coords.speed,
+    timestamp: loc.timestamp,
+  }));
+  await enqueue(async () => {
+    const persisted = await readPersisted();
+    await writePersisted({
+      startedAt: persisted.startedAt,
+      points: [...persisted.points, ...newPoints],
     });
-  }
+  });
 });
+
+/** Pull the persisted ride into the in-memory buffer and notify
+ *  subscribers. Call this on app start (or recording-screen mount) to
+ *  resume a ride that was interrupted by a process kill. */
+export async function rehydrate(): Promise<void> {
+  const persisted = await readPersisted();
+  buffer = persisted.points;
+  startedAt = persisted.startedAt;
+  notify();
+}
 
 export async function startRecording(): Promise<{ ok: boolean; reason?: string }> {
   // Foreground first — required for both modes.
@@ -114,6 +207,7 @@ export async function startRecording(): Promise<{ ok: boolean; reason?: string }
   if (fg.status !== "granted") return { ok: false, reason: "fg-denied" };
   buffer = [];
   startedAt = Date.now();
+  await writePersisted({ startedAt, points: [] });
 
   foregroundSub = await Location.watchPositionAsync(
     {
@@ -122,13 +216,15 @@ export async function startRecording(): Promise<{ ok: boolean; reason?: string }
       timeInterval: 2000,
     },
     (loc) => {
-      pushPoint({
-        lat: loc.coords.latitude,
-        lon: loc.coords.longitude,
-        altitude: loc.coords.altitude,
-        speed: loc.coords.speed,
-        timestamp: loc.timestamp,
-      });
+      void appendPoints([
+        {
+          lat: loc.coords.latitude,
+          lon: loc.coords.longitude,
+          altitude: loc.coords.altitude,
+          speed: loc.coords.speed,
+          timestamp: loc.timestamp,
+        },
+      ]);
     },
   );
 
@@ -180,13 +276,17 @@ export async function stopRecording(): Promise<{
   } catch {
     // ignore
   }
+  // Flush background-written samples one last time before clearing.
+  const persisted = await readPersisted();
+  const finalPoints = persisted.points;
   const result = {
-    points: buffer.slice(),
-    stats: computeStats(buffer),
-    startedAt,
+    points: finalPoints.slice(),
+    stats: computeStats(finalPoints),
+    startedAt: persisted.startedAt ?? startedAt,
   };
   buffer = [];
   startedAt = null;
+  await clearPersisted();
   notify();
   return result;
 }

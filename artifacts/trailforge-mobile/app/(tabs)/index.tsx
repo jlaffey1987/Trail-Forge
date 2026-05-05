@@ -13,11 +13,13 @@ import {
   useListMySavedRoutes,
 } from "@workspace/api-client-react";
 import { useLocalSearchParams } from "expo-router";
+import { useQuery } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Platform,
   Pressable,
   ScrollView,
   Share,
@@ -28,13 +30,23 @@ import {
   View,
 } from "react-native";
 
+import MapView, {
+  Marker,
+  PROVIDER_DEFAULT,
+  PROVIDER_GOOGLE,
+  Polyline,
+  Region,
+} from "react-native-maps";
+
 import colors from "@/constants/colors";
 import {
   buildGpx,
   getPlannerSuggestions,
   searchTrailsByBbox,
+  type MapTrail,
   type PlannerSuggestion,
 } from "@/lib/api";
+import { difficultyColor } from "@/lib/trailColors";
 import { geocode, type NominatimResult } from "@/lib/nominatim";
 
 interface Endpoint {
@@ -111,6 +123,21 @@ export default function PlannerTab() {
   const createRoute = useCreateMySavedRoute();
 
   const suggestions = suggestionsMut.data?.suggestions ?? [];
+
+  // Pull the polylines for whatever trails the user has ticked so the
+  // corridor preview can render them on the inline map. We deliberately
+  // re-use the same bbox/id-filter trail search the export-GPX flow does.
+  const selectedKey = selected.slice().sort().join(",");
+  const previewTrailsQ = useQuery({
+    queryKey: ["planner-preview-trails", selectedKey],
+    queryFn: () =>
+      selected.length === 0
+        ? Promise.resolve({ trails: [] as MapTrail[] })
+        : searchTrailsByBbox({ ids: selectedKey, limit: 200 }),
+    enabled: selected.length > 0,
+    staleTime: 30_000,
+  });
+  const previewTrails: MapTrail[] = previewTrailsQ.data?.trails ?? [];
 
   // Refetch whenever both endpoints are set.
   useEffect(() => {
@@ -234,6 +261,13 @@ export default function PlannerTab() {
         placeholder="Search a destination…"
       />
 
+      {from && to ? (
+        <View style={styles.previewBlock}>
+          <Text style={styles.sectionLabel}>Corridor preview</Text>
+          <CorridorMap from={from} to={to} trails={previewTrails} />
+        </View>
+      ) : null}
+
       <View style={styles.suggestionsHeader}>
         <Text style={styles.sectionTitle}>Suggested trails</Text>
         {suggestionsMut.isPending ? (
@@ -312,6 +346,86 @@ export default function PlannerTab() {
         </View>
       ) : null}
     </ScrollView>
+  );
+}
+
+function CorridorMap({
+  from,
+  to,
+  trails,
+}: {
+  from: Endpoint;
+  to: Endpoint;
+  trails: MapTrail[];
+}) {
+  // Frame the bbox around both endpoints with a small padding ratio so
+  // the markers sit comfortably inside the visible region.
+  const region = useMemo<Region>(() => {
+    const lat = (from.lat + to.lat) / 2;
+    const lon = (from.lon + to.lon) / 2;
+    const latDelta = Math.max(0.05, Math.abs(from.lat - to.lat) * 1.6);
+    const lonDelta = Math.max(0.05, Math.abs(from.lon - to.lon) * 1.6);
+    return { latitude: lat, longitude: lon, latitudeDelta: latDelta, longitudeDelta: lonDelta };
+  }, [from, to]);
+
+  const polylines = useMemo(() => {
+    const out: Array<{
+      key: string;
+      coords: Array<{ latitude: number; longitude: number }>;
+      color: string;
+    }> = [];
+    for (const t of trails) {
+      if (!Array.isArray(t.path)) continue;
+      const coords: Array<{ latitude: number; longitude: number }> = [];
+      for (const p of t.path) {
+        if (Array.isArray(p) && p.length >= 2) {
+          const [lon, lat] = p as [unknown, unknown];
+          if (typeof lat === "number" && typeof lon === "number") {
+            coords.push({ latitude: lat, longitude: lon });
+          }
+        }
+      }
+      if (coords.length >= 2) {
+        out.push({
+          key: t.id,
+          coords,
+          color: difficultyColor(t.difficulty),
+        });
+      }
+    }
+    return out;
+  }, [trails]);
+
+  return (
+    <View style={styles.mapWrap}>
+      <MapView
+        style={styles.map}
+        provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
+        initialRegion={region}
+        region={region}
+        showsUserLocation={false}
+        toolbarEnabled={false}
+      >
+        <Marker
+          coordinate={{ latitude: from.lat, longitude: from.lon }}
+          title="From"
+          pinColor="green"
+        />
+        <Marker
+          coordinate={{ latitude: to.lat, longitude: to.lon }}
+          title="To"
+          pinColor="red"
+        />
+        {polylines.map((p) => (
+          <Polyline
+            key={p.key}
+            coordinates={p.coords}
+            strokeColor={p.color}
+            strokeWidth={3}
+          />
+        ))}
+      </MapView>
+    </View>
   );
 }
 
@@ -591,4 +705,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: "center",
   },
+  previewBlock: { marginTop: 12, marginBottom: 6 },
+  sectionLabel: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+  mapWrap: {
+    height: 200,
+    borderRadius: 12,
+    overflow: "hidden",
+    borderColor: colors.light.border,
+    borderWidth: 1,
+  },
+  map: { flex: 1 },
 });

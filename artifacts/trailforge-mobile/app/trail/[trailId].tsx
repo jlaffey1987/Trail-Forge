@@ -6,13 +6,24 @@
  * those siblings power the prev/next navigation buttons so the user
  * can flip through their saved trails without bouncing back to the
  * list each time.
+ *
+ * Sections shown:
+ *   - Header w/ name, difficulty pill, terrain, legal status (BOAT,
+ *     Green Lane, etc — the same UK access taxonomy the web uses)
+ *   - Distance + elevation stats
+ *   - Elevation chart (when altitude samples exist)
+ *   - Community notes (recent five)
+ *   - Amendments badge (count of pending amendments)
+ *   - Share-to-groups action (opens a multi-select modal of My Groups)
  */
 import { Feather } from "@expo/vector-icons";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, useLocalSearchParams } from "expo-router";
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -23,7 +34,16 @@ import {
 
 import { ElevationChart } from "@/components/ElevationChart";
 import colors from "@/constants/colors";
-import { searchTrailsByBbox } from "@/lib/api";
+import {
+  listMyGroups,
+  listTrailAmendments,
+  listTrailNotes,
+  listTrailShares,
+  searchTrailsByBbox,
+  shareTrailToGroups,
+  type Group,
+  type TrailNote,
+} from "@/lib/api";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 
 export default function TrailDetailScreen() {
@@ -33,6 +53,7 @@ export default function TrailDetailScreen() {
   }>();
   const id = String(trailId ?? "");
   const { width } = useWindowDimensions();
+  const qc = useQueryClient();
 
   const siblingIds = useMemo<string[]>(() => {
     if (!ids) return [];
@@ -55,6 +76,19 @@ export default function TrailDetailScreen() {
     enabled: id.length > 0,
   });
   const trail = q.data?.trails?.[0];
+
+  const notesQ = useQuery({
+    queryKey: ["trail-notes", id],
+    queryFn: () => listTrailNotes(id),
+    enabled: id.length > 0,
+  });
+  const amendmentsQ = useQuery({
+    queryKey: ["trail-amendments", id],
+    queryFn: () => listTrailAmendments(id),
+    enabled: id.length > 0,
+  });
+
+  const [shareOpen, setShareOpen] = useState(false);
 
   function navigateTo(targetId: string) {
     const path = `/trail/${encodeURIComponent(targetId)}` as const;
@@ -84,6 +118,11 @@ export default function TrailDetailScreen() {
       </View>
     );
   }
+
+  const pendingAmendments = (amendmentsQ.data?.items ?? []).filter(
+    (a) => a.status === "pending",
+  ).length;
+  const notes = notesQ.data?.items ?? [];
 
   return (
     <ScrollView
@@ -136,6 +175,16 @@ export default function TrailDetailScreen() {
             <Text style={styles.terrainText}>{trail.terrain}</Text>
           </View>
         ) : null}
+        {trail.legal_status ? (
+          <View style={[styles.terrain, styles.legalBadge]}>
+            <Feather
+              name="shield"
+              size={12}
+              color={colors.light.primaryForeground}
+            />
+            <Text style={styles.legalText}>{trail.legal_status}</Text>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.statsRow}>
@@ -157,6 +206,29 @@ export default function TrailDetailScreen() {
         </View>
       </View>
 
+      <View style={styles.actionRow}>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => setShareOpen(true)}
+        >
+          <Feather name="share-2" size={14} color={colors.light.foreground} />
+          <Text style={styles.actionBtnText}>Share to group</Text>
+        </TouchableOpacity>
+        {pendingAmendments > 0 ? (
+          <View style={styles.amendmentBadge}>
+            <Feather
+              name="edit-3"
+              size={12}
+              color={colors.light.foreground}
+            />
+            <Text style={styles.actionBtnText}>
+              {pendingAmendments} pending amendment
+              {pendingAmendments === 1 ? "" : "s"}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+
       {Array.isArray(trail.altitudes) && trail.altitudes.length > 1 ? (
         <View style={{ marginTop: 18 }}>
           <Text style={styles.sectionLabel}>Elevation profile</Text>
@@ -166,7 +238,190 @@ export default function TrailDetailScreen() {
           />
         </View>
       ) : null}
+
+      <View style={{ marginTop: 22 }}>
+        <Text style={styles.sectionLabel}>Community notes</Text>
+        {notesQ.isLoading ? (
+          <ActivityIndicator color={colors.light.primary} />
+        ) : notes.length === 0 ? (
+          <Text style={styles.muted}>
+            No notes yet. Riders' updates on closures, washouts and
+            line-of-sight changes will show up here.
+          </Text>
+        ) : (
+          notes.slice(0, 5).map((n: TrailNote) => (
+            <View key={n.id} style={styles.note}>
+              <Text style={styles.noteAuthor}>
+                {n.author?.display_name ?? "Anon"} •
+                {" "}
+                {new Date(n.created_at).toLocaleDateString()}
+              </Text>
+              <Text style={styles.noteBody}>{n.body}</Text>
+            </View>
+          ))
+        )}
+      </View>
+
+      <ShareToGroupsModal
+        visible={shareOpen}
+        onDismiss={() => setShareOpen(false)}
+        onShared={() => {
+          setShareOpen(false);
+          void qc.invalidateQueries({ queryKey: ["my-groups"] });
+        }}
+        trailId={id}
+      />
     </ScrollView>
+  );
+}
+
+function ShareToGroupsModal({
+  visible,
+  onDismiss,
+  onShared,
+  trailId,
+}: {
+  visible: boolean;
+  onDismiss: () => void;
+  onShared: () => void;
+  trailId: string;
+}) {
+  const myGroupsQ = useQuery({
+    queryKey: ["my-groups"],
+    queryFn: listMyGroups,
+    enabled: visible,
+  });
+  // Pre-load the trail's existing shares so the user sees what's already
+  // selected and can't accidentally remove every share by opening the
+  // modal and tapping Share. 403 means the caller isn't the owner — in
+  // that case we just leave the picker empty (the PUT will 403 too).
+  const sharesQ = useQuery({
+    queryKey: ["trail-shares", trailId],
+    queryFn: () => listTrailShares(trailId).catch(() => ({ items: [] })),
+    enabled: visible,
+  });
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!visible) return;
+    const initial = new Set<string>(
+      (sharesQ.data?.items ?? []).map((s) => s.group_id),
+    );
+    setSelected(initial);
+  }, [visible, sharesQ.data]);
+
+  const shareMut = useMutation({
+    mutationFn: () => shareTrailToGroups(trailId, Array.from(selected)),
+    onSuccess: () => {
+      Alert.alert(
+        "Shared",
+        selected.size === 0
+          ? "Trail removed from all groups."
+          : `Trail shared to ${selected.size} group${selected.size === 1 ? "" : "s"}.`,
+      );
+      onShared();
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Share failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  const groups: Group[] = myGroupsQ.data?.groups ?? [];
+
+  // Confirm before submitting an empty selection — this would unshare
+  // the trail from every group, which is destructive enough to warrant
+  // a second tap.
+  function onSubmit() {
+    const initial = new Set<string>(
+      (sharesQ.data?.items ?? []).map((s) => s.group_id),
+    );
+    if (selected.size === 0 && initial.size > 0) {
+      Alert.alert(
+        "Remove from all groups?",
+        `This trail is currently shared with ${initial.size} group${
+          initial.size === 1 ? "" : "s"
+        }. Submitting with nothing selected will remove every share.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Remove all",
+            style: "destructive",
+            onPress: () => shareMut.mutate(),
+          },
+        ],
+      );
+      return;
+    }
+    shareMut.mutate();
+  }
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onDismiss}>
+      <View style={styles.modalScrim}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Share to groups</Text>
+          <Text style={styles.muted}>
+            Pick the groups you want to share this trail into. Submitting
+            with nothing selected removes it from every group.
+          </Text>
+          {myGroupsQ.isLoading ? (
+            <ActivityIndicator color={colors.light.primary} />
+          ) : groups.length === 0 ? (
+            <Text style={styles.muted}>You're not a member of any group yet.</Text>
+          ) : (
+            <ScrollView style={{ maxHeight: 280 }}>
+              {groups.map((g) => {
+                const on = selected.has(g.id);
+                return (
+                  <TouchableOpacity
+                    key={g.id}
+                    onPress={() => {
+                      const next = new Set(selected);
+                      if (on) next.delete(g.id);
+                      else next.add(g.id);
+                      setSelected(next);
+                    }}
+                    style={styles.modalRow}
+                  >
+                    <Feather
+                      name={on ? "check-square" : "square"}
+                      size={18}
+                      color={
+                        on ? colors.light.primary : colors.light.mutedForeground
+                      }
+                    />
+                    <Text style={styles.modalRowText}>{g.name}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+          <View style={styles.modalActions}>
+            <TouchableOpacity onPress={onDismiss} style={styles.modalCancelBtn}>
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onSubmit}
+              disabled={shareMut.isPending || groups.length === 0}
+              style={[
+                styles.modalConfirmBtn,
+                (shareMut.isPending || groups.length === 0) && {
+                  opacity: 0.5,
+                },
+              ]}
+            >
+              {shareMut.isPending ? (
+                <ActivityIndicator color={colors.light.primaryForeground} />
+              ) : (
+                <Text style={styles.modalConfirmText}>Share</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -195,12 +450,21 @@ const styles = StyleSheet.create({
   diffDot: { width: 8, height: 8, borderRadius: 4 },
   diffText: { color: colors.light.foreground, fontSize: 12 },
   terrain: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
     backgroundColor: colors.light.muted,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 4,
   },
   terrainText: { color: colors.light.mutedForeground, fontSize: 12 },
+  legalBadge: { backgroundColor: colors.light.primary },
+  legalText: {
+    color: colors.light.primaryForeground,
+    fontSize: 12,
+    fontWeight: "700",
+  },
   statsRow: { flexDirection: "row", gap: 12, marginTop: 18 },
   stat: {
     flex: 1,
@@ -229,6 +493,38 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: 6,
   },
+  actionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 14,
+    alignItems: "center",
+  },
+  actionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+  },
+  actionBtnText: {
+    color: colors.light.foreground,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  amendmentBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: colors.light.muted,
+    borderRadius: 8,
+  },
   navBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -250,4 +546,67 @@ const styles = StyleSheet.create({
   },
   navBtnText: { color: colors.light.foreground, fontWeight: "600", fontSize: 13 },
   navCounter: { color: colors.light.mutedForeground, fontSize: 12 },
+  note: {
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 6,
+  },
+  noteAuthor: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    marginBottom: 4,
+  },
+  noteBody: { color: colors.light.foreground, fontSize: 13 },
+  muted: { color: colors.light.mutedForeground, fontSize: 13, marginTop: 4 },
+  modalScrim: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    padding: 18,
+  },
+  modalCard: {
+    backgroundColor: colors.light.background,
+    borderRadius: 14,
+    padding: 18,
+    gap: 10,
+    maxHeight: "85%",
+  },
+  modalTitle: {
+    color: colors.light.foreground,
+    fontWeight: "800",
+    fontSize: 18,
+  },
+  modalRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.light.border,
+  },
+  modalRowText: { color: colors.light.foreground, flex: 1, fontSize: 14 },
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 10,
+  },
+  modalCancelBtn: { paddingVertical: 10, paddingHorizontal: 14 },
+  modalCancelText: {
+    color: colors.light.mutedForeground,
+    fontWeight: "600",
+  },
+  modalConfirmBtn: {
+    backgroundColor: colors.light.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+  },
+  modalConfirmText: {
+    color: colors.light.primaryForeground,
+    fontWeight: "700",
+  },
 });

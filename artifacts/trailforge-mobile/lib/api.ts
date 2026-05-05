@@ -574,6 +574,13 @@ export interface MapTrail {
   path?: unknown;
   altitudes?: number[];
   photo_urls?: string[];
+  /** UK access taxonomy: "BOAT", "Green Lane", "UCR", etc. Drives the
+   *  Discover BOATs/Green Lanes filter chips. */
+  legal_status?: string | null;
+  is_public?: boolean | null;
+  centroid_lat?: number | null;
+  centroid_lon?: number | null;
+  created_at?: string | null;
 }
 
 export interface TrailSearchResponseBbox {
@@ -651,5 +658,82 @@ export function grantAdmin(
 export function revokeAdmin(userId: string): Promise<unknown> {
   return apiJson(`/api/admin/admins/${encodeURIComponent(userId)}`, {
     method: "DELETE",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Community trails feed (Discover) + trail content (notes / amendments) +
+// share-to-group action. The web's Discover lists *trails* with a
+// BOATs/Green Lanes/Featured/Nearby filter ribbon; the mobile Discover
+// now mirrors that. None of these endpoints are in the OpenAPI spec yet,
+// so we hit them via apiJson directly.
+// ---------------------------------------------------------------------------
+
+export async function fetchCommunityTrails(): Promise<{ trails: MapTrail[] }> {
+  // The bbox-search route returns rows ordered by name when no bbox is
+  // given. Limit hard so the JSON is tractable on 4G.
+  return apiJson<{ trails: MapTrail[] }>("/api/trails/search?limit=120");
+}
+
+export interface TrailNote {
+  id: string;
+  body: string;
+  author_user_id: string | null;
+  created_at: string;
+  author?: { display_name?: string | null; avatar_url?: string | null } | null;
+}
+
+export function listTrailNotes(
+  trailId: string,
+): Promise<{ items: TrailNote[] }> {
+  return apiJson<{ items: TrailNote[] }>(
+    `/api/trails/${encodeURIComponent(trailId)}/notes`,
+  );
+}
+
+export interface TrailAmendment {
+  id: string;
+  trail_id: string;
+  reason: string | null;
+  reason_category: string | null;
+  status: string;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export function listTrailAmendments(
+  trailId: string,
+): Promise<{ items: TrailAmendment[] }> {
+  return apiJson<{ items: TrailAmendment[] }>(
+    `/api/trails/${encodeURIComponent(trailId)}/amendments`,
+  );
+}
+
+export interface TrailShare {
+  group_id: string;
+  shared_at: string;
+  name: string | null;
+}
+
+/** List the groups a trail is currently shared into. Owner-only on the
+ *  server; the share modal calls this on open so the user sees their
+ *  current selection pre-populated. */
+export function listTrailShares(
+  trailId: string,
+): Promise<{ items: TrailShare[] }> {
+  return apiJson<{ items: TrailShare[] }>(
+    `/api/trails/${encodeURIComponent(trailId)}/shares`,
+  );
+}
+
+/** Replace the set of groups a trail is shared into. Owner-only on the
+ *  server; the UI should only show this for trails the caller owns. */
+export function shareTrailToGroups(
+  trailId: string,
+  groupIds: string[],
+): Promise<unknown> {
+  return apiJson(`/api/trails/${encodeURIComponent(trailId)}/shares`, {
+    method: "PUT",
+    body: JSON.stringify({ group_ids: groupIds }),
   });
 }

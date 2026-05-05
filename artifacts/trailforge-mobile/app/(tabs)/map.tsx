@@ -9,12 +9,16 @@ import * as Location from "expo-location";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   Platform,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+
+import { geocode, type NominatimResult } from "@/lib/nominatim";
 import MapView, {
   PROVIDER_DEFAULT,
   PROVIDER_GOOGLE,
@@ -69,6 +73,44 @@ export default function MapTab() {
   const [selected, setSelected] = useState<TrailDetailData | null>(null);
   const [difficultyFilter, setDifficultyFilter] = useState<DifficultyFilter>("all");
   const [mapKind, setMapKind] = useState<"standard" | "satellite">("standard");
+  const [searchText, setSearchText] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchHits, setSearchHits] = useState<NominatimResult[]>([]);
+
+  // Geocode the search box and pan the map to the first match. We keep
+  // the rest of the hits around so the user can pick a different one
+  // from the dropdown if Nominatim's first guess is wrong.
+  async function runSearch(): Promise<void> {
+    const q = searchText.trim();
+    if (!q) return;
+    Keyboard.dismiss();
+    setSearching(true);
+    try {
+      const results = await geocode(q);
+      setSearchHits(results);
+      if (results[0]) {
+        flyTo(results[0]);
+      }
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function flyTo(hit: NominatimResult): void {
+    // Nominatim returns lat/lon as strings — coerce before handing to MapView.
+    const lat = Number(hit.lat);
+    const lon = Number(hit.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const next: Region = {
+      latitude: lat,
+      longitude: lon,
+      latitudeDelta: 0.4,
+      longitudeDelta: 0.4,
+    };
+    setRegion(next);
+    mapRef.current?.animateToRegion(next, 600);
+    setSearchHits([]);
+  }
 
   // Fetch trails for the current viewport. We hit the bbox-aware route
   // directly rather than through the generated `useSearchTrails` hook —
@@ -170,6 +212,54 @@ export default function MapTab() {
           );
         })}
       </MapView>
+
+      <View style={styles.searchRow} pointerEvents="box-none">
+        <View style={styles.searchBar}>
+          <Feather name="search" size={16} color={colors.light.mutedForeground} />
+          <TextInput
+            value={searchText}
+            onChangeText={setSearchText}
+            onSubmitEditing={runSearch}
+            placeholder="Search a place…"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={styles.searchInput}
+            returnKeyType="search"
+          />
+          {searchText ? (
+            <TouchableOpacity
+              onPress={() => {
+                setSearchText("");
+                setSearchHits([]);
+              }}
+            >
+              <Feather name="x" size={16} color={colors.light.mutedForeground} />
+            </TouchableOpacity>
+          ) : null}
+          {searching ? (
+            <ActivityIndicator size="small" color={colors.light.primary} />
+          ) : null}
+        </View>
+        {searchHits.length > 0 ? (
+          <View style={styles.searchHits}>
+            {searchHits.slice(0, 5).map((h) => (
+              <TouchableOpacity
+                key={`${h.lat},${h.lon},${h.place_id}`}
+                style={styles.searchHit}
+                onPress={() => flyTo(h)}
+              >
+                <Feather
+                  name="map-pin"
+                  size={14}
+                  color={colors.light.mutedForeground}
+                />
+                <Text numberOfLines={2} style={styles.searchHitText}>
+                  {h.display_name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+      </View>
 
       <View style={styles.headerCard} pointerEvents="box-none">
         <View style={styles.statusPill} pointerEvents="none">
@@ -326,13 +416,54 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.light.background },
   headerCard: {
     position: "absolute",
-    top: 12,
+    top: 64,
     left: 12,
     right: 12,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
+  searchRow: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    right: 12,
+  },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
+  searchInput: {
+    flex: 1,
+    color: colors.light.foreground,
+    fontSize: 14,
+    paddingVertical: 0,
+  },
+  searchHits: {
+    marginTop: 6,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  searchHit: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.light.border,
+  },
+  searchHitText: { flex: 1, color: colors.light.foreground, fontSize: 12 },
   statusPill: {
     flexDirection: "row",
     alignItems: "center",
@@ -369,7 +500,7 @@ const styles = StyleSheet.create({
   permBannerText: { color: colors.light.foreground, fontSize: 12 },
   filterBar: {
     position: "absolute",
-    top: 60,
+    top: 112,
     left: 12,
     right: 12,
     flexDirection: "row",
