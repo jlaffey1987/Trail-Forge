@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="geometricPrecision">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1c0b04"/>
+      <stop offset="32%" stop-color="#52270e"/>
+      <stop offset="60%" stop-color="#a04e1d"/>
+      <stop offset="82%" stop-color="#e4862c"/>
+      <stop offset="100%" stop-color="#fbc46a"/>
+    </linearGradient>
+    <radialGradient id="sunGlow" cx="0.5" cy="0.7" r="0.55">
+      <stop offset="0%" stop-color="#fde2a8" stop-opacity="0.8"/>
+      <stop offset="55%" stop-color="#fbc46a" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#fbc46a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" fill="url(#sky)"/>
+  <rect width="64" height="64" fill="url(#sunGlow)"/>
+  <rect x="6" y="40" width="52" height="2" fill="#fde9b8" opacity="0.85"/>
+  <rect x="14" y="42.6" width="36" height="1.2" fill="#fde9b8" opacity="0.55"/>
+  <path d="M 0 50 L 0 64 L 64 64 L 64 49 L 50 50 L 34 48.5 L 20 50 L 8 49 Z" fill="#0a0402"/>
+  <g transform="translate(2 4) scale(2.5)" fill="#0a0402" fill-rule="evenodd">
+    <path d="M19.44 9.03 L15.41 5 H11 v2 h3.59 l2 2 H5 c-2.8 0 -5 2.2 -5 5 s2.2 5 5 5 c2.46 0 4.45 -1.69 4.9 -4 h1.65 l2.77 -2.77 c-0.21 0.54 -0.32 1.14 -0.32 1.77 0 2.8 2.2 5 5 5 s5 -2.2 5 -5 c0 -2.65 -1.97 -4.77 -4.56 -4.97 z M7.82 15 C7.4 16.15 6.28 17 5 17 c-1.63 0 -3 -1.37 -3 -3 s1.37 -3 3 -3 c1.28 0 2.4 0.85 2.82 2 H5 v2 h2.82 z M19 17 c-1.66 0 -3 -1.34 -3 -3 s1.34 -3 3 -3 3 1.34 3 3 -1.34 3 -3 3 z"/>
+  </g>
+</svg>
