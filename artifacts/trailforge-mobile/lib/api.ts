@@ -52,8 +52,7 @@ export async function apiFetch(
     if (token) {
       headers.set("authorization", `Bearer ${token}`);
     } else if (!opts.allowAnonymous) {
-      // Don't fire a request that's guaranteed to 401 — surface the
-      // problem early so the UI can prompt for sign-in.
+      // No token — fail fast so the UI can prompt for sign-in.
       throw new Error("Not signed in");
     }
   }
@@ -187,10 +186,7 @@ export interface RecentlyRiddenTrail {
 export async function listRecentlyRidden(): Promise<{
   trails: RecentlyRiddenTrail[];
 }> {
-  // The API exposes completions; we hydrate trail details client-side
-  // via the bbox/id-filter trail search endpoint so the user sees real
-  // names and stats (not raw trail ids). Falls back to an empty list
-  // when the completions table isn't yet provisioned (404).
+  // Hydrate trail details client-side from the ids-filter search.
   let completionRows: Array<{ trailId: string; completedAt: string }>;
   try {
     const res = await listCompletions();
@@ -200,9 +196,7 @@ export async function listRecentlyRidden(): Promise<{
   }
   if (completionRows.length === 0) return { trails: [] };
 
-  // Hydrate metadata in one batch via the existing ids-filter on
-  // /api/trails/search. If hydration fails, surface stubs so the user
-  // still sees their ride history.
+  // If hydration fails, surface stubs so ride history still shows.
   let nameById = new Map<
     string,
     { name: string; difficulty: string | null; distance_km: number | null }
@@ -278,9 +272,7 @@ export async function askAi(
     message?: string;
     citations?: AiChatResponse["citations"];
   }>("/api/ai/chat", { method: "POST", body: JSON.stringify(body) });
-  // The server has shipped under both `reply` and `message` keys at
-  // various points — accept either so a transient API contract drift
-  // doesn't blank out the AI tab.
+  // Accept either `reply` or `message` for backwards compat.
   return {
     reply: raw.reply ?? raw.message ?? "",
     citations: raw.citations,
@@ -661,17 +653,27 @@ export function revokeAdmin(userId: string): Promise<unknown> {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Community trails feed (Discover) + trail content (notes / amendments) +
-// share-to-group action. The web's Discover lists *trails* with a
-// BOATs/Green Lanes/Featured/Nearby filter ribbon; the mobile Discover
-// now mirrors that. None of these endpoints are in the OpenAPI spec yet,
-// so we hit them via apiJson directly.
-// ---------------------------------------------------------------------------
+export interface DirectoryUser {
+  user_id: string;
+  email: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+}
+
+export function searchDirectoryUsers(
+  query: string,
+  limit = 25,
+): Promise<{ items: DirectoryUser[]; total?: number }> {
+  const qs = new URLSearchParams({
+    query: query.trim(),
+    limit: String(limit),
+  });
+  return apiJson(`/api/admin/users?${qs.toString()}`);
+}
+
+// Community trails (Discover), trail notes / amendments, and share-to-group.
 
 export async function fetchCommunityTrails(): Promise<{ trails: MapTrail[] }> {
-  // The bbox-search route returns rows ordered by name when no bbox is
-  // given. Limit hard so the JSON is tractable on 4G.
   return apiJson<{ trails: MapTrail[] }>("/api/trails/search?limit=120");
 }
 

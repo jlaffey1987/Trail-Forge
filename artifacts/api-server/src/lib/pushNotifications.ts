@@ -51,21 +51,22 @@ interface ExpoPushResponse {
  * `DeviceNotRegistered` (the Expo equivalent of HTTP 410). Never throws —
  * any network failure is reported via `log.warn` and treated as a no-op.
  */
-async function sendExpoPushBatch(
+// Expo Push API caps each request at 100 messages — larger payloads are
+// rejected. Chunk the input and reconcile tickets positionally so the
+// caller still gets one ticket per input token in input order.
+const EXPO_PUSH_CHUNK = 100;
+
+async function sendExpoPushChunk(
   tokens: string[],
   payload: PushPayload,
   log: MinimalLogger,
 ): Promise<ExpoPushTicket[]> {
   if (tokens.length === 0) return [];
-  // Expo accepts up to 100 messages per request. We send each device its
-  // own message so a per-token error doesn't poison the whole batch.
   const messages = tokens.map((to) => ({
     to,
     title: payload.title,
     body: payload.body,
     sound: "default" as const,
-    // Stash the deep-link target + tag in `data` so the mobile client's
-    // notification-tap handler can route into the right screen.
     data: { url: payload.url, tag: payload.tag ?? null },
   }));
   let res: Response;
@@ -81,28 +82,49 @@ async function sendExpoPushBatch(
     });
   } catch (err) {
     log.warn({ err, count: tokens.length }, "push: expo fetch failed");
-    return [];
+    return tokens.map(() => null as unknown as ExpoPushTicket);
   }
   if (!res.ok) {
     log.warn(
       { status: res.status, count: tokens.length },
       "push: expo non-2xx",
     );
-    return [];
+    return tokens.map(() => null as unknown as ExpoPushTicket);
   }
   let parsed: ExpoPushResponse;
   try {
     parsed = (await res.json()) as ExpoPushResponse;
   } catch (err) {
     log.warn({ err }, "push: expo body parse failed");
-    return [];
+    return tokens.map(() => null as unknown as ExpoPushTicket);
   }
   if (parsed.errors && parsed.errors.length > 0) {
     log.warn({ errors: parsed.errors }, "push: expo top-level errors");
   }
   const data = parsed.data;
-  if (!data) return [];
-  return Array.isArray(data) ? data : [data];
+  if (!data) return tokens.map(() => null as unknown as ExpoPushTicket);
+  const arr = Array.isArray(data) ? data : [data];
+  // Pad to chunk length so positional reconciliation in the caller stays
+  // aligned even when Expo returns fewer entries than we sent.
+  while (arr.length < tokens.length) {
+    arr.push(null as unknown as ExpoPushTicket);
+  }
+  return arr;
+}
+
+async function sendExpoPushBatch(
+  tokens: string[],
+  payload: PushPayload,
+  log: MinimalLogger,
+): Promise<ExpoPushTicket[]> {
+  if (tokens.length === 0) return [];
+  const out: ExpoPushTicket[] = [];
+  for (let i = 0; i < tokens.length; i += EXPO_PUSH_CHUNK) {
+    const chunk = tokens.slice(i, i + EXPO_PUSH_CHUNK);
+    const tickets = await sendExpoPushChunk(chunk, payload, log);
+    out.push(...tickets);
+  }
+  return out;
 }
 
 export interface PushPayload {

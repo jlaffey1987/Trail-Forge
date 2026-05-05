@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
-import { getAuth } from "@clerk/express";
+import { clerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
@@ -117,6 +117,7 @@ router.get("/admin/whoami", async (req, res) => {
   if (!auth.userId) {
     res.json({
       isAdmin: false,
+      isModerator: false,
       signedIn: false,
       state: "signed-out",
       code: "ADMIN_FORBIDDEN",
@@ -126,8 +127,11 @@ router.get("/admin/whoami", async (req, res) => {
   }
   const state = await getAdminAccessState(auth.userId);
   const explainer = explainAdminAccess(state);
+  const isAdmin = state.kind === "admin";
   res.json({
-    isAdmin: state.kind === "admin",
+    isAdmin,
+    // Mobile reads `isModerator`; keep both for web/mobile parity.
+    isModerator: isAdmin,
     signedIn: true,
     userId: auth.userId,
     state: state.kind,
@@ -256,6 +260,38 @@ router.post(
       return;
     }
     res.json(data);
+  }),
+);
+
+router.get(
+  "/admin/users",
+  requireAdmin(async (req, res) => {
+    const query = String(req.query.query ?? "").trim();
+    const limit = Math.min(
+      Math.max(Number(req.query.limit ?? 25) || 25, 1),
+      50,
+    );
+    try {
+      const result = await clerkClient.users.getUserList({
+        query: query || undefined,
+        limit,
+        orderBy: "-created_at",
+      });
+      const items = result.data.map((u) => ({
+        user_id: u.id,
+        email: u.primaryEmailAddress?.emailAddress ?? null,
+        display_name:
+          [u.firstName, u.lastName].filter(Boolean).join(" ") ||
+          u.username ||
+          u.primaryEmailAddress?.emailAddress ||
+          null,
+        avatar_url: u.imageUrl ?? null,
+      }));
+      res.json({ items, total: result.totalCount });
+    } catch (err) {
+      req.log?.warn?.({ err }, "admin/users: clerk lookup failed");
+      res.status(502).json({ error: "User directory lookup failed" });
+    }
   }),
 );
 

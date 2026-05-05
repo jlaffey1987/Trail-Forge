@@ -1,23 +1,10 @@
 /**
- * Single-trail detail screen. Fetched via the bbox/id-filter trail
- * search (the API doesn't yet expose a get-by-id route in the spec).
- *
- * When opened from the Trails tab the URL carries `?ids=a,b,c,d` —
- * those siblings power the prev/next navigation buttons so the user
- * can flip through their saved trails without bouncing back to the
- * list each time.
- *
- * Sections shown:
- *   - Header w/ name, difficulty pill, terrain, legal status (BOAT,
- *     Green Lane, etc — the same UK access taxonomy the web uses)
- *   - Distance + elevation stats
- *   - Elevation chart (when altitude samples exist)
- *   - Community notes (recent five)
- *   - Amendments badge (count of pending amendments)
- *   - Share-to-groups action (opens a multi-select modal of My Groups)
+ * Single-trail detail screen. Header, stats, elevation chart, photo
+ * gallery, community notes, amendments, and share-to-groups action.
  */
 import { Feather } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Image } from "expo-image";
 import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -239,6 +226,29 @@ export default function TrailDetailScreen() {
         </View>
       ) : null}
 
+      {Array.isArray(trail.photo_urls) && trail.photo_urls.length > 0 ? (
+        <View style={{ marginTop: 22 }}>
+          <Text style={styles.sectionLabel}>
+            Photos ({trail.photo_urls.length})
+          </Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: 8, paddingVertical: 6 }}
+          >
+            {trail.photo_urls.map((url) => (
+              <Image
+                key={url}
+                source={{ uri: url }}
+                style={styles.photo}
+                contentFit="cover"
+                transition={200}
+              />
+            ))}
+          </ScrollView>
+        </View>
+      ) : null}
+
       <View style={{ marginTop: 22 }}>
         <Text style={styles.sectionLabel}>Community notes</Text>
         {notesQ.isLoading ? (
@@ -291,10 +301,7 @@ function ShareToGroupsModal({
     queryFn: listMyGroups,
     enabled: visible,
   });
-  // Pre-load the trail's existing shares so the user sees what's already
-  // selected and can't accidentally remove every share by opening the
-  // modal and tapping Share. 403 means the caller isn't the owner — in
-  // that case we just leave the picker empty (the PUT will 403 too).
+  // Pre-load existing shares; 403 means caller isn't the owner.
   const sharesQ = useQuery({
     queryKey: ["trail-shares", trailId],
     queryFn: () => listTrailShares(trailId).catch(() => ({ items: [] })),
@@ -561,6 +568,12 @@ const styles = StyleSheet.create({
   },
   noteBody: { color: colors.light.foreground, fontSize: 13 },
   muted: { color: colors.light.mutedForeground, fontSize: 13, marginTop: 4 },
+  photo: {
+    width: 200,
+    height: 140,
+    borderRadius: 10,
+    backgroundColor: colors.light.muted,
+  },
   modalScrim: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",

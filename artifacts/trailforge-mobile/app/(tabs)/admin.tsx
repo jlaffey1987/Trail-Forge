@@ -33,7 +33,9 @@ import {
   listDiscoveredTrails,
   rejectDiscoveredTrail,
   revokeAdmin,
+  searchDirectoryUsers,
   type AdminUser,
+  type DirectoryUser,
   type DiscoveredTrail,
 } from "@/lib/api";
 
@@ -298,15 +300,13 @@ function AdminActivityPanel() {
 function AdminUsersPanel() {
   const qc = useQueryClient();
   const adminsQ = useQuery({ queryKey: ["admin-users"], queryFn: listAdmins });
-  const [newUserId, setNewUserId] = useState("");
-  const [newNote, setNewNote] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const grantMut = useMutation({
     mutationFn: ({ userId, note }: { userId: string; note?: string }) =>
       grantAdmin(userId, note),
     onSuccess: () => {
-      setNewUserId("");
-      setNewNote("");
+      setPickerOpen(false);
       void qc.invalidateQueries({ queryKey: ["admin-users"] });
     },
     onError: (err) =>
@@ -361,40 +361,19 @@ function AdminUsersPanel() {
         <View style={{ marginBottom: 14 }}>
           <Text style={styles.sectionTitle}>Grant admin access</Text>
           <Text style={styles.body}>
-            Paste the user id of someone you want to make a moderator.
+            Search the user directory and pick someone to promote.
           </Text>
-          <TextInput
-            value={newUserId}
-            onChangeText={setNewUserId}
-            placeholder="user_xxx"
-            placeholderTextColor={colors.light.mutedForeground}
-            style={styles.modalInput}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TextInput
-            value={newNote}
-            onChangeText={setNewNote}
-            placeholder="Note (optional)"
-            placeholderTextColor={colors.light.mutedForeground}
-            style={styles.modalInput}
-          />
           <TouchableOpacity
-            disabled={grantMut.isPending || !newUserId.trim()}
-            onPress={() =>
-              grantMut.mutate({
-                userId: newUserId.trim(),
-                note: newNote.trim() || undefined,
-              })
-            }
-            style={[
-              styles.btn,
-              { marginTop: 12 },
-              (grantMut.isPending || !newUserId.trim()) && { opacity: 0.5 },
-            ]}
+            onPress={() => setPickerOpen(true)}
+            style={[styles.btn, { marginTop: 12 }]}
           >
-            <Text style={styles.btnText}>
-              {grantMut.isPending ? "Granting…" : "Grant"}
+            <Feather
+              name="user-plus"
+              size={14}
+              color={colors.light.primaryForeground}
+            />
+            <Text style={[styles.btnText, { marginLeft: 6 }]}>
+              Find user…
             </Text>
           </TouchableOpacity>
 
@@ -456,7 +435,144 @@ function AdminUsersPanel() {
           </TouchableOpacity>
         </View>
       )}
+      ListFooterComponent={
+        <UserPickerModal
+          visible={pickerOpen}
+          onDismiss={() => setPickerOpen(false)}
+          onPick={(u, note) =>
+            grantMut.mutate({ userId: u.user_id, note })
+          }
+          busy={grantMut.isPending}
+        />
+      }
     />
+  );
+}
+
+function UserPickerModal({
+  visible,
+  onDismiss,
+  onPick,
+  busy,
+}: {
+  visible: boolean;
+  onDismiss: () => void;
+  onPick: (user: DirectoryUser, note?: string) => void;
+  busy: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [picked, setPicked] = useState<DirectoryUser | null>(null);
+  const [note, setNote] = useState("");
+
+  React.useEffect(() => {
+    if (!visible) {
+      setQuery("");
+      setDebounced("");
+      setPicked(null);
+      setNote("");
+      return;
+    }
+    const t = setTimeout(() => setDebounced(query.trim()), 280);
+    return () => clearTimeout(t);
+  }, [query, visible]);
+
+  const usersQ = useQuery({
+    queryKey: ["directory-users", debounced],
+    queryFn: () => searchDirectoryUsers(debounced, 25),
+    enabled: visible && debounced.length > 0,
+  });
+  const results = usersQ.data?.items ?? [];
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onDismiss}
+    >
+      <View style={styles.modalScrim}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Pick a user</Text>
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Name, email, or username"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={styles.modalInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {usersQ.isFetching ? (
+            <ActivityIndicator color={colors.light.primary} />
+          ) : null}
+          <FlatList
+            data={results}
+            keyExtractor={(u) => u.user_id}
+            style={{ maxHeight: 240 }}
+            ListEmptyComponent={
+              !usersQ.isFetching ? (
+                <Text style={styles.empty}>
+                  {debounced
+                    ? "No matches."
+                    : "Start typing to search."}
+                </Text>
+              ) : null
+            }
+            renderItem={({ item }) => {
+              const isPicked = picked?.user_id === item.user_id;
+              return (
+                <TouchableOpacity
+                  onPress={() => setPicked(item)}
+                  style={[
+                    styles.userRow,
+                    isPicked && styles.userRowSelected,
+                  ]}
+                >
+                  <Text style={styles.cardTitle}>
+                    {item.display_name ?? item.email ?? item.user_id}
+                  </Text>
+                  {item.email ? (
+                    <Text style={styles.cardMeta}>{item.email}</Text>
+                  ) : null}
+                </TouchableOpacity>
+              );
+            }}
+          />
+          {picked ? (
+            <TextInput
+              value={note}
+              onChangeText={setNote}
+              placeholder="Note (optional)"
+              placeholderTextColor={colors.light.mutedForeground}
+              style={styles.modalInput}
+            />
+          ) : null}
+          <View style={[styles.actions, { marginTop: 8 }]}>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.rejectBtn]}
+              onPress={onDismiss}
+              disabled={busy}
+            >
+              <Text style={styles.actionTextDark}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.actionBtn,
+                styles.approveBtn,
+                (!picked || busy) && { opacity: 0.5 },
+              ]}
+              disabled={!picked || busy}
+              onPress={() => picked && onPick(picked, note.trim() || undefined)}
+            >
+              <Text style={styles.actionTextLight}>
+                {busy ? "Granting…" : "Grant admin"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -716,6 +832,14 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.4,
   },
+  userRow: {
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.light.border,
+  },
+  userRowSelected: { backgroundColor: colors.light.muted },
   empty: {
     color: colors.light.mutedForeground,
     fontSize: 13,
