@@ -79,15 +79,8 @@ function trailMatchesCategory(
   c: TrailCategory,
   near: { lat: number; lon: number } | null,
 ): boolean {
-  if (c === "All") return true;
-  // "Featured" is approximated as well-described public trails — the API
-  // doesn't yet expose a featured flag, so we use "has photos OR a
-  // measured distance" as the proxy. Web parity item.
-  if (c === "Featured")
-    return (
-      (t.photo_urls?.length ?? 0) > 0 ||
-      (typeof t.distance_km === "number" && t.distance_km > 0)
-    );
+  // Mirrors web's DiscoverTab filter: only BOATs / Green Lanes / Nearby
+  // narrow the list. "All" and "Featured" both fall through to true.
   if (c === "BOATs") return t.legal_status === "BOAT";
   if (c === "Green Lanes") return t.legal_status === "Green Lane";
   if (c === "Nearby") {
@@ -156,10 +149,7 @@ export default function DiscoverTab() {
       ),
   });
 
-  // Community trails — the headline content of Discover, mirroring the
-  // web. We pull a single page (limit=120 server-side) and filter
-  // locally; the Featured/BOATs/Green Lanes/Nearby ribbon is purely a
-  // client-side filter so chip-flipping is instant.
+  // Community trails — single page (limit=120), filtered locally.
   const trailsQ = useQuery({
     queryKey: ["community-trails"],
     queryFn: fetchCommunityTrails,

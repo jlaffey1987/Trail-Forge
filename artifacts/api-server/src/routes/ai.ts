@@ -1379,6 +1379,53 @@ router.post(
   }),
 );
 
+// ---------------------------------------------------------------------------
+// Admin activity feed — recent moderation decisions on AI-discovered trails.
+// Server-side merge of approved + rejected so clients (web + mobile) receive
+// a single ordered audit-log feed without duplicating sort/dedup logic.
+// ---------------------------------------------------------------------------
+router.get(
+  "/admin/activity",
+  requireAdmin(async (req, res) => {
+    const limit = Math.min(
+      Math.max(Number(req.query.limit ?? 50) || 50, 1),
+      200,
+    );
+    const supa = getSupabaseAdmin();
+    const { data, error } = await supa
+      .from("ai_discovered_trails")
+      .select(
+        "id, status, extracted_name, region, ai_grade, source_url, source, created_at, updated_at",
+      )
+      .in("status", ["approved", "rejected"])
+      .order("updated_at", { ascending: false, nullsFirst: false })
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) {
+      if (isMissingTableError(error)) {
+        res.json({
+          items: [],
+          note: "ai_discovered_trails table missing — apply migration 0007",
+        });
+        return;
+      }
+      res.status(500).json({ error: "Failed to load admin activity" });
+      return;
+    }
+    const items = (data ?? []).map((row: Record<string, unknown>) => ({
+      id: String(row.id),
+      status: String(row.status) as "approved" | "rejected",
+      name: (row.extracted_name as string | null) ?? null,
+      region: (row.region as string | null) ?? null,
+      difficulty: (row.ai_grade as string | null) ?? null,
+      source: (row.source as string | null) ?? null,
+      source_url: (row.source_url as string | null) ?? null,
+      created_at: String(row.updated_at ?? row.created_at),
+    }));
+    res.json({ items });
+  }),
+);
+
 // silence the never-used helper warning when migration 0007 isn't applied yet
 void computeRouteStats;
 

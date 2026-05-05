@@ -29,11 +29,13 @@ import {
   adminWhoami,
   approveDiscoveredTrail,
   grantAdmin,
+  listAdminActivity,
   listAdmins,
   listDiscoveredTrails,
   rejectDiscoveredTrail,
   revokeAdmin,
   searchDirectoryUsers,
+  type AdminActivityEntry,
   type AdminUser,
   type DirectoryUser,
   type DiscoveredTrail,
@@ -196,52 +198,32 @@ export default function AdminScreen() {
 }
 
 function AdminActivityPanel() {
-  // No dedicated audit-log endpoint exists yet; merge approved + rejected
-  // discovered-trails as a recent-decisions feed.
-  const approvedQ = useQuery({
-    queryKey: ["admin-activity", "approved"],
-    queryFn: () => listDiscoveredTrails("approved"),
+  // Server returns a pre-merged moderation feed via GET /api/admin/activity.
+  const activityQ = useQuery({
+    queryKey: ["admin-activity"],
+    queryFn: () => listAdminActivity(50),
   });
-  const rejectedQ = useQuery({
-    queryKey: ["admin-activity", "rejected"],
-    queryFn: () => listDiscoveredTrails("rejected"),
-  });
-  const isLoading = approvedQ.isLoading || rejectedQ.isLoading;
-  const isFetching = approvedQ.isFetching || rejectedQ.isFetching;
-
-  const feed = React.useMemo(() => {
-    const a = approvedQ.data?.items ?? [];
-    const r = rejectedQ.data?.items ?? [];
-    return [...a, ...r].sort(
-      (x, y) =>
-        new Date(y.created_at).getTime() - new Date(x.created_at).getTime(),
-    );
-  }, [approvedQ.data, rejectedQ.data]);
-
-  function refresh() {
-    void approvedQ.refetch();
-    void rejectedQ.refetch();
-  }
+  const items: AdminActivityEntry[] = activityQ.data?.items ?? [];
 
   return (
     <FlatList
-      data={feed}
+      data={items}
       keyExtractor={(d) => `${d.status}-${d.id}`}
       contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
       refreshControl={
         <RefreshControl
-          refreshing={isFetching}
-          onRefresh={refresh}
+          refreshing={activityQ.isFetching}
+          onRefresh={() => void activityQ.refetch()}
           tintColor={colors.light.primary}
         />
       }
       ListHeaderComponent={
         <Text style={[styles.note, { paddingHorizontal: 0, marginBottom: 8 }]}>
-          Recent moderation decisions on AI-discovered trails. Pull to refresh.
+          Recent moderation decisions. Pull to refresh.
         </Text>
       }
       ListEmptyComponent={
-        isLoading ? (
+        activityQ.isLoading ? (
           <ActivityIndicator color={colors.light.primary} />
         ) : (
           <Text style={styles.empty}>No moderation activity yet.</Text>

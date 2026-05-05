@@ -669,6 +669,23 @@ export function searchDirectoryUsers(
   return apiJson(`/api/admin/users?${qs.toString()}`);
 }
 
+export interface AdminActivityEntry {
+  id: string;
+  status: "approved" | "rejected";
+  name: string | null;
+  region: string | null;
+  difficulty: string | null;
+  source: string | null;
+  source_url: string | null;
+  created_at: string;
+}
+
+export function listAdminActivity(
+  limit = 50,
+): Promise<{ items: AdminActivityEntry[]; note?: string }> {
+  return apiJson(`/api/admin/activity?limit=${limit}`);
+}
+
 // Community trails (Discover), trail notes / amendments, and share-to-group.
 
 export async function fetchCommunityTrails(): Promise<{ trails: MapTrail[] }> {
