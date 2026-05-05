@@ -1625,7 +1625,7 @@ ${trkpts}
                     <span className="w-2.5 h-2.5 border border-cyan-500/40 border-t-cyan-400 rounded-full animate-spin" />
                   )}
                   <span>
-                    <span className="text-cyan-300">{routeTrails.length}</span> trail{routeTrails.length !== 1 ? "s" : ""}
+                    Editing route — <span className="text-cyan-300">{routeTrails.length}</span> trail{routeTrails.length !== 1 ? "s" : ""}
                   </span>
                 </span>
                 <button
