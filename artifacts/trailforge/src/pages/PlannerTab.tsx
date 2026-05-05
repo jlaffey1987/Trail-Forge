@@ -1327,6 +1327,7 @@ export default function PlannerTab() {
               onAddWaypoint={handleAddWaypoint}
               onRemoveWaypoint={handleRemoveWaypoint}
               routeCorridorPoints={routeCorridorPoints}
+              onViewDetails={setDetailTrail}
             />
           </div>
         )}

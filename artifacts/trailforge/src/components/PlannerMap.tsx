@@ -72,6 +72,14 @@ interface Props {
    * few km of the route) instead of the visible bbox mode.
    */
   routeCorridorPoints?: Array<{ lat: number; lng: number }>;
+  /**
+   * Called when the rider taps a trail's row body in the multi-trail
+   * cluster bottom sheet. The parent should open its TrailDetailSheet
+   * for the chosen trail. Distinct from `onToggle`, which the per-row
+   * "+ Route" button still calls. When omitted, the row body tap
+   * falls back to the route toggle (legacy behaviour).
+   */
+  onViewDetails?: (trail: Trail) => void;
 }
 
 const FUEL_COLOR = "#3b82f6";
@@ -119,6 +127,7 @@ export default function PlannerMap({
   onAddWaypoint,
   onRemoveWaypoint,
   routeCorridorPoints,
+  onViewDetails,
 }: Props) {
   // Callback ref so the init effect re-fires the moment the container actually
   // mounts. The component does an early return when nothing to show, so the
@@ -169,6 +178,11 @@ export default function PlannerMap({
   // parent re-render that creates a new toggle closure).
   const onToggleRef = useRef(onToggle);
   onToggleRef.current = onToggle;
+  // Same trick for the optional "view details" callback so the cluster
+  // sheet can call the current parent closure without re-mounting on
+  // every render.
+  const onViewDetailsRef = useRef(onViewDetails);
+  onViewDetailsRef.current = onViewDetails;
 
   useEffect(() => {
     if (window.L) { setLeafletLoaded(true); return undefined; }
@@ -878,22 +892,34 @@ export default function PlannerMap({
           `overflow-hidden` panel (the collapsible map card) doesn't clip
           the bottom sheet to the 320px map area. The sheet is the same
           component the Map tab uses; we drive it controlled-mode via
-          `selectedIds` + `onToggleTrail` so taps call PlannerTab's
-          `onToggle` (which carries planner-specific guards).
+          `selectedIds` + `onToggleTrail` so the per-row "+ Route" button
+          calls PlannerTab's `onToggle` (which carries planner-specific
+          guards).
 
-          Row-tap semantics differ from MapTab on purpose: the Planner has
-          no trail-detail sheet to open, so we map both the row body and
-          the per-row "+ Route" button to `onToggle` — the primary action
-          here is "add to route", not "view details". The sheet stays
-          open so the rider can add several trails from the cluster in
-          one go without re-opening it. */}
+          Row-tap semantics:
+          - Row body (`onSelectTrail`) → opens the parent's TrailDetailSheet
+            via `onViewDetails` so the rider can read the description /
+            elevation chart / photos before committing the trail to the
+            route. Falls back to `onToggle` when the parent didn't wire
+            up details (legacy behaviour).
+          - "+ Route" button (`onToggleTrail`) → still toggles the route
+            independently, so a rider who already knows the trail can
+            add it without opening the detail sheet.
+          The cluster sheet stays mounted underneath the detail sheet (it
+          sits at z-1400, the detail sheet at z-1500), so closing the
+          detail sheet returns the rider to the cluster sheet with the
+          route state intact. */}
       {activeCluster && typeof document !== "undefined" &&
         createPortal(
           <ClusterTrailListSheet
             trails={clusterTrailsForSheet}
             selectedIds={selectedIdSet}
             onToggleTrail={(trail) => onToggleRef.current(trail)}
-            onSelectTrail={(trail) => onToggleRef.current(trail)}
+            onSelectTrail={(trail) => {
+              const view = onViewDetailsRef.current;
+              if (view) view(trail);
+              else onToggleRef.current(trail);
+            }}
             onZoomToArea={() => {
               const c = activeCluster;
               setActiveCluster(null);
