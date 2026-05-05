@@ -923,6 +923,236 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// Scan-skip retry — re-attempt pending ai_scan_skips rows. As OSM coverage
+// improves over time, posts the scanner previously gave up on may now snap to
+// a real track. Each pending row is re-fetched, re-extracted, and (if the
+// extraction now yields geometry) queued as an ai_discovered_trail and the
+// skip is marked resolved with note "auto-resolved on rescan". Rows that
+// still can't be resolved have their last_seen_at / seen_count bumped so
+// moderators can see they were re-checked.
+// ---------------------------------------------------------------------------
+export interface ScanSkipRetryResult {
+  scanned: number;
+  resolved: number;
+  stillSkipped: number;
+  errors: string[];
+  note?: string;
+}
+
+export async function runScanSkipRetry(opts?: { limit?: number }): Promise<ScanSkipRetryResult> {
+  const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from("ai_scan_skips")
+    .select("id, source_url, source_label, extracted_name, seen_count")
+    .eq("status", "pending")
+    .order("last_seen_at", { ascending: true })
+    .limit(limit);
+  if (error) {
+    if (isMissingTableError(error)) {
+      return {
+        scanned: 0,
+        resolved: 0,
+        stillSkipped: 0,
+        errors: [],
+        note: "ai_scan_skips table missing — apply migration 0020",
+      };
+    }
+    return { scanned: 0, resolved: 0, stillSkipped: 0, errors: [error.message] };
+  }
+  const rows = (data ?? []) as Array<{
+    id: string;
+    source_url: string;
+    source_label: string | null;
+    extracted_name: string | null;
+    seen_count: number | null;
+  }>;
+  let resolved = 0;
+  let stillSkipped = 0;
+  const errors: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const row of rows) {
+    try {
+      const html = await fetchForumPost(row.source_url);
+      if (!html) {
+        await bumpSkipUnresolved(supa, row.id, row.seen_count, now, "post unreachable");
+        stillSkipped++;
+        continue;
+      }
+      const extracted = await extractTrailFromForumPost(html, row.source_url);
+      if (!extracted) {
+        await bumpSkipUnresolved(supa, row.id, row.seen_count, now, "no trail content extracted");
+        stillSkipped++;
+        continue;
+      }
+
+      let waypoints: GpxPoint[] = [];
+      let bbox = null as ReturnType<typeof bboxFromPoints>;
+      let aiSource: "ai-forum" | "ai-approx" = "ai-approx";
+      let gpxData: unknown = null;
+      if (extracted.gpxUrl) {
+        const gpx = await fetchAndParseGpxUrl(extracted.gpxUrl);
+        if (gpx) {
+          waypoints = gpx.waypoints;
+          bbox = bboxFromPoints(waypoints);
+          gpxData = gpx.gpxText;
+          aiSource = "ai-forum";
+        }
+      }
+      if (waypoints.length === 0 && extracted.location) {
+        const approx = await approximateTrackFromLocation(extracted.location);
+        if (approx) {
+          waypoints = approx.waypoints;
+          bbox = approx.bbox;
+          gpxData = buildGpxFromWaypoints(extracted.trailName ?? "AI-discovered trail", waypoints);
+        }
+      }
+
+      if (waypoints.length < 2 || !bbox) {
+        await bumpSkipUnresolved(
+          supa,
+          row.id,
+          row.seen_count,
+          now,
+          "no GPX and no nearby OSM track to snap to",
+        );
+        stillSkipped++;
+        continue;
+      }
+
+      // Avoid double-queuing if a discovery row was created in the meantime.
+      const { data: existing } = await supa
+        .from("ai_discovered_trails")
+        .select("id")
+        .eq("source_url", row.source_url)
+        .maybeSingle();
+      if (existing) {
+        await markSkipResolved(supa, row.id, now, "auto-resolved on rescan");
+        resolved++;
+        continue;
+      }
+
+      // Bbox + name dedupe against existing live trails.
+      if (extracted.trailName && bbox) {
+        const match = await findExistingTrailMatch(supa, {
+          name: extracted.trailName,
+          bbox,
+        });
+        if (match) {
+          await markSkipResolved(supa, row.id, now, "auto-resolved on rescan");
+          resolved++;
+          continue;
+        }
+      }
+
+      let aiGrade: number | null = extracted.difficulty;
+      let aiRationale: string | null = null;
+      try {
+        const g = await gradeTrailWithAI({
+          name: extracted.trailName ?? "AI-discovered trail",
+          legalStatus: null,
+          terrain: extracted.surface,
+          description: extracted.summary,
+          source: aiSource,
+          sourceUrl: row.source_url,
+          waypoints,
+        });
+        aiGrade = g.grade;
+        aiRationale = g.rationale;
+      } catch {
+        /* keep extracted grade */
+      }
+
+      const { error: insErr } = await supa.from("ai_discovered_trails").insert({
+        source: aiSource,
+        source_url: row.source_url,
+        source_title: row.source_label,
+        extracted_name: extracted.trailName,
+        extracted_location: extracted.location,
+        extracted_summary: extracted.summary,
+        extracted_difficulty: extracted.difficulty,
+        extracted_surface: extracted.surface,
+        gpx_data: gpxData,
+        bbox_min_lat: bbox.minLat,
+        bbox_max_lat: bbox.maxLat,
+        bbox_min_lng: bbox.minLng,
+        bbox_max_lng: bbox.maxLng,
+        ai_grade: aiGrade,
+        ai_grade_rationale: aiRationale,
+      });
+      if (insErr) {
+        if (isMissingTableError(insErr)) {
+          errors.push("ai_discovered_trails table missing — apply migration 0007");
+          break;
+        }
+        errors.push(`insert failed for ${row.source_url}: ${insErr.message}`);
+        stillSkipped++;
+        continue;
+      }
+
+      await markSkipResolved(supa, row.id, now, "auto-resolved on rescan");
+      resolved++;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : "skip retry failed");
+      stillSkipped++;
+    }
+  }
+
+  return { scanned: rows.length, resolved, stillSkipped, errors };
+}
+
+async function markSkipResolved(
+  supa: ReturnType<typeof getSupabaseAdmin>,
+  id: string,
+  now: string,
+  note: string,
+): Promise<void> {
+  const { error } = await supa
+    .from("ai_scan_skips")
+    .update({
+      status: "resolved",
+      resolved_at: now,
+      resolved_by: "scheduler",
+      resolved_note: note,
+      last_seen_at: now,
+    })
+    .eq("id", id);
+  if (error) {
+    logger.error({ err: error, id }, "ai_scan_skips resolve failed");
+  }
+}
+
+async function bumpSkipUnresolved(
+  supa: ReturnType<typeof getSupabaseAdmin>,
+  id: string,
+  seenCount: number | null,
+  now: string,
+  reason: string,
+): Promise<void> {
+  const { error } = await supa
+    .from("ai_scan_skips")
+    .update({
+      last_seen_at: now,
+      seen_count: (seenCount ?? 0) + 1,
+      reason,
+    })
+    .eq("id", id);
+  if (error) {
+    logger.error({ err: error, id }, "ai_scan_skips bump failed");
+  }
+}
+
+router.post(
+  "/admin/ai-scan-skips/retry",
+  requireAdmin(async (req, res) => {
+    const limit = Number(req.query.limit ?? 50) || 50;
+    const result = await runScanSkipRetry({ limit });
+    res.json(result);
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Forum source CRUD (admin)
 // ---------------------------------------------------------------------------
 router.get(
