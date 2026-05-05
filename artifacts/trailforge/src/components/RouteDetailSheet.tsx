@@ -22,7 +22,11 @@ import {
   setRouteEntries,
   setActiveLoadedRoute,
 } from "@/lib/plannerRouteStore";
-import type { RouteEntry } from "@/lib/routing";
+import {
+  HYBRID_LABEL_TILE_ATTRIBUTION,
+  HYBRID_LABEL_TILE_URL,
+  type RouteEntry,
+} from "@/lib/routing";
 
 // Mirror the global declaration pattern used in PlannerMap.tsx so
 // `window.L` is typed against the installed `@types/leaflet` instead
@@ -139,10 +143,21 @@ export default function RouteDetailSheet({ routeId, initial, onClose }: Props) {
         attributionControl: false,
         scrollWheelZoom: false,
       }).setView([54, -2], 6);
+      // Mirror PlannerMap's tile setup so the preview pulls from the same
+      // Esri satellite + hybrid label sources as the rest of the app. The
+      // service worker (`public/sw.js`) caches `server.arcgisonline.com`
+      // tiles, so a route the rider has already viewed elsewhere paints
+      // instantly here without hitting the network.
       L.tileLayer(
-        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-        { maxZoom: 19 },
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        { attribution: "Tiles © Esri", maxZoom: 19 },
       ).addTo(map);
+      L.tileLayer(HYBRID_LABEL_TILE_URL, {
+        attribution: HYBRID_LABEL_TILE_ATTRIBUTION,
+        maxZoom: 19,
+        pane: "shadowPane",
+        opacity: 0.95,
+      }).addTo(map);
       mapRef.current = map;
     }
     const map = mapRef.current;
