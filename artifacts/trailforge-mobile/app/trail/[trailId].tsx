@@ -4,7 +4,7 @@
  * Renders the same TrailDetailSheet layout used by the map tap.
  */
 import { Feather } from "@expo/vector-icons";
-import { useSearchTrails } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
 import {
@@ -18,6 +18,7 @@ import {
 
 import { ElevationChart } from "@/components/ElevationChart";
 import colors from "@/constants/colors";
+import { searchTrailsByBbox } from "@/lib/api";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 import { useWindowDimensions } from "react-native";
 
@@ -27,10 +28,15 @@ export default function TrailDetailScreen() {
   const { width } = useWindowDimensions();
 
   // Filter the search endpoint by trail id. The backend honours `ids` as
-  // a comma-separated list. If the spec ever grows a `getTrail` op, swap
-  // to that.
-  const q = useSearchTrails({ ids: id, limit: 1 } as never);
-  const trail = (q.data as { trails?: any[] } | undefined)?.trails?.[0];
+  // a comma-separated list — that param isn't yet in the OpenAPI spec,
+  // so we call the typed direct-fetch helper rather than the generated
+  // hook (which would require a spec change to accept `ids`).
+  const q = useQuery({
+    queryKey: ["trail-by-id", id],
+    queryFn: () => searchTrailsByBbox({ ids: id, limit: 1 }),
+    enabled: id.length > 0,
+  });
+  const trail = q.data?.trails?.[0];
 
   if (q.isLoading) {
     return (

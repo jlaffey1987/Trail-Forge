@@ -70,7 +70,10 @@ function RoomRow({ room }: { room: ChatRoom }) {
   return (
     <Pressable
       onPress={() =>
-        router.push(`/messages/${encodeURIComponent(room.id)}` as never)
+        router.push({
+          pathname: "/messages/[roomId]",
+          params: { roomId: room.id },
+        })
       }
       style={styles.row}
     >

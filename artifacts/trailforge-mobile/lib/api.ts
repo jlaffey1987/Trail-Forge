@@ -274,6 +274,45 @@ export interface PlannerSuggestion {
   detourMeters: number;
 }
 
+export interface MapTrail {
+  id: string;
+  name: string;
+  difficulty: string | null;
+  ai_difficulty?: string | null;
+  terrain?: string | null;
+  distance_km?: number | null;
+  elevation_gain_m?: number | null;
+  /** GPX path samples — array of [lon, lat] pairs (GeoJSON convention). */
+  path?: unknown;
+  altitudes?: number[];
+  photo_urls?: string[];
+}
+
+export interface TrailSearchResponseBbox {
+  trails: MapTrail[];
+}
+
+/**
+ * Bbox + id-filter trail search. The server's `/api/trails/search` route
+ * accepts `bbox` and `ids` params that the OpenAPI spec doesn't yet
+ * advertise, so we call it directly instead of through the generated
+ * `useSearchTrails` hook (which would require the spec to grow those
+ * fields and a regen step).
+ */
+export async function searchTrailsByBbox(params: {
+  bbox?: string;
+  ids?: string;
+  limit?: number;
+}): Promise<TrailSearchResponseBbox> {
+  const qs = new URLSearchParams();
+  if (params.bbox) qs.set("bbox", params.bbox);
+  if (params.ids) qs.set("ids", params.ids);
+  if (typeof params.limit === "number") qs.set("limit", String(params.limit));
+  return apiJson<TrailSearchResponseBbox>(
+    `/api/trails/search?${qs.toString()}`,
+  );
+}
+
 export async function getPlannerSuggestions(req: {
   fromLat: number;
   fromLon: number;

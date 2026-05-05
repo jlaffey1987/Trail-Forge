@@ -71,17 +71,19 @@ export default function PlannerTab() {
       return;
     }
     try {
+      // SaveRouteRequest only carries `name + trailIds + waypoints` per the
+      // spec — the A/B endpoints are encoded as the first/last waypoints
+      // so the route round-trips cleanly. The geocoded labels stay local
+      // (matches the web's "LOCAL-ONLY" planner endpoints rule).
       await createRoute.mutateAsync({
         data: {
           name: routeName.trim(),
-          fromLabel: from.label,
-          toLabel: to.label,
-          fromLat: from.lat,
-          fromLon: from.lon,
-          toLat: to.lat,
-          toLon: to.lon,
           trailIds: selected,
-        } as never,
+          waypoints: [
+            { id: "from", lat: from.lat, lon: from.lon, label: from.label },
+            { id: "to", lat: to.lat, lon: to.lon, label: to.label },
+          ],
+        },
       });
       Alert.alert("Saved", `Route "${routeName.trim()}" saved.`);
       setRouteName("");

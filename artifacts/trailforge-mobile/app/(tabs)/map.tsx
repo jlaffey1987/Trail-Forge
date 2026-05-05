@@ -4,7 +4,7 @@
  * visible region. Tap a polyline to open the TrailDetailSheet.
  */
 import { Feather } from "@expo/vector-icons";
-import { useSearchTrails } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 import * as Location from "expo-location";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -27,23 +27,8 @@ import {
   type TrailDetailData,
 } from "@/components/TrailDetailSheet";
 import colors from "@/constants/colors";
+import { searchTrailsByBbox, type MapTrail as ApiTrail } from "@/lib/api";
 import { difficultyColor } from "@/lib/trailColors";
-
-interface ApiTrail {
-  id: string;
-  name: string;
-  difficulty: string | null;
-  ai_difficulty?: string | null;
-  terrain?: string | null;
-  distance_km?: number | null;
-  elevation_gain_m?: number | null;
-  // GPX path samples — array of [lon, lat] pairs (GeoJSON convention) or
-  // similar. The web client normalises these in `trailLayer.ts`; we do
-  // the same here below in `extractCoords`.
-  path?: unknown;
-  altitudes?: number[];
-  photo_urls?: string[];
-}
 
 // Default region centred on a generic mid-Atlantic ride hub so the map
 // has *something* to show before location loads.
@@ -62,30 +47,22 @@ export default function MapTab() {
   >("unknown");
   const [selected, setSelected] = useState<TrailDetailData | null>(null);
 
-  // Fetch trails for the current viewport. The generated hook will refetch
-  // every time bbox params change, with React Query dedupe and caching.
-  const trailsQ = useSearchTrails(
-    {
-      // Use the visible region as a coarse bbox; the API does its own
-      // capping. Numbers are rounded to 4 decimal places (~11m) so small
-      // pan jitter doesn't trigger redundant refetches.
-      bbox: bboxFromRegion(region),
-      limit: 200,
-    } as never,
-    // Cast to `never` because the orval-generated type marks `queryKey`
-    // as required even though the hook fills it in for us.
-    {
-      query: {
-        // Don't blink the map every time we re-query while the user pans.
-        staleTime: 60_000,
-      },
-    } as never,
-  );
+  // Fetch trails for the current viewport. We hit the bbox-aware route
+  // directly rather than through the generated `useSearchTrails` hook —
+  // the OpenAPI spec only advertises `q`/`limit`, but the server route
+  // also accepts `bbox`. Wiring it through React Query gives us the same
+  // dedupe + staleTime semantics without forcing a spec change.
+  const bbox = bboxFromRegion(region);
+  const trailsQ = useQuery({
+    queryKey: ["trails-bbox", bbox],
+    queryFn: () => searchTrailsByBbox({ bbox, limit: 200 }),
+    staleTime: 60_000,
+  });
 
-  const trails: ApiTrail[] = useMemo(() => {
-    const data = trailsQ.data as { trails?: ApiTrail[] } | undefined;
-    return data?.trails ?? [];
-  }, [trailsQ.data]);
+  const trails: ApiTrail[] = useMemo(
+    () => trailsQ.data?.trails ?? [],
+    [trailsQ.data],
+  );
 
   useEffect(() => {
     void (async () => {
