@@ -18,6 +18,93 @@
 import webpush, { type PushSubscription, type WebPushError } from "web-push";
 import { getSupabaseAdmin } from "./supabaseAdmin";
 
+// Expo's HTTP/2 push API. Anyone — anonymous — can POST tokens here; we
+// don't need an Expo "access token" unless the project enables Enhanced
+// Push Security, which TrailForge does not. See
+// https://docs.expo.dev/push-notifications/sending-notifications/.
+const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+
+// Same shape we accept from `/me/push/subscribe`. Tokens that match this
+// pattern are routed through Expo's API; everything else is treated as a
+// Web Push subscription and sent via VAPID.
+const EXPO_PUSH_TOKEN_RE = /^Exp(?:o|onent)PushToken\[[A-Za-z0-9_\-]+\]$/;
+
+function isExpoEndpoint(endpoint: string): boolean {
+  return EXPO_PUSH_TOKEN_RE.test(endpoint);
+}
+
+interface ExpoPushTicket {
+  status: "ok" | "error";
+  id?: string;
+  message?: string;
+  details?: { error?: string };
+}
+
+interface ExpoPushResponse {
+  data?: ExpoPushTicket | ExpoPushTicket[];
+  errors?: Array<{ code?: string; message?: string }>;
+}
+
+/**
+ * Send a single batch of Expo push messages. Returns the per-message
+ * tickets so the caller can prune tokens whose `details.error` is
+ * `DeviceNotRegistered` (the Expo equivalent of HTTP 410). Never throws —
+ * any network failure is reported via `log.warn` and treated as a no-op.
+ */
+async function sendExpoPushBatch(
+  tokens: string[],
+  payload: PushPayload,
+  log: MinimalLogger,
+): Promise<ExpoPushTicket[]> {
+  if (tokens.length === 0) return [];
+  // Expo accepts up to 100 messages per request. We send each device its
+  // own message so a per-token error doesn't poison the whole batch.
+  const messages = tokens.map((to) => ({
+    to,
+    title: payload.title,
+    body: payload.body,
+    sound: "default" as const,
+    // Stash the deep-link target + tag in `data` so the mobile client's
+    // notification-tap handler can route into the right screen.
+    data: { url: payload.url, tag: payload.tag ?? null },
+  }));
+  let res: Response;
+  try {
+    res = await fetch(EXPO_PUSH_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "accept-encoding": "gzip, deflate",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(messages),
+    });
+  } catch (err) {
+    log.warn({ err, count: tokens.length }, "push: expo fetch failed");
+    return [];
+  }
+  if (!res.ok) {
+    log.warn(
+      { status: res.status, count: tokens.length },
+      "push: expo non-2xx",
+    );
+    return [];
+  }
+  let parsed: ExpoPushResponse;
+  try {
+    parsed = (await res.json()) as ExpoPushResponse;
+  } catch (err) {
+    log.warn({ err }, "push: expo body parse failed");
+    return [];
+  }
+  if (parsed.errors && parsed.errors.length > 0) {
+    log.warn({ errors: parsed.errors }, "push: expo top-level errors");
+  }
+  const data = parsed.data;
+  if (!data) return [];
+  return Array.isArray(data) ? data : [data];
+}
+
 export interface PushPayload {
   title: string;
   body: string;
@@ -67,7 +154,14 @@ export function getVapidPublicKey(): string | null {
 }
 
 export function isPushConfigured(): boolean {
-  return tryConfigureVapid();
+  // Push is "configured" when at least one transport can deliver:
+  //   - Web Push (requires VAPID env vars), or
+  //   - Expo Push (no server keys needed; Expo's server accepts any token).
+  // Since Expo always works, this returns true unconditionally. Notify
+  // helpers used to early-return on `!isPushConfigured()` and would
+  // accidentally drop Expo deliveries in environments where VAPID was
+  // unset. Transport-level branching now lives inside `sendPushToUsers`.
+  return true;
 }
 
 /**
@@ -82,7 +176,10 @@ export async function sendPushToUsers(
   log: MinimalLogger,
 ): Promise<void> {
   if (userIds.length === 0) return;
-  if (!tryConfigureVapid()) return;
+  // We can deliver via Expo even when VAPID isn't configured, so don't
+  // short-circuit on tryConfigureVapid() here — the Web Push branch below
+  // checks it again before sending to web rows.
+  const vapidReady = tryConfigureVapid();
   const supa = getSupabaseAdmin();
 
   // Filter out opted-out users first so we don't even read their tokens.
@@ -126,28 +223,71 @@ export async function sendPushToUsers(
   const body = JSON.stringify(payload);
   const staleIds: string[] = [];
 
-  await Promise.all(
-    subs.map(async (sub) => {
-      const target: PushSubscription = {
-        endpoint: sub.endpoint,
-        keys: { p256dh: sub.p256dh, auth: sub.auth },
-      };
-      try {
-        await webpush.sendNotification(target, body, { TTL: 60 * 60 * 24 });
-      } catch (err) {
-        const wpErr = err as WebPushError;
-        if (wpErr && (wpErr.statusCode === 404 || wpErr.statusCode === 410)) {
-          // Stale endpoint — push provider says the user has unsubscribed.
-          staleIds.push(sub.id);
-        } else {
-          log.warn(
-            { err, endpoint: sub.endpoint, status: wpErr?.statusCode },
-            "push: send failed",
-          );
+  // Split by transport so we can fan out web rows via VAPID and expo rows
+  // via Expo's HTTP/2 endpoint in parallel.
+  const expoSubs = subs.filter((s) => isExpoEndpoint(s.endpoint));
+  const webSubs = subs.filter((s) => !isExpoEndpoint(s.endpoint));
+
+  await Promise.all([
+    // --- Web Push (VAPID) ---
+    vapidReady
+      ? Promise.all(
+          webSubs.map(async (sub) => {
+            const target: PushSubscription = {
+              endpoint: sub.endpoint,
+              keys: { p256dh: sub.p256dh, auth: sub.auth },
+            };
+            try {
+              await webpush.sendNotification(target, body, {
+                TTL: 60 * 60 * 24,
+              });
+            } catch (err) {
+              const wpErr = err as WebPushError;
+              if (
+                wpErr &&
+                (wpErr.statusCode === 404 || wpErr.statusCode === 410)
+              ) {
+                staleIds.push(sub.id);
+              } else {
+                log.warn(
+                  { err, endpoint: sub.endpoint, status: wpErr?.statusCode },
+                  "push: send failed",
+                );
+              }
+            }
+          }),
+        )
+      : Promise.resolve(),
+    // --- Expo Push ---
+    (async () => {
+      if (expoSubs.length === 0) return;
+      const tickets = await sendExpoPushBatch(
+        expoSubs.map((s) => s.endpoint),
+        payload,
+        log,
+      );
+      // Tickets come back in the same order we sent them, so we can match
+      // them positionally to the originating subscription. A `DeviceNotRegistered`
+      // ticket means the Expo token has been invalidated and we should drop
+      // the row to stop wasting requests on it.
+      for (let i = 0; i < tickets.length; i++) {
+        const ticket = tickets[i];
+        const sub = expoSubs[i];
+        if (!ticket || !sub) continue;
+        if (ticket.status === "error") {
+          const code = ticket.details?.error;
+          if (code === "DeviceNotRegistered") {
+            staleIds.push(sub.id);
+          } else {
+            log.warn(
+              { code, message: ticket.message, endpoint: sub.endpoint },
+              "push: expo ticket error",
+            );
+          }
         }
       }
-    }),
-  );
+    })(),
+  ]);
 
   if (staleIds.length > 0) {
     try {

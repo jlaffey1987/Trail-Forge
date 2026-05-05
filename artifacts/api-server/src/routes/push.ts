@@ -87,20 +87,52 @@ function isAllowedPushEndpoint(rawUrl: string): boolean {
   return ALLOWED_PUSH_HOSTS.some((re) => re.test(host));
 }
 
-const SubscribeBody = z
-  .object({
-    endpoint: z
-      .string()
-      .url()
-      .max(2048)
-      .refine(isAllowedPushEndpoint, {
-        message: "Endpoint host is not a recognised push provider",
-      }),
-    keys: z.object({
-      p256dh: z.string().min(1).max(512),
-      auth: z.string().min(1).max(512),
+// Web Push body: an https endpoint at one of the known push hosts plus
+// the (p256dh, auth) keypair the browser handed back from
+// `pushManager.subscribe`.
+const WebSubscribeBody = z.object({
+  kind: z.literal("web").optional(),
+  endpoint: z
+    .string()
+    .url()
+    .max(2048)
+    .refine(isAllowedPushEndpoint, {
+      message: "Endpoint host is not a recognised push provider",
     }),
-  });
+  keys: z.object({
+    p256dh: z.string().min(1).max(512),
+    auth: z.string().min(1).max(512),
+  }),
+});
+
+// Expo Push body: an opaque ExponentPushToken string returned by
+// `Notifications.getExpoPushTokenAsync()` on a real device. We don't need
+// VAPID keys for Expo's HTTP/2 push API — the token itself is the address.
+// Format is `ExponentPushToken[<base64-ish>]` (or the legacy `ExpoPushToken[…]`
+// shape that some older SDKs returned). Reject anything that doesn't match
+// so a malicious client can't smuggle an arbitrary URL into our push fan-out.
+const EXPO_PUSH_TOKEN_RE = /^Exp(?:o|onent)PushToken\[[A-Za-z0-9_\-]+\]$/;
+
+const ExpoSubscribeBody = z.object({
+  kind: z.literal("expo"),
+  expoPushToken: z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((t) => EXPO_PUSH_TOKEN_RE.test(t), {
+      message: "Not a valid ExponentPushToken[…] string",
+    }),
+});
+
+const SubscribeBody = z.union([ExpoSubscribeBody, WebSubscribeBody]);
+
+// Sentinel keys for Expo rows so the (p256dh, auth) NOT NULL columns on
+// `push_subscriptions` are satisfied without polluting them with bogus
+// VAPID material. The fan-out helper detects Expo rows via the
+// `endpoint` prefix below.
+const EXPO_SENTINEL_P256DH = "expo";
+const EXPO_SENTINEL_AUTH = "expo";
+const EXPO_USER_AGENT_PREFIX = "expo:";
 
 const UnsubscribeBody = z.object({
   endpoint: z.string().url().max(2048),
@@ -144,20 +176,34 @@ router.post(
       res.status(400).json({ error: "Invalid subscription payload" });
       return;
     }
-    const ua =
+    const rawUa =
       typeof req.headers["user-agent"] === "string"
-        ? req.headers["user-agent"].slice(0, 512)
+        ? req.headers["user-agent"].slice(0, 480)
         : null;
     const supa = getSupabaseAdmin();
     const nowIso = new Date().toISOString();
-    const row = {
-      user_id: userId,
-      endpoint: parsed.data.endpoint,
-      p256dh: parsed.data.keys.p256dh,
-      auth: parsed.data.keys.auth,
-      user_agent: ua,
-      last_seen_at: nowIso,
-    };
+    // Both shapes get persisted into the same `push_subscriptions` table so
+    // the fan-out helper can read every device for a user with a single
+    // SELECT. Expo rows are distinguished by `endpoint` carrying the
+    // ExponentPushToken[...] string and `user_agent` starting with `expo:`.
+    const row =
+      parsed.data.kind === "expo"
+        ? {
+            user_id: userId,
+            endpoint: parsed.data.expoPushToken,
+            p256dh: EXPO_SENTINEL_P256DH,
+            auth: EXPO_SENTINEL_AUTH,
+            user_agent: `${EXPO_USER_AGENT_PREFIX}${rawUa ?? ""}`.slice(0, 512),
+            last_seen_at: nowIso,
+          }
+        : {
+            user_id: userId,
+            endpoint: parsed.data.endpoint,
+            p256dh: parsed.data.keys.p256dh,
+            auth: parsed.data.keys.auth,
+            user_agent: rawUa,
+            last_seen_at: nowIso,
+          };
     const { error } = await supa
       .from("push_subscriptions")
       .upsert(row, { onConflict: "endpoint" });

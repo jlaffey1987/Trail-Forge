@@ -1,0 +1,94 @@
+{
+  "expo": {
+    "name": "TrailForge",
+    "slug": "trailforge-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "trailforge",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.trailforge.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "TrailForge uses your location to show nearby trails on the map and to record your rides.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "TrailForge needs background location so it can keep recording your ride when the screen is locked.",
+        "NSLocationAlwaysUsageDescription": "TrailForge keeps recording your ride in the background so you don't have to keep the app open.",
+        "NSPhotoLibraryUsageDescription": "TrailForge needs access to your photos so you can attach trail photos.",
+        "NSCameraUsageDescription": "TrailForge needs the camera to capture trail photos.",
+        "UIBackgroundModes": ["location", "fetch", "remote-notification"],
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.trailforge.app",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon.png",
+        "backgroundColor": "#1a1208"
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#1a1208",
+          "image": "./assets/images/icon.png",
+          "imageWidth": 200
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "TrailForge keeps recording your ride in the background so you don't have to keep the app open.",
+          "locationWhenInUsePermission": "TrailForge uses your location to show nearby trails and record your rides.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isIosBackgroundLocationEnabled": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#f0a832"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "TrailForge needs access to your photos so you can attach trail photos.",
+          "cameraPermission": "TrailForge needs the camera to capture trail photos."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": ""
+      }
+    },
+    "owner": "trailforge"
+  }
+}

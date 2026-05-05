@@ -74,6 +74,15 @@ The project is structured as a pnpm monorepo.
 - **AI Integration:** Anthropic AI (Claude Sonnet 4.6) for AI grading and external discovery of trails. AI features include `ai_grade`, `ai_grade_rationale`, and admin-only endpoints for content harvesting and review.
 - **RLS Policies:** Granular Row-Level Security policies are applied to protect data.
 
+**Mobile App (trailforge-mobile):**
+- Expo (React Native, TS) artifact at `/mobile/`. Reuses `@workspace/api-client-react` (Orval-generated hooks), `@workspace/api-zod`, and `@workspace/planner-shared`.
+- **Auth:** `@clerk/clerk-expo` with `expo-secure-store` token cache, OAuth via `useSSO` (Google, Apple) + email/password fallback. `ApiAuthBridge` wires Clerk's bearer token into the shared API client at runtime.
+- **Maps:** `react-native-maps` 1.18.0 (Apple on iOS, Google on Android). Web preview uses `map.web.tsx` stub + `metro.config.js` resolver alias to neutralize `react-native-maps` on web (it's native-only).
+- **Recording:** `expo-location` + `expo-task-manager` background location task (defined at module scope so it survives JS-context tearing). Live distance/speed/elevation, save as private/group/public trail.
+- **Push:** `expo-notifications` registers an `ExponentPushToken[…]`, POSTs to extended `/me/push/subscribe` with `{ kind: "expo", expoPushToken }`. Backend persists Expo rows with sentinel keys + `user_agent: "expo:..."` and fans out via Expo's HTTP push API alongside web push. `isPushConfigured()` always returns `true` since Expo needs no server keys.
+- **Chat:** SSE realtime via `react-native-sse` with polling fallback.
+- **EAS:** `eas.json` with development / preview / production profiles, bundle id `com.trailforge.app`. **Operator must set `expo.extra.eas.projectId` in `app.json` before EAS production builds — required by `getExpoPushTokenAsync()`.**
+
 **Other Components:**
 - **mockup-sandbox:** A design canvas for mockups.
 
