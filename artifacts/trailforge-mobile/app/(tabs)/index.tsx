@@ -233,9 +233,6 @@ export default function PlannerTab() {
         /[^a-zA-Z0-9_-]+/g,
         "_",
       );
-      // Prefer cacheDirectory, fall back to documentDirectory — Android's
-      // root storage path is permission-locked, so an empty-string base
-      // would fail the write.
       const baseDir =
         FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
       if (!baseDir) {

@@ -19,11 +19,13 @@ import {
 } from "react-native";
 
 import { geocode, type NominatimResult } from "@/lib/nominatim";
+import ClusterMapView from "react-native-map-clustering";
 import MapView, {
+  Marker,
   PROVIDER_DEFAULT,
   PROVIDER_GOOGLE,
   Polyline,
-  Region,
+  type Region,
 } from "react-native-maps";
 
 import {
@@ -31,7 +33,11 @@ import {
   type TrailDetailData,
 } from "@/components/TrailDetailSheet";
 import colors from "@/constants/colors";
-import { searchTrailsByBbox, type MapTrail as ApiTrail } from "@/lib/api";
+import {
+  listCompletions,
+  searchTrailsByBbox,
+  type MapTrail as ApiTrail,
+} from "@/lib/api";
 import { difficultyColor } from "@/lib/trailColors";
 import { publishVisibleTrails } from "@/lib/visibleTrails";
 
@@ -129,6 +135,19 @@ export default function MapTab() {
     return all.filter((t) => matchesDifficulty(t, difficultyFilter));
   }, [trailsQ.data, difficultyFilter]);
 
+  const completionsQ = useQuery({
+    queryKey: ["my-completions"],
+    queryFn: listCompletions,
+    staleTime: 60_000,
+  });
+  const ridden = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of completionsQ.data?.completions ?? []) {
+      set.add(c.trailId);
+    }
+    return set;
+  }, [completionsQ.data]);
+
   // Publish the currently-visible viewport so the AI tab can ground
   // replies on what the user is actually looking at. Cap the id list so
   // we don't blow up the JSON payload sent to /api/ai/chat.
@@ -175,7 +194,7 @@ export default function MapTab() {
 
   return (
     <View style={styles.container}>
-      <MapView
+      <ClusterMapView
         ref={mapRef}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
         mapType={mapKind}
@@ -184,7 +203,39 @@ export default function MapTab() {
         showsUserLocation={permission === "granted"}
         showsMyLocationButton={false}
         onRegionChangeComplete={setRegion}
+        radius={48}
+        minZoom={1}
+        maxZoom={12}
+        clusterColor={colors.light.primary}
+        clusterTextColor={colors.light.primaryForeground}
       >
+        {trails.map((t) => {
+          const lat = t.centroid_lat;
+          const lon = t.centroid_lon;
+          if (typeof lat !== "number" || typeof lon !== "number") return null;
+          return (
+            <Marker
+              key={`m-${t.id}`}
+              coordinate={{ latitude: lat, longitude: lon }}
+              tracksViewChanges={false}
+              pinColor={difficultyColor(t.difficulty)}
+              onPress={() =>
+                setSelected({
+                  id: t.id,
+                  name: t.name,
+                  difficulty: t.difficulty,
+                  ai_difficulty: t.ai_difficulty ?? null,
+                  terrain: t.terrain ?? null,
+                  distance_km: t.distance_km ?? null,
+                  elevation_gain_m: t.elevation_gain_m ?? null,
+                  altitudes: t.altitudes ?? [],
+                  photo_urls: t.photo_urls ?? [],
+                  legal_status: t.legal_status ?? null,
+                })
+              }
+            />
+          );
+        })}
         {trails.map((t) => {
           const coords = extractCoords(t.path);
           if (coords.length < 2) return null;
@@ -206,12 +257,13 @@ export default function MapTab() {
                   elevation_gain_m: t.elevation_gain_m ?? null,
                   altitudes: t.altitudes ?? [],
                   photo_urls: t.photo_urls ?? [],
+                  legal_status: t.legal_status ?? null,
                 })
               }
             />
           );
         })}
-      </MapView>
+      </ClusterMapView>
 
       <View style={styles.searchRow} pointerEvents="box-none">
         <View style={styles.searchBar}>
@@ -354,8 +406,9 @@ export default function MapTab() {
       <TrailDetailSheet
         visible={!!selected}
         trail={selected}
-        ridden={false}
+        ridden={selected ? ridden.has(selected.id) : false}
         onClose={() => setSelected(null)}
+        onMarkRiddenChange={() => void completionsQ.refetch()}
       />
     </View>
   );

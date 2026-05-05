@@ -38,7 +38,7 @@ import {
 } from "@/lib/api";
 
 type StatusFilter = "pending" | "approved" | "rejected";
-type AdminTab = "queue" | "users";
+type AdminTab = "queue" | "activity" | "users";
 
 export default function AdminScreen() {
   const me = useQuery({ queryKey: ["admin-whoami"], queryFn: adminWhoami });
@@ -104,7 +104,7 @@ export default function AdminScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.tabs}>
-        {(["queue", "users"] as AdminTab[]).map((t) => (
+        {(["queue", "activity", "users"] as AdminTab[]).map((t) => (
           <TouchableOpacity
             key={t}
             onPress={() => setTab(t)}
@@ -113,7 +113,7 @@ export default function AdminScreen() {
             <Text
               style={[styles.tabText, tab === t && styles.tabTextActive]}
             >
-              {t === "queue" ? "Queue" : "Users"}
+              {t === "queue" ? "Queue" : t === "activity" ? "Activity" : "Users"}
             </Text>
           </TouchableOpacity>
         ))}
@@ -175,6 +175,8 @@ export default function AdminScreen() {
             )}
           />
         </>
+      ) : tab === "activity" ? (
+        <AdminActivityPanel />
       ) : (
         <AdminUsersPanel />
       )}
@@ -188,6 +190,108 @@ export default function AdminScreen() {
         busy={rejectMut.isPending}
       />
     </View>
+  );
+}
+
+function AdminActivityPanel() {
+  // No dedicated audit-log endpoint exists yet; merge approved + rejected
+  // discovered-trails as a recent-decisions feed.
+  const approvedQ = useQuery({
+    queryKey: ["admin-activity", "approved"],
+    queryFn: () => listDiscoveredTrails("approved"),
+  });
+  const rejectedQ = useQuery({
+    queryKey: ["admin-activity", "rejected"],
+    queryFn: () => listDiscoveredTrails("rejected"),
+  });
+  const isLoading = approvedQ.isLoading || rejectedQ.isLoading;
+  const isFetching = approvedQ.isFetching || rejectedQ.isFetching;
+
+  const feed = React.useMemo(() => {
+    const a = approvedQ.data?.items ?? [];
+    const r = rejectedQ.data?.items ?? [];
+    return [...a, ...r].sort(
+      (x, y) =>
+        new Date(y.created_at).getTime() - new Date(x.created_at).getTime(),
+    );
+  }, [approvedQ.data, rejectedQ.data]);
+
+  function refresh() {
+    void approvedQ.refetch();
+    void rejectedQ.refetch();
+  }
+
+  return (
+    <FlatList
+      data={feed}
+      keyExtractor={(d) => `${d.status}-${d.id}`}
+      contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
+      refreshControl={
+        <RefreshControl
+          refreshing={isFetching}
+          onRefresh={refresh}
+          tintColor={colors.light.primary}
+        />
+      }
+      ListHeaderComponent={
+        <Text style={[styles.note, { paddingHorizontal: 0, marginBottom: 8 }]}>
+          Recent moderation decisions on AI-discovered trails. Pull to refresh.
+        </Text>
+      }
+      ListEmptyComponent={
+        isLoading ? (
+          <ActivityIndicator color={colors.light.primary} />
+        ) : (
+          <Text style={styles.empty}>No moderation activity yet.</Text>
+        )
+      }
+      renderItem={({ item }) => {
+        const approved = item.status === "approved";
+        return (
+          <View style={styles.card}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <View
+                style={[
+                  styles.activityBadge,
+                  approved ? styles.activityBadgeApproved : styles.activityBadgeRejected,
+                ]}
+              >
+                <Feather
+                  name={approved ? "check" : "x"}
+                  size={12}
+                  color={approved ? colors.light.primaryForeground : colors.light.foreground}
+                />
+                <Text
+                  style={[
+                    styles.activityBadgeText,
+                    approved
+                      ? { color: colors.light.primaryForeground }
+                      : { color: colors.light.foreground },
+                  ]}
+                >
+                  {approved ? "Approved" : "Rejected"}
+                </Text>
+              </View>
+              <Text style={styles.cardMeta}>
+                {new Date(item.created_at).toLocaleString()}
+              </Text>
+            </View>
+            <Text style={[styles.cardTitle, { marginTop: 8 }]} numberOfLines={2}>
+              {item.name ?? "Untitled discovery"}
+            </Text>
+            <Text style={styles.cardMeta}>
+              {item.region ?? "Unknown region"}
+              {item.difficulty ? ` • ${item.difficulty}` : ""}
+            </Text>
+            {item.source_url ? (
+              <Text style={styles.cardLink} numberOfLines={1}>
+                {item.source_url}
+              </Text>
+            ) : null}
+          </View>
+        );
+      }}
+    />
   );
 }
 
@@ -592,6 +696,25 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 0.5,
     marginTop: 8,
+  },
+  activityBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+  },
+  activityBadgeApproved: { backgroundColor: colors.light.primary },
+  activityBadgeRejected: {
+    backgroundColor: colors.light.muted,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+  },
+  activityBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.4,
   },
   empty: {
     color: colors.light.mutedForeground,

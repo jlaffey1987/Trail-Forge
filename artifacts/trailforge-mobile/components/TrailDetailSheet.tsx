@@ -41,9 +41,6 @@ export interface TrailDetailData {
   elevation_gain_m?: number | null;
   altitudes?: number[];
   photo_urls?: string[];
-  /** UK access taxonomy (BOAT / Green Lane / UCR / etc) — surfaced as a
-   *  shield badge so the rider can spot legal status without opening
-   *  the full detail screen. */
   legal_status?: string | null;
 }
 
@@ -87,10 +84,6 @@ export function TrailDetailSheet({
     },
   });
 
-  // Pull lightweight content counts so the sheet can advertise "5 notes •
-  // 1 pending amendment" without forcing the rider to open the full
-  // /trail/[id] screen first. Cached for 30s so flipping between trails
-  // on the map doesn't hammer the API.
   const notesQ = useQuery({
     queryKey: ["trail-notes-count", trail?.id],
     queryFn: () => listTrailNotes(trail!.id),
