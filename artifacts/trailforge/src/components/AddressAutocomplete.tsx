@@ -31,6 +31,18 @@ interface AddressAutocompleteProps {
   highlight?: boolean;
   /** True once the parent has a confirmed match for `value`. */
   confirmed?: boolean;
+  /**
+   * Optional proximity hint — when provided, suggestions are biased and
+   * client-sorted toward this point so nearby places appear first.
+   */
+  near?: { lat: number; lng: number } | null;
+  /**
+   * When true and `near` is supplied, render a small "Near you" badge
+   * inside the dropdown footer to make the local-first ordering visible.
+   * Use only for GPS-derived hints — coarse fallbacks shouldn't claim
+   * "near you".
+   */
+  nearLabel?: string;
   /** Stable test id for end-to-end tests. */
   "data-testid"?: string;
 }
@@ -65,6 +77,8 @@ const AddressAutocomplete = forwardRef<
     dotColor,
     highlight,
     confirmed,
+    near,
+    nearLabel,
     "data-testid": testId,
   },
   ref,
@@ -103,6 +117,16 @@ const AddressAutocomplete = forwardRef<
     }
   }, [confirmed, trimmed]);
 
+  // Stash the latest `near` in a ref so callbacks (runSearch, retry,
+  // debounced timer) always see the freshest proximity hint without
+  // needing them in their dependency arrays — re-creating those
+  // callbacks every time `near` changes would re-bind the input
+  // handler on each GPS update.
+  const nearRef = useRef<{ lat: number; lng: number } | null | undefined>(near);
+  useEffect(() => {
+    nearRef.current = near;
+  }, [near]);
+
   // Issues the actual search request for `q`. Lifted out of
   // `handleInputChange` so the "Retry" button in the error state can
   // re-fire the same query without making the rider re-type anything.
@@ -111,7 +135,7 @@ const AddressAutocomplete = forwardRef<
     setLoading(true);
     setServiceError(null);
     void (async () => {
-      const result = await searchSuggestions(q);
+      const result = await searchSuggestions(q, nearRef.current ?? null);
       if (mySeq !== seqRef.current) return; // stale
       populatedForRef.current = q;
       if (result.status === "ok") {
@@ -332,9 +356,29 @@ const AddressAutocomplete = forwardRef<
             })}
           </ul>
           {/* Nominatim's usage policy requires visible attribution wherever
-              we display its results. Keep it small but always present. */}
-          <div className="px-3 py-1.5 text-[10px] text-stone-600 border-t border-[hsl(34,18%,18%)] bg-[hsl(22,15%,7%)]">
-            Search by OpenStreetMap
+              we display its results. Keep it small but always present.
+              When proximity biasing is active, surface a subtle "Near you"
+              badge so the rider understands why these results came up. */}
+          <div className="px-3 py-1.5 text-[10px] text-stone-600 border-t border-[hsl(34,18%,18%)] bg-[hsl(22,15%,7%)] flex items-center justify-between gap-2">
+            <span>Search by OpenStreetMap</span>
+            {near && nearLabel && (
+              <span
+                data-testid={testId ? `${testId}-near` : undefined}
+                className="inline-flex items-center gap-1 text-[10px] text-amber-300/80"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  className="w-3 h-3"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                >
+                  <circle cx="12" cy="10" r="3" />
+                  <path d="M12 21s-7-7.5-7-12a7 7 0 1 1 14 0c0 4.5-7 12-7 12Z" />
+                </svg>
+                {nearLabel}
+              </span>
+            )}
           </div>
         </div>
       )}

@@ -36,6 +36,10 @@ import type {
 import { fetchTrailsInBbox } from "@/lib/supabase";
 import { getTrailLatLngs, invalidateTrailGeometryCache } from "@/lib/trailLayer";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
+import {
+  useNearbyLocation,
+  primeNearbyLocation,
+} from "@/hooks/useNearbyLocation";
 import LoadingBackdrop from "@/components/LoadingBackdrop";
 import { distancePointToPolylineM } from "@/lib/poi";
 
@@ -111,6 +115,22 @@ export default function PlannerTab() {
   const [locating, setLocating] = useState(false);
   const [locateError, setLocateError] = useState<string | null>(null);
 
+  // Proximity hint for address autocomplete. Prefers a freshly cached
+  // GPS fix (only fetched if the rider has previously granted location
+  // permission — see useNearbyLocation), and falls back to the
+  // currently-confirmed start coords so suggestions stay local even
+  // before GPS is available. The "Near you" badge in the dropdown only
+  // shows for the GPS-derived case.
+  const startFallbackCoord = useMemo(() => {
+    if (!geocodedStart || geocodedStart.q !== startLocation.trim()) return null;
+    const { lat, lng } = geocodedStart.pt;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  }, [geocodedStart, startLocation]);
+  const { near: nearby, source: nearbySource } =
+    useNearbyLocation(startFallbackCoord);
+  const nearbyLabel = nearbySource === "gps" ? "Near you" : undefined;
+
   const toggleDifficulty = (level: number) => {
     setDifficulty((prev) =>
       prev.includes(level) ? prev.filter((d) => d !== level) : [...prev, level]
@@ -145,6 +165,10 @@ export default function PlannerTab() {
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const { latitude, longitude } = pos.coords;
+        // Share this freshly-authorised position with the autocomplete
+        // proximity cache so the next address typed is immediately
+        // biased to nearby places — no second GPS prompt required.
+        primeNearbyLocation(latitude, longitude);
         const place = await reverseGeocode(latitude, longitude);
         const pt: GeoPoint = place ?? {
           lat: latitude,
@@ -1154,6 +1178,8 @@ export default function PlannerTab() {
               confirmed={
                 !!geocodedStart && geocodedStart.q === startLocation.trim()
               }
+              near={nearby}
+              nearLabel={nearbyLabel}
               data-testid="planner-start-address"
             />
             <AddressAutocomplete
@@ -1172,6 +1198,8 @@ export default function PlannerTab() {
               dotColor="#f0a832"
               highlight={highlightInputs}
               confirmed={!!geocodedEnd && geocodedEnd.q === endLocation.trim()}
+              near={nearby}
+              nearLabel={nearbyLabel}
               data-testid="planner-end-address"
             />
             {(geocodedStart || geocodedEnd) && (

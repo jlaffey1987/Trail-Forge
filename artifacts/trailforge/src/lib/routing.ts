@@ -195,10 +195,57 @@ function throttleNominatim(): Promise<void> {
 }
 
 /**
+ * Great-circle distance in km between two lat/lng pairs. Used to sort
+ * autocomplete suggestions by proximity to a hint location.
+ */
+function haversineKm(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/**
+ * Build a viewbox string for Nominatim's `viewbox` parameter — biases
+ * results toward the supplied centre without restricting them when paired
+ * with `bounded=0`. We use ~2° (≈ 220km N/S, less E/W as latitude grows)
+ * which feels right for "places near me" while still surfacing the next
+ * notable town if the rider is searching for somewhere just outside the
+ * box.
+ */
+function buildViewbox(center: { lat: number; lng: number }): string {
+  const span = 2;
+  const lonMin = center.lng - span;
+  const latMax = center.lat + span;
+  const lonMax = center.lng + span;
+  const latMin = center.lat - span;
+  return `${lonMin},${latMax},${lonMax},${latMin}`;
+}
+
+/**
+ * Round a coord to ~10km grid cells so cached results don't get reused
+ * for a rider who has moved meaningfully between lookups but stay shared
+ * across small position jitter.
+ */
+function roundForCacheKey(n: number): string {
+  return (Math.round(n * 10) / 10).toFixed(1);
+}
+
+/**
  * Free-text address suggestions for the planner's start/end inputs. We hit
- * Nominatim's `/search` with a GB country bias first (matches our
- * UK-focussed user base) and fall back to a global query when nothing
- * British matches. Capped at 5 results to keep the dropdown tidy.
+ * Nominatim's `/search` with either a viewbox proximity bias (when `near`
+ * is supplied) or the default British Isles country bias, falling back to
+ * a global query when nothing local matches. Capped at 5 results to keep
+ * the dropdown tidy.
  *
  * Returns a tagged `SuggestionsResult`:
  *  - `status: "ok"` carries the (possibly empty) suggestion array. An
@@ -210,26 +257,39 @@ function throttleNominatim(): Promise<void> {
  * Behaviour:
  *  - In-memory cache (60s, 100 entries) so repeated identical queries do
  *    not re-hit Nominatim — both faster for the rider and friendlier to
- *    the public service.
+ *    the public service. The cache key includes a coarse-rounded `near`
+ *    so a rider in Devon doesn't get cached London-area results.
  *  - Single-flight: identical concurrent queries share one promise.
  *  - Throttled to 1.1s between outbound requests to honour Nominatim's
  *    1 req/sec usage policy.
  *  - Per-request 8s timeout via `AbortController` — never leaves the
  *    dropdown spinning indefinitely on a flaky link.
+ *  - When `near` is supplied, results are also sorted client-side by
+ *    haversine distance so the closest place is always first regardless
+ *    of Nominatim's internal ranking quirks.
  *
  * Callers MUST still pair this with a request-sequence guard so an
  * older still-pending request can't overwrite a newer one's results.
  */
 export async function searchSuggestions(
   query: string,
+  near?: { lat: number; lng: number } | null,
 ): Promise<SuggestionsResult> {
   const q = query.trim();
   if (q.length < 2) return { status: "ok", suggestions: [] };
 
-  const cached = recallSuggestions(q);
+  const proximity =
+    near && Number.isFinite(near.lat) && Number.isFinite(near.lng)
+      ? { lat: near.lat, lng: near.lng }
+      : null;
+  const cacheKey = proximity
+    ? `${q}|${roundForCacheKey(proximity.lat)},${roundForCacheKey(proximity.lng)}`
+    : q;
+
+  const cached = recallSuggestions(cacheKey);
   if (cached) return cached;
 
-  const existing = inflightSuggestions.get(q);
+  const existing = inflightSuggestions.get(cacheKey);
   if (existing) return existing;
 
   const promise = (async (): Promise<SuggestionsResult> => {
@@ -284,23 +344,34 @@ export async function searchSuggestions(
       }
     };
 
-    try {
-      // Bias to the British Isles (UK + Ireland) so users planning routes
-      // in either country see local results first. We only fall back to a
-      // global search when there are no UK/IE matches at all.
-      await throttleNominatim();
-      const local = await tryFetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb,ie&addressdetails=0`,
+    const sortByProximity = (rows: AddressSuggestion[]): AddressSuggestion[] => {
+      if (!proximity) return rows;
+      return [...rows].sort(
+        (a, b) =>
+          haversineKm(proximity, { lat: a.lat, lng: a.lng }) -
+          haversineKm(proximity, { lat: b.lat, lng: b.lng }),
       );
+    };
+
+    try {
+      await throttleNominatim();
+      // When we have a proximity hint, bias by viewbox (unbounded so we
+      // can still surface places just outside it) and drop the country
+      // restriction — the rider may be near a border. Otherwise fall
+      // back to the existing British Isles bias.
+      const localUrl = proximity
+        ? `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&viewbox=${encodeURIComponent(buildViewbox(proximity))}&bounded=0&addressdetails=0`
+        : `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&countrycodes=gb,ie&addressdetails=0`;
+      const local = await tryFetch(localUrl);
       if (!local.ok) {
         return { status: "error", error: local.error };
       }
       if (local.rows.length > 0) {
         const result: SuggestionsResult = {
           status: "ok",
-          suggestions: local.rows,
+          suggestions: sortByProximity(local.rows),
         };
-        rememberSuggestions(q, result);
+        rememberSuggestions(cacheKey, result);
         return result;
       }
       await throttleNominatim();
@@ -312,9 +383,9 @@ export async function searchSuggestions(
       }
       const result: SuggestionsResult = {
         status: "ok",
-        suggestions: global.rows,
+        suggestions: sortByProximity(global.rows),
       };
-      rememberSuggestions(q, result);
+      rememberSuggestions(cacheKey, result);
       return result;
     } catch (err) {
       return {
@@ -325,11 +396,11 @@ export async function searchSuggestions(
     }
   })();
 
-  inflightSuggestions.set(q, promise);
+  inflightSuggestions.set(cacheKey, promise);
   try {
     return await promise;
   } finally {
-    inflightSuggestions.delete(q);
+    inflightSuggestions.delete(cacheKey);
   }
 }
 
