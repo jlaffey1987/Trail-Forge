@@ -240,6 +240,45 @@ export function adminWhoami(): Promise<{
   return apiJson("/api/admin/whoami");
 }
 
+// Admin: AI-discovered trail review queue.
+export interface DiscoveredTrail {
+  id: string;
+  name: string | null;
+  region: string | null;
+  difficulty: string | null;
+  source_url: string | null;
+  status: "pending" | "approved" | "rejected";
+  created_at: string;
+}
+
+export function listDiscoveredTrails(
+  status: "pending" | "approved" | "rejected" = "pending",
+): Promise<{ items: DiscoveredTrail[]; note?: string }> {
+  return apiJson(
+    `/api/admin/discovered-trails?status=${encodeURIComponent(status)}`,
+  );
+}
+
+export function approveDiscoveredTrail(id: string): Promise<unknown> {
+  return apiJson(
+    `/api/admin/discovered-trails/${encodeURIComponent(id)}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export function rejectDiscoveredTrail(
+  id: string,
+  reason?: string,
+): Promise<unknown> {
+  return apiJson(
+    `/api/admin/discovered-trails/${encodeURIComponent(id)}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify(reason ? { reason } : {}),
+    },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Groups
 // ---------------------------------------------------------------------------
@@ -247,19 +286,210 @@ export function adminWhoami(): Promise<{
 export interface Group {
   id: string;
   name: string;
+  description?: string | null;
   member_count: number;
   is_owner: boolean;
+  visibility?: "public" | "private";
+  role?: "owner" | "admin" | "member";
 }
 
-export function listMyGroups(): Promise<{ groups: Group[] }> {
-  return apiJson("/api/groups");
+export interface DiscoverableGroup {
+  id: string;
+  name: string;
+  description?: string | null;
+  member_count: number;
+  visibility: "public" | "private";
+  is_member?: boolean;
+  has_pending_request?: boolean;
 }
 
-export function createGroup(name: string): Promise<{ group: Group }> {
+export interface GroupMember {
+  user_id: string;
+  display_name?: string | null;
+  email?: string | null;
+  role: "owner" | "admin" | "member";
+  joined_at: string;
+}
+
+export interface GroupJoinRequest {
+  id: string;
+  user_id: string;
+  display_name?: string | null;
+  message?: string | null;
+  created_at: string;
+}
+
+export async function listMyGroups(): Promise<{ groups: Group[] }> {
+  // Server returns `{ items: [...], invitesPending: N }`. Normalise to the
+  // shape the mobile UI expects.
+  const raw = await apiJson<{ items: unknown[] }>("/api/groups");
+  const groups: Group[] = (raw.items ?? []).map((g) => {
+    const r = g as Record<string, unknown>;
+    return {
+      id: String(r.id ?? ""),
+      name: String(r.name ?? "Group"),
+      description: (r.description as string | null) ?? null,
+      member_count: Number(r.member_count ?? 0),
+      is_owner: r.role === "owner",
+      visibility: (r.visibility as "public" | "private") ?? "private",
+      role: r.role as Group["role"],
+    };
+  });
+  return { groups };
+}
+
+export function createGroup(
+  name: string,
+  description?: string,
+): Promise<{ group: Group }> {
   return apiJson("/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(description ? { name, description } : { name }),
   });
+}
+
+export function listDiscoverableGroups(
+  q?: string,
+): Promise<{ items: DiscoverableGroup[] }> {
+  const suffix = q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+  return apiJson(`/api/groups/discoverable${suffix}`);
+}
+
+export function requestGroupJoin(
+  groupId: string,
+  message?: string,
+): Promise<unknown> {
+  return apiJson(`/api/groups/${encodeURIComponent(groupId)}/join-requests`, {
+    method: "POST",
+    body: JSON.stringify(message ? { message } : {}),
+  });
+}
+
+export function leaveGroup(groupId: string): Promise<void> {
+  return apiJson(`/api/groups/${encodeURIComponent(groupId)}/leave`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function listGroupJoinRequests(
+  groupId: string,
+): Promise<{ items: GroupJoinRequest[] }> {
+  return apiJson(`/api/groups/${encodeURIComponent(groupId)}/join-requests`);
+}
+
+export function approveGroupJoinRequest(
+  groupId: string,
+  requestId: string,
+): Promise<unknown> {
+  return apiJson(
+    `/api/groups/${encodeURIComponent(groupId)}/join-requests/${encodeURIComponent(requestId)}/approve`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export function declineGroupJoinRequest(
+  groupId: string,
+  requestId: string,
+): Promise<unknown> {
+  return apiJson(
+    `/api/groups/${encodeURIComponent(groupId)}/join-requests/${encodeURIComponent(requestId)}/decline`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Chat extensions: archive, mark-unread, DM-by-user, unread badge
+// ---------------------------------------------------------------------------
+
+export function archiveRoom(roomId: string): Promise<void> {
+  return apiJson(`/api/chat/rooms/${encodeURIComponent(roomId)}/archive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function unarchiveRoom(roomId: string): Promise<void> {
+  return apiJson(`/api/chat/rooms/${encodeURIComponent(roomId)}/archive`, {
+    method: "DELETE",
+  });
+}
+
+export function openDmWith(
+  userId: string,
+): Promise<{ room: { id: string } }> {
+  return apiJson(`/api/chat/dm/${encodeURIComponent(userId)}/open`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function getUnreadCount(): Promise<{ unread: number }> {
+  return apiJson("/api/chat/unread-count");
+}
+
+// ---------------------------------------------------------------------------
+// Trail create from a recorded ride (used by the record screen's
+// "save as private trail" flow).
+// ---------------------------------------------------------------------------
+
+export interface CreateTrailFromRideInput {
+  name: string;
+  /** GeoJSON-style [lon, lat] samples taken during the ride. */
+  path: Array<[number, number]>;
+  altitudes?: number[];
+  visibility?: "private" | "public" | "group";
+  groupId?: string;
+  region?: string | null;
+  difficulty?: string | null;
+}
+
+export async function createTrailFromRide(
+  input: CreateTrailFromRideInput,
+): Promise<{ id: string }> {
+  return apiJson<{ id: string }>("/api/trails", {
+    method: "POST",
+    body: JSON.stringify({
+      name: input.name,
+      visibility: input.visibility ?? "private",
+      group_id: input.groupId ?? null,
+      region: input.region ?? null,
+      difficulty: input.difficulty ?? null,
+      path: input.path,
+      altitudes: input.altitudes ?? [],
+      source: "mobile-recording",
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// GPX export — reusable helper for planner saved routes & recorded rides.
+// Builds a minimal GPX 1.1 doc from an ordered list of [lat, lon] points.
+// ---------------------------------------------------------------------------
+
+export function buildGpx(
+  name: string,
+  points: Array<{ lat: number; lon: number; ele?: number; time?: string }>,
+): string {
+  const trkpts = points
+    .map((p) => {
+      const eleTag =
+        typeof p.ele === "number" ? `<ele>${p.ele.toFixed(1)}</ele>` : "";
+      const timeTag = p.time ? `<time>${p.time}</time>` : "";
+      return `      <trkpt lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}">${eleTag}${timeTag}</trkpt>`;
+    })
+    .join("\n");
+  const safeName = name.replace(/[<>&"']/g, "");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="TrailForge Mobile" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>${safeName}</name>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>
+`;
 }
 
 // ---------------------------------------------------------------------------

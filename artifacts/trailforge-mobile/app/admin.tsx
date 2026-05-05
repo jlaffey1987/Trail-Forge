@@ -1,27 +1,79 @@
 /**
- * Admin landing screen. Visible to anyone the API tells us is a moderator
- * (`/api/admin/whoami` returns `isModerator: true`). Non-moderators see a
- * 403 placeholder. Detailed admin tools (review queue, user list) are a
- * port for task #220.
+ * Admin landing — moderator-only review queue for AI-discovered trails.
+ * Visible only when the API tells us `isModerator: true`. Lets a moderator
+ * approve or reject pending discoveries with optional reasons.
  */
-import { useQuery } from "@tanstack/react-query";
+import { Feather } from "@expo/vector-icons";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Stack, router } from "expo-router";
-import React from "react";
+import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  FlatList,
+  Modal,
+  RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
 
 import colors from "@/constants/colors";
-import { adminWhoami } from "@/lib/api";
+import {
+  adminWhoami,
+  approveDiscoveredTrail,
+  listDiscoveredTrails,
+  rejectDiscoveredTrail,
+  type DiscoveredTrail,
+} from "@/lib/api";
+
+type StatusFilter = "pending" | "approved" | "rejected";
 
 export default function AdminScreen() {
-  const q = useQuery({ queryKey: ["admin-whoami"], queryFn: adminWhoami });
+  const me = useQuery({ queryKey: ["admin-whoami"], queryFn: adminWhoami });
+  const [status, setStatus] = useState<StatusFilter>("pending");
+  const qc = useQueryClient();
+  const queueQ = useQuery({
+    queryKey: ["admin-discovery", status],
+    queryFn: () => listDiscoveredTrails(status),
+    enabled: !!me.data?.isModerator,
+  });
 
-  if (q.isLoading) {
+  const [rejectFor, setRejectFor] = useState<DiscoveredTrail | null>(null);
+
+  const approveMut = useMutation({
+    mutationFn: (id: string) => approveDiscoveredTrail(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-discovery"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Approve failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  const rejectMut = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      rejectDiscoveredTrail(id, reason || undefined),
+    onSuccess: () => {
+      setRejectFor(null);
+      void qc.invalidateQueries({ queryKey: ["admin-discovery"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Reject failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  if (me.isLoading) {
     return (
       <View style={styles.center}>
         <ActivityIndicator color={colors.light.primary} />
@@ -29,7 +81,7 @@ export default function AdminScreen() {
     );
   }
 
-  if (!q.data?.isModerator) {
+  if (!me.data?.isModerator) {
     return (
       <View style={styles.center}>
         <Stack.Screen options={{ title: "Admin" }} />
@@ -42,31 +94,185 @@ export default function AdminScreen() {
     );
   }
 
+  const items = queueQ.data?.items ?? [];
+
   return (
     <View style={styles.container}>
-      <Text style={styles.h1}>Welcome, moderator.</Text>
-      <Text style={styles.body}>
-        Detailed admin tools — AI discovery review, user management, and the
-        admin activity log — are available on the web app. Mobile parity is
-        tracked in task #220.
-      </Text>
-      <Text style={styles.note}>
-        Signed in as{" "}
-        <Text style={{ color: colors.light.foreground, fontWeight: "700" }}>
-          {q.data.email ?? "unknown"}
-        </Text>
-        .
-      </Text>
+      <Stack.Screen options={{ title: "Moderation queue" }} />
+      <View style={styles.tabs}>
+        {(["pending", "approved", "rejected"] as StatusFilter[]).map((s) => (
+          <TouchableOpacity
+            key={s}
+            onPress={() => setStatus(s)}
+            style={[styles.tab, status === s && styles.tabActive]}
+          >
+            <Text
+              style={[styles.tabText, status === s && styles.tabTextActive]}
+            >
+              {s}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {queueQ.data?.note ? (
+        <Text style={styles.note}>{queueQ.data.note}</Text>
+      ) : null}
+
+      <FlatList
+        data={items}
+        keyExtractor={(d) => d.id}
+        contentContainerStyle={{ padding: 16, paddingBottom: 80 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={queueQ.isFetching}
+            onRefresh={() => void queueQ.refetch()}
+            tintColor={colors.light.primary}
+          />
+        }
+        ListEmptyComponent={
+          queueQ.isLoading ? (
+            <ActivityIndicator color={colors.light.primary} />
+          ) : (
+            <Text style={styles.empty}>Nothing to review.</Text>
+          )
+        }
+        renderItem={({ item }) => (
+          <DiscoveryCard
+            trail={item}
+            onApprove={() => approveMut.mutate(item.id)}
+            onReject={() => setRejectFor(item)}
+            busy={approveMut.isPending}
+          />
+        )}
+      />
+
+      <RejectModal
+        trail={rejectFor}
+        onDismiss={() => setRejectFor(null)}
+        onConfirm={(reason) =>
+          rejectFor && rejectMut.mutate({ id: rejectFor.id, reason })
+        }
+        busy={rejectMut.isPending}
+      />
     </View>
   );
 }
 
+function DiscoveryCard({
+  trail,
+  onApprove,
+  onReject,
+  busy,
+}: {
+  trail: DiscoveredTrail;
+  onApprove: () => void;
+  onReject: () => void;
+  busy: boolean;
+}) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle} numberOfLines={2}>
+        {trail.name ?? "Untitled discovery"}
+      </Text>
+      <Text style={styles.cardMeta}>
+        {trail.region ?? "Unknown region"}
+        {trail.difficulty ? ` • ${trail.difficulty}` : ""}
+      </Text>
+      {trail.source_url ? (
+        <Text style={styles.cardLink} numberOfLines={1}>
+          {trail.source_url}
+        </Text>
+      ) : null}
+      {trail.status === "pending" ? (
+        <View style={styles.actions}>
+          <TouchableOpacity
+            onPress={onApprove}
+            disabled={busy}
+            style={[styles.actionBtn, styles.approveBtn, busy && { opacity: 0.5 }]}
+          >
+            <Feather name="check" size={16} color={colors.light.primaryForeground} />
+            <Text style={styles.actionTextLight}>Approve</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={onReject}
+            disabled={busy}
+            style={[styles.actionBtn, styles.rejectBtn]}
+          >
+            <Feather name="x" size={16} color={colors.light.foreground} />
+            <Text style={styles.actionTextDark}>Reject</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <Text style={styles.statusBadge}>{trail.status}</Text>
+      )}
+    </View>
+  );
+}
+
+function RejectModal({
+  trail,
+  onDismiss,
+  onConfirm,
+  busy,
+}: {
+  trail: DiscoveredTrail | null;
+  onDismiss: () => void;
+  onConfirm: (reason: string) => void;
+  busy: boolean;
+}) {
+  const [reason, setReason] = useState("");
+  return (
+    <Modal
+      visible={!!trail}
+      animationType="fade"
+      transparent
+      onRequestClose={onDismiss}
+    >
+      <View style={styles.modalScrim}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Reject discovery</Text>
+          <Text style={styles.body}>
+            Optional: tell the AI why this discovery was wrong so future scans
+            can do better.
+          </Text>
+          <TextInput
+            value={reason}
+            onChangeText={setReason}
+            placeholder="Reason (optional)"
+            placeholderTextColor={colors.light.mutedForeground}
+            multiline
+            style={styles.modalInput}
+          />
+          <View style={[styles.actions, { marginTop: 14 }]}>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.rejectBtn]}
+              onPress={onDismiss}
+              disabled={busy}
+            >
+              <Text style={styles.actionTextDark}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.approveBtn, busy && { opacity: 0.5 }]}
+              onPress={() => {
+                onConfirm(reason);
+                setReason("");
+              }}
+              disabled={busy}
+            >
+              <Text style={styles.actionTextLight}>
+                {busy ? "Rejecting…" : "Confirm"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.light.background,
-    padding: 20,
-  },
+  container: { flex: 1, backgroundColor: colors.light.background },
   center: {
     flex: 1,
     backgroundColor: colors.light.background,
@@ -77,7 +283,12 @@ const styles = StyleSheet.create({
   },
   h1: { color: colors.light.foreground, fontSize: 22, fontWeight: "800" },
   body: { color: colors.light.mutedForeground, fontSize: 14, marginTop: 8 },
-  note: { color: colors.light.mutedForeground, fontSize: 13, marginTop: 16 },
+  note: {
+    color: colors.light.mutedForeground,
+    fontSize: 12,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+  },
   btn: {
     marginTop: 18,
     paddingHorizontal: 16,
@@ -86,4 +297,112 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   btnText: { color: colors.light.primaryForeground, fontWeight: "700" },
+  tabs: {
+    flexDirection: "row",
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+  },
+  tab: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: colors.light.muted,
+  },
+  tabActive: { backgroundColor: colors.light.primary },
+  tabText: {
+    color: colors.light.foreground,
+    fontWeight: "600",
+    textTransform: "capitalize",
+    fontSize: 13,
+  },
+  tabTextActive: { color: colors.light.primaryForeground },
+  card: {
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+  },
+  cardTitle: { color: colors.light.foreground, fontWeight: "700", fontSize: 15 },
+  cardMeta: {
+    color: colors.light.mutedForeground,
+    fontSize: 12,
+    marginTop: 4,
+  },
+  cardLink: {
+    color: colors.light.primary,
+    fontSize: 12,
+    marginTop: 4,
+    textDecorationLine: "underline",
+  },
+  actions: { flexDirection: "row", gap: 8, marginTop: 12 },
+  actionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    flex: 1,
+  },
+  approveBtn: { backgroundColor: colors.light.primary },
+  rejectBtn: {
+    backgroundColor: colors.light.muted,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+  },
+  actionTextLight: {
+    color: colors.light.primaryForeground,
+    fontWeight: "700",
+    fontSize: 13,
+  },
+  actionTextDark: {
+    color: colors.light.foreground,
+    fontWeight: "700",
+    fontSize: 13,
+  },
+  statusBadge: {
+    color: colors.light.mutedForeground,
+    textTransform: "uppercase",
+    fontSize: 11,
+    letterSpacing: 0.5,
+    marginTop: 8,
+  },
+  empty: {
+    color: colors.light.mutedForeground,
+    fontSize: 13,
+    textAlign: "center",
+    marginTop: 40,
+  },
+  modalScrim: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: colors.light.card,
+    borderRadius: 16,
+    padding: 18,
+    width: "100%",
+    maxWidth: 420,
+  },
+  modalTitle: {
+    color: colors.light.foreground,
+    fontWeight: "800",
+    fontSize: 18,
+  },
+  modalInput: {
+    backgroundColor: colors.light.input,
+    color: colors.light.foreground,
+    borderRadius: 10,
+    padding: 12,
+    minHeight: 80,
+    marginTop: 12,
+    textAlignVertical: "top",
+  },
 });

@@ -30,6 +30,26 @@ import colors from "@/constants/colors";
 import { searchTrailsByBbox, type MapTrail as ApiTrail } from "@/lib/api";
 import { difficultyColor } from "@/lib/trailColors";
 
+type DifficultyFilter = "all" | "green" | "blue" | "black" | "double-black";
+
+function matchesDifficulty(
+  trail: ApiTrail,
+  filter: DifficultyFilter,
+): boolean {
+  if (filter === "all") return true;
+  const raw = (trail.difficulty ?? trail.ai_difficulty ?? "").toLowerCase();
+  if (filter === "green") return raw.includes("green") || raw.includes("easy");
+  if (filter === "blue")
+    return (
+      raw.includes("blue") || raw.includes("intermediate") || raw === "moderate"
+    );
+  if (filter === "black")
+    return raw.includes("black") && !raw.includes("double");
+  if (filter === "double-black")
+    return raw.includes("double") || raw.includes("expert");
+  return true;
+}
+
 // Default region centred on a generic mid-Atlantic ride hub so the map
 // has *something* to show before location loads.
 const FALLBACK_REGION: Region = {
@@ -46,6 +66,8 @@ export default function MapTab() {
     "unknown" | "granted" | "denied"
   >("unknown");
   const [selected, setSelected] = useState<TrailDetailData | null>(null);
+  const [difficultyFilter, setDifficultyFilter] = useState<DifficultyFilter>("all");
+  const [mapKind, setMapKind] = useState<"standard" | "satellite">("standard");
 
   // Fetch trails for the current viewport. We hit the bbox-aware route
   // directly rather than through the generated `useSearchTrails` hook —
@@ -59,10 +81,10 @@ export default function MapTab() {
     staleTime: 60_000,
   });
 
-  const trails: ApiTrail[] = useMemo(
-    () => trailsQ.data?.trails ?? [],
-    [trailsQ.data],
-  );
+  const trails: ApiTrail[] = useMemo(() => {
+    const all = trailsQ.data?.trails ?? [];
+    return all.filter((t) => matchesDifficulty(t, difficultyFilter));
+  }, [trailsQ.data, difficultyFilter]);
 
   useEffect(() => {
     void (async () => {
@@ -98,6 +120,7 @@ export default function MapTab() {
       <MapView
         ref={mapRef}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
+        mapType={mapKind}
         style={StyleSheet.absoluteFill}
         initialRegion={FALLBACK_REGION}
         showsUserLocation={permission === "granted"}
@@ -147,29 +170,71 @@ export default function MapTab() {
           </Text>
         </View>
 
-        <TouchableOpacity
-          style={styles.recenterBtn}
-          onPress={() => {
-            void (async () => {
-              try {
-                const pos = await Location.getCurrentPositionAsync({
-                  accuracy: Location.Accuracy.Balanced,
-                });
-                const next: Region = {
-                  latitude: pos.coords.latitude,
-                  longitude: pos.coords.longitude,
-                  latitudeDelta: 0.08,
-                  longitudeDelta: 0.08,
-                };
-                mapRef.current?.animateToRegion(next, 600);
-              } catch {
-                // ignore
-              }
-            })();
-          }}
-        >
-          <Feather name="navigation" size={18} color={colors.light.primary} />
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", gap: 6 }}>
+          <TouchableOpacity
+            style={styles.recenterBtn}
+            onPress={() =>
+              setMapKind((k) => (k === "standard" ? "satellite" : "standard"))
+            }
+          >
+            <Feather
+              name={mapKind === "standard" ? "image" : "map"}
+              size={18}
+              color={colors.light.primary}
+            />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.recenterBtn}
+            onPress={() => {
+              void (async () => {
+                try {
+                  const pos = await Location.getCurrentPositionAsync({
+                    accuracy: Location.Accuracy.Balanced,
+                  });
+                  const next: Region = {
+                    latitude: pos.coords.latitude,
+                    longitude: pos.coords.longitude,
+                    latitudeDelta: 0.08,
+                    longitudeDelta: 0.08,
+                  };
+                  mapRef.current?.animateToRegion(next, 600);
+                } catch {
+                  // ignore
+                }
+              })();
+            }}
+          >
+            <Feather
+              name="navigation"
+              size={18}
+              color={colors.light.primary}
+            />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.filterBar} pointerEvents="box-none">
+        {(["all", "green", "blue", "black", "double-black"] as DifficultyFilter[]).map(
+          (f) => (
+            <TouchableOpacity
+              key={f}
+              onPress={() => setDifficultyFilter(f)}
+              style={[
+                styles.filterChip,
+                difficultyFilter === f && styles.filterChipActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.filterChipText,
+                  difficultyFilter === f && styles.filterChipTextActive,
+                ]}
+              >
+                {f === "double-black" ? "2×black" : f}
+              </Text>
+            </TouchableOpacity>
+          ),
+        )}
       </View>
 
       {permission === "denied" ? (
@@ -286,4 +351,32 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   permBannerText: { color: colors.light.foreground, fontSize: 12 },
+  filterBar: {
+    position: "absolute",
+    top: 60,
+    left: 12,
+    right: 12,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  filterChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.light.card,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+  },
+  filterChipActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+  filterChipText: {
+    color: colors.light.foreground,
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "capitalize",
+  },
+  filterChipTextActive: { color: colors.light.primaryForeground },
 });

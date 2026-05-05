@@ -16,6 +16,7 @@ import {
   FlatList,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -24,7 +25,12 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-import { getPlannerSuggestions, type PlannerSuggestion } from "@/lib/api";
+import {
+  buildGpx,
+  getPlannerSuggestions,
+  searchTrailsByBbox,
+  type PlannerSuggestion,
+} from "@/lib/api";
 import { geocode, type NominatimResult } from "@/lib/nominatim";
 
 interface Endpoint {
@@ -63,6 +69,54 @@ export default function PlannerTab() {
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
+  }
+
+  const [exporting, setExporting] = useState(false);
+
+  async function onExportGpx() {
+    if (!from || !to) {
+      Alert.alert("Set endpoints first", "Pick a From and To before exporting.");
+      return;
+    }
+    setExporting(true);
+    try {
+      // Build a GPX with the From waypoint, every selected trail's polyline,
+      // and the To waypoint. We hit the bbox/id-filter trail search to grab
+      // the paths for the trails the user has ticked.
+      const points: Array<{ lat: number; lon: number }> = [
+        { lat: from.lat, lon: from.lon },
+      ];
+      if (selected.length > 0) {
+        const res = await searchTrailsByBbox({
+          ids: selected.join(","),
+          limit: 200,
+        });
+        for (const t of res.trails) {
+          if (!Array.isArray(t.path)) continue;
+          for (const p of t.path) {
+            if (Array.isArray(p) && p.length >= 2) {
+              const [lon, lat] = p as [unknown, unknown];
+              if (typeof lat === "number" && typeof lon === "number") {
+                points.push({ lat, lon });
+              }
+            }
+          }
+        }
+      }
+      points.push({ lat: to.lat, lon: to.lon });
+      const gpx = buildGpx(routeName.trim() || "TrailForge route", points);
+      await Share.share({
+        title: `${routeName.trim() || "Route"}.gpx`,
+        message: gpx,
+      });
+    } catch (err) {
+      Alert.alert(
+        "Export failed",
+        err instanceof Error ? err.message : "Unknown error",
+      );
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function onSave() {
@@ -175,6 +229,24 @@ export default function PlannerTab() {
               <ActivityIndicator color={colors.light.primaryForeground} />
             ) : (
               <Text style={styles.saveBtnText}>Save route</Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={onExportGpx}
+            disabled={exporting}
+            style={[styles.gpxBtn, exporting && { opacity: 0.6 }]}
+          >
+            {exporting ? (
+              <ActivityIndicator color={colors.light.foreground} />
+            ) : (
+              <>
+                <Feather
+                  name="download"
+                  size={16}
+                  color={colors.light.foreground}
+                />
+                <Text style={styles.gpxBtnText}>GPX</Text>
+              </>
             )}
           </TouchableOpacity>
         </View>
@@ -427,6 +499,22 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   saveBtnText: { color: colors.light.primaryForeground, fontWeight: "700" },
+  gpxBtn: {
+    backgroundColor: colors.light.muted,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  gpxBtnText: {
+    color: colors.light.foreground,
+    fontWeight: "700",
+    fontSize: 13,
+  },
   empty: {
     alignItems: "center",
     paddingVertical: 32,

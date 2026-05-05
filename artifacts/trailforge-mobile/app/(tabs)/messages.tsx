@@ -1,13 +1,14 @@
 /**
  * Messages inbox — list of chat rooms with unread counts. Tap to open
- * the thread at /messages/[roomId].
+ * the thread at /messages/[roomId]. Long-press a row to archive it.
  */
 import { Feather } from "@expo/vector-icons";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -17,9 +18,10 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-import { listChatRooms, type ChatRoom } from "@/lib/api";
+import { archiveRoom, listChatRooms, type ChatRoom } from "@/lib/api";
 
 export default function MessagesTab() {
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["chat-rooms"],
     queryFn: listChatRooms,
@@ -27,6 +29,29 @@ export default function MessagesTab() {
     // updates inside the thread itself.
     refetchInterval: 30_000,
   });
+
+  const archiveMut = useMutation({
+    mutationFn: (roomId: string) => archiveRoom(roomId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["chat-rooms"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Archive failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  function onLongPressRoom(room: ChatRoom) {
+    Alert.alert(room.title ?? "Conversation", "What would you like to do?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Archive",
+        style: "destructive",
+        onPress: () => archiveMut.mutate(room.id),
+      },
+    ]);
+  }
 
   return (
     <FlatList
@@ -59,12 +84,20 @@ export default function MessagesTab() {
           </View>
         )
       }
-      renderItem={({ item }) => <RoomRow room={item} />}
+      renderItem={({ item }) => (
+        <RoomRow room={item} onLongPress={() => onLongPressRoom(item)} />
+      )}
     />
   );
 }
 
-function RoomRow({ room }: { room: ChatRoom }) {
+function RoomRow({
+  room,
+  onLongPress,
+}: {
+  room: ChatRoom;
+  onLongPress: () => void;
+}) {
   const title = room.title ?? (room.kind === "dm" ? "Direct message" : "Group");
   const preview = room.last_message_preview ?? "—";
   return (
@@ -75,6 +108,8 @@ function RoomRow({ room }: { room: ChatRoom }) {
           params: { roomId: room.id },
         })
       }
+      onLongPress={onLongPress}
+      delayLongPress={350}
       style={styles.row}
     >
       <View style={styles.avatar}>

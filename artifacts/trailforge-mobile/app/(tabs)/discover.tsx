@@ -1,10 +1,10 @@
 /**
- * Discover tab — browse public routes (`useListPublicRoutes`) and groups.
- * Tap a route to see its details (#220 will deep-link into the route
- * comments thread).
+ * Discover tab — browse public routes, my groups, and discoverable
+ * (public) groups with a one-tap join-request flow. Owners get a quick
+ * leave button.
  */
 import { Feather } from "@expo/vector-icons";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useListPublicRoutes } from "@workspace/api-client-react";
 import React, { useState } from "react";
 import {
@@ -21,7 +21,15 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-import { createGroup, listMyGroups, type Group } from "@/lib/api";
+import {
+  createGroup,
+  leaveGroup,
+  listDiscoverableGroups,
+  listMyGroups,
+  requestGroupJoin,
+  type DiscoverableGroup,
+  type Group,
+} from "@/lib/api";
 
 interface PublicRoute {
   id: string;
@@ -32,14 +40,63 @@ interface PublicRoute {
 }
 
 export default function DiscoverTab() {
+  const qc = useQueryClient();
   const routesQ = useListPublicRoutes();
   const groupsQ = useQuery({ queryKey: ["my-groups"], queryFn: listMyGroups });
   const [groupName, setGroupName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  const discoverQ = useQuery({
+    queryKey: ["discoverable-groups", discoverQuery],
+    queryFn: () => listDiscoverableGroups(discoverQuery),
+  });
+
+  const joinMut = useMutation({
+    mutationFn: (groupId: string) => requestGroupJoin(groupId),
+    onSuccess: () => {
+      Alert.alert(
+        "Request sent",
+        "The group's owners will see your request shortly.",
+      );
+      void qc.invalidateQueries({ queryKey: ["discoverable-groups"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Couldn't request to join",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
+
+  const leaveMut = useMutation({
+    mutationFn: (groupId: string) => leaveGroup(groupId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["my-groups"] });
+      void qc.invalidateQueries({ queryKey: ["discoverable-groups"] });
+    },
+    onError: (err) =>
+      Alert.alert(
+        "Leave failed",
+        err instanceof Error ? err.message : "Unknown error",
+      ),
+  });
 
   const routes =
     (routesQ.data as { routes?: PublicRoute[] } | undefined)?.routes ?? [];
   const groups = groupsQ.data?.groups ?? [];
+  const discoverable = (discoverQ.data?.items ?? []).filter(
+    (g) => !g.is_member,
+  );
+
+  function confirmLeave(g: Group) {
+    Alert.alert("Leave group?", `Leave "${g.name}"?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Leave",
+        style: "destructive",
+        onPress: () => leaveMut.mutate(g.id),
+      },
+    ]);
+  }
 
   async function onCreateGroup() {
     if (!groupName.trim()) return;
@@ -48,6 +105,7 @@ export default function DiscoverTab() {
       await createGroup(groupName.trim());
       setGroupName("");
       void groupsQ.refetch();
+      void qc.invalidateQueries({ queryKey: ["discoverable-groups"] });
     } catch (err) {
       Alert.alert(
         "Could not create group",
@@ -84,7 +142,13 @@ export default function DiscoverTab() {
           ) : groups.length === 0 ? (
             <Text style={styles.emptyText}>You're not in any group yet.</Text>
           ) : (
-            groups.map((g: Group) => <GroupRow key={g.id} group={g} />)
+            groups.map((g: Group) => (
+              <GroupRow
+                key={g.id}
+                group={g}
+                onLeave={() => confirmLeave(g)}
+              />
+            ))
           )}
 
           <View style={styles.createGroupRow}>
@@ -116,6 +180,36 @@ export default function DiscoverTab() {
           </View>
 
           <Text style={[styles.sectionTitle, { marginTop: 24 }]}>
+            Discover groups
+          </Text>
+          <TextInput
+            value={discoverQuery}
+            onChangeText={setDiscoverQuery}
+            placeholder="Search public groups"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={[styles.input, { marginBottom: 8 }]}
+          />
+          {discoverQ.isLoading ? (
+            <ActivityIndicator color={colors.light.primary} />
+          ) : discoverable.length === 0 ? (
+            <Text style={styles.emptyText}>
+              No matching public groups.
+            </Text>
+          ) : (
+            discoverable.slice(0, 10).map((g) => (
+              <DiscoverableGroupRow
+                key={g.id}
+                group={g}
+                onJoin={() => joinMut.mutate(g.id)}
+                pending={
+                  joinMut.isPending ||
+                  Boolean(g.has_pending_request)
+                }
+              />
+            ))
+          )}
+
+          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>
             Public routes
           </Text>
         </View>
@@ -134,9 +228,9 @@ export default function DiscoverTab() {
   );
 }
 
-function GroupRow({ group }: { group: Group }) {
+function GroupRow({ group, onLeave }: { group: Group; onLeave: () => void }) {
   return (
-    <Pressable style={styles.groupRow}>
+    <Pressable style={styles.groupRow} onLongPress={onLeave} delayLongPress={400}>
       <Feather name="users" size={18} color={colors.light.primary} />
       <View style={{ flex: 1 }}>
         <Text style={styles.rowTitle}>{group.name}</Text>
@@ -145,8 +239,46 @@ function GroupRow({ group }: { group: Group }) {
           {group.is_owner ? " • owner" : ""}
         </Text>
       </View>
-      <Feather name="chevron-right" size={18} color={colors.light.mutedForeground} />
+      {!group.is_owner ? (
+        <TouchableOpacity onPress={onLeave} hitSlop={8}>
+          <Feather name="log-out" size={16} color={colors.light.mutedForeground} />
+        </TouchableOpacity>
+      ) : (
+        <Feather name="chevron-right" size={18} color={colors.light.mutedForeground} />
+      )}
     </Pressable>
+  );
+}
+
+function DiscoverableGroupRow({
+  group,
+  onJoin,
+  pending,
+}: {
+  group: DiscoverableGroup;
+  onJoin: () => void;
+  pending: boolean;
+}) {
+  return (
+    <View style={styles.groupRow}>
+      <Feather name="globe" size={18} color={colors.light.primary} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.rowTitle}>{group.name}</Text>
+        <Text style={styles.rowMeta} numberOfLines={1}>
+          {group.member_count} member{group.member_count === 1 ? "" : "s"}
+          {group.description ? ` • ${group.description}` : ""}
+        </Text>
+      </View>
+      <TouchableOpacity
+        onPress={onJoin}
+        disabled={pending}
+        style={[styles.joinBtn, pending && { opacity: 0.5 }]}
+      >
+        <Text style={styles.joinBtnText}>
+          {group.has_pending_request ? "Pending" : "Join"}
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -214,4 +346,15 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   routeName: { color: colors.light.foreground, fontWeight: "700", fontSize: 14 },
+  joinBtn: {
+    backgroundColor: colors.light.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  joinBtnText: {
+    color: colors.light.primaryForeground,
+    fontWeight: "700",
+    fontSize: 12,
+  },
 });
