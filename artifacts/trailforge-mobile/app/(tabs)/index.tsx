@@ -22,13 +22,18 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  Share,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+// expo-file-system 55 split into a new `Paths`/`File` API and a legacy
+// module. The legacy `documentDirectory`/`writeAsStringAsync` shape is
+// still the simplest way to write a one-shot text file before sharing,
+// so we import from the legacy entry deliberately.
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 
 import MapView, {
   Marker,
@@ -83,6 +88,18 @@ export default function PlannerTab() {
 
   const [from, setFrom] = useState<Endpoint | null>(null);
   const [to, setTo] = useState<Endpoint | null>(null);
+  // Intermediate stops (fuel / campsite / custom). Mirrors the web
+  // planner's waypoints model — backend accepts up to PLANNER_MAX_WAYPOINTS
+  // entries with `kind: "fuel"|"campsite"|"custom"`.
+  const [waypoints, setWaypoints] = useState<
+    Array<{
+      id: string;
+      lat: number;
+      lng: number;
+      name: string;
+      kind: "fuel" | "campsite" | "custom";
+    }>
+  >([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [routeName, setRouteName] = useState("");
   const [hydratedFor, setHydratedFor] = useState<string | null>(null);
@@ -113,6 +130,18 @@ export default function PlannerTab() {
         lat: toWp.lat,
         lon: toWp.lon,
       });
+    }
+    // Restore intermediate stops between from/to (skipping the first and
+    // last entries which represent the endpoints themselves).
+    if (wps.length > 2) {
+      const stops = wps.slice(1, -1).map((w, idx) => ({
+        id: w.id ?? `wp-${idx}`,
+        lat: w.lat,
+        lng: w.lon,
+        name: w.label ?? "Stop",
+        kind: "custom" as const,
+      }));
+      setWaypoints(stops);
     }
     setHydratedFor(routeId);
   }, [routeId, savedRoutes.data, hydratedFor]);
@@ -190,12 +219,44 @@ export default function PlannerTab() {
           }
         }
       }
+      // Insert any intermediate stops the user added (fuel/campsite/custom)
+      // before the final To endpoint so they show up as GPX waypoints.
+      for (const wp of waypoints) {
+        points.push({ lat: wp.lat, lon: wp.lng });
+      }
       points.push({ lat: to.lat, lon: to.lon });
       const gpx = buildGpx(routeName.trim() || "TrailForge route", points);
-      await Share.share({
-        title: `${routeName.trim() || "Route"}.gpx`,
-        message: gpx,
+      // Write the GPX to the cache dir as a real .gpx file, then hand off to
+      // the OS share-sheet via expo-sharing so the user can save / send it
+      // as an attachment instead of a raw text blob.
+      const safeName = (routeName.trim() || "TrailForge-route").replace(
+        /[^a-zA-Z0-9_-]+/g,
+        "_",
+      );
+      // Prefer cacheDirectory, fall back to documentDirectory — Android's
+      // root storage path is permission-locked, so an empty-string base
+      // would fail the write.
+      const baseDir =
+        FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+      if (!baseDir) {
+        throw new Error("No writable directory available on this device.");
+      }
+      const fileUri = `${baseDir}${safeName}.gpx`;
+      await FileSystem.writeAsStringAsync(fileUri, gpx, {
+        encoding: FileSystem.EncodingType.UTF8,
       });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: "application/gpx+xml",
+          dialogTitle: `${routeName.trim() || "Route"}.gpx`,
+          UTI: "com.topografix.gpx",
+        });
+      } else {
+        Alert.alert(
+          "Saved",
+          `GPX written to ${fileUri}. Sharing not available on this device.`,
+        );
+      }
     } catch (err) {
       Alert.alert(
         "Export failed",
@@ -220,8 +281,18 @@ export default function PlannerTab() {
         data: {
           name: routeName.trim(),
           trailIds: selected,
+          // Persist start + intermediate stops + end as the waypoint array.
+          // The Phase-A schema only carries lat/lon/label — `kind` lives
+          // in the planner_state row; we keep it locally for the map
+          // marker badges.
           waypoints: [
             { id: "from", lat: from.lat, lon: from.lon, label: from.label },
+            ...waypoints.map((w) => ({
+              id: w.id,
+              lat: w.lat,
+              lon: w.lng,
+              label: w.name,
+            })),
             { id: "to", lat: to.lat, lon: to.lon, label: to.label },
           ],
         },
@@ -229,6 +300,7 @@ export default function PlannerTab() {
       Alert.alert("Saved", `Route "${routeName.trim()}" saved.`);
       setRouteName("");
       setSelected([]);
+      setWaypoints([]);
     } catch (err) {
       Alert.alert(
         "Save failed",
@@ -262,10 +334,24 @@ export default function PlannerTab() {
       />
 
       {from && to ? (
-        <View style={styles.previewBlock}>
-          <Text style={styles.sectionLabel}>Corridor preview</Text>
-          <CorridorMap from={from} to={to} trails={previewTrails} />
-        </View>
+        <>
+          <View style={styles.previewBlock}>
+            <Text style={styles.sectionLabel}>Corridor preview</Text>
+            <CorridorMap
+              from={from}
+              to={to}
+              trails={previewTrails}
+              waypoints={waypoints}
+            />
+          </View>
+          <WaypointsSection
+            waypoints={waypoints}
+            onAdd={(wp) => setWaypoints((prev) => [...prev, wp])}
+            onRemove={(id) =>
+              setWaypoints((prev) => prev.filter((w) => w.id !== id))
+            }
+          />
+        </>
       ) : null}
 
       <View style={styles.suggestionsHeader}>
@@ -353,10 +439,18 @@ function CorridorMap({
   from,
   to,
   trails,
+  waypoints,
 }: {
   from: Endpoint;
   to: Endpoint;
   trails: MapTrail[];
+  waypoints: Array<{
+    id: string;
+    lat: number;
+    lng: number;
+    name: string;
+    kind: "fuel" | "campsite" | "custom";
+  }>;
 }) {
   // Frame the bbox around both endpoints with a small padding ratio so
   // the markers sit comfortably inside the visible region.
@@ -416,6 +510,21 @@ function CorridorMap({
           title="To"
           pinColor="red"
         />
+        {waypoints.map((w) => (
+          <Marker
+            key={w.id}
+            coordinate={{ latitude: w.lat, longitude: w.lng }}
+            title={w.name}
+            description={w.kind}
+            pinColor={
+              w.kind === "fuel"
+                ? "orange"
+                : w.kind === "campsite"
+                  ? "purple"
+                  : "blue"
+            }
+          />
+        ))}
         {polylines.map((p) => (
           <Polyline
             key={p.key}
@@ -515,6 +624,177 @@ function EndpointPicker({
               </Text>
             </TouchableOpacity>
           ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * Lets the rider add intermediate stops (fuel / campsite / custom) to a
+ * planned route between A and B. Stops are geocoded via Nominatim and
+ * categorised by `kind` so the corridor map can pin them in distinct
+ * colours. The list ordering matches the order the rider will traverse
+ * them.
+ */
+function WaypointsSection({
+  waypoints,
+  onAdd,
+  onRemove,
+}: {
+  waypoints: Array<{
+    id: string;
+    lat: number;
+    lng: number;
+    name: string;
+    kind: "fuel" | "campsite" | "custom";
+  }>;
+  onAdd: (wp: {
+    id: string;
+    lat: number;
+    lng: number;
+    name: string;
+    kind: "fuel" | "campsite" | "custom";
+  }) => void;
+  onRemove: (id: string) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [kind, setKind] = useState<"fuel" | "campsite" | "custom">("custom");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<NominatimResult[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!adding || !query) return;
+    setLoading(true);
+    const handle = setTimeout(() => {
+      geocode(query)
+        .then(setResults)
+        .catch(() => setResults([]))
+        .finally(() => setLoading(false));
+    }, 350);
+    return () => clearTimeout(handle);
+  }, [adding, query]);
+
+  return (
+    <View style={styles.waypointsBlock}>
+      <View style={styles.waypointsHeader}>
+        <Text style={styles.sectionLabel}>
+          Stops along the way ({waypoints.length})
+        </Text>
+        {!adding ? (
+          <TouchableOpacity
+            onPress={() => setAdding(true)}
+            style={styles.addStopBtn}
+          >
+            <Feather name="plus" size={14} color={colors.light.primary} />
+            <Text style={styles.addStopBtnText}>Add stop</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+      {waypoints.map((w, i) => (
+        <View key={w.id} style={styles.waypointRow}>
+          <View style={styles.waypointKindDot}>
+            <Feather
+              name={
+                w.kind === "fuel"
+                  ? "droplet"
+                  : w.kind === "campsite"
+                    ? "moon"
+                    : "map-pin"
+              }
+              size={14}
+              color={colors.light.primary}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.waypointName} numberOfLines={1}>
+              {i + 1}. {w.name}
+            </Text>
+            <Text style={styles.waypointMeta}>{w.kind}</Text>
+          </View>
+          <Pressable onPress={() => onRemove(w.id)} hitSlop={8}>
+            <Feather name="x" size={16} color={colors.light.mutedForeground} />
+          </Pressable>
+        </View>
+      ))}
+      {adding ? (
+        <View style={styles.addStopForm}>
+          <View style={styles.kindRow}>
+            {(["custom", "fuel", "campsite"] as const).map((k) => (
+              <TouchableOpacity
+                key={k}
+                onPress={() => setKind(k)}
+                style={[
+                  styles.kindChip,
+                  kind === k && styles.kindChipActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.kindChipText,
+                    kind === k && styles.kindChipTextActive,
+                  ]}
+                >
+                  {k}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search a place…"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={styles.input}
+          />
+          {loading ? (
+            <ActivityIndicator
+              color={colors.light.primary}
+              style={{ marginTop: 6 }}
+            />
+          ) : null}
+          {results.length > 0 ? (
+            <View style={styles.resultsList}>
+              {results.slice(0, 5).map((r) => (
+                <TouchableOpacity
+                  key={r.place_id}
+                  onPress={() => {
+                    onAdd({
+                      id: `wp-${Date.now()}`,
+                      lat: parseFloat(r.lat),
+                      lng: parseFloat(r.lon),
+                      name: r.display_name.split(",")[0] ?? "Stop",
+                      kind,
+                    });
+                    setAdding(false);
+                    setQuery("");
+                    setResults([]);
+                  }}
+                  style={styles.resultRow}
+                >
+                  <Feather
+                    name="map-pin"
+                    size={14}
+                    color={colors.light.primary}
+                  />
+                  <Text style={styles.resultText} numberOfLines={2}>
+                    {r.display_name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : null}
+          <TouchableOpacity
+            onPress={() => {
+              setAdding(false);
+              setQuery("");
+              setResults([]);
+            }}
+            style={styles.cancelStopBtn}
+          >
+            <Text style={styles.cancelStopBtnText}>Cancel</Text>
+          </TouchableOpacity>
         </View>
       ) : null}
     </View>
@@ -706,6 +986,81 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   previewBlock: { marginTop: 12, marginBottom: 6 },
+  waypointsBlock: { marginTop: 4, marginBottom: 8 },
+  waypointsHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  addStopBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderColor: colors.light.primary,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  addStopBtnText: {
+    color: colors.light.primary,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  waypointRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 6,
+  },
+  waypointKindDot: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.light.muted,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  waypointName: {
+    color: colors.light.foreground,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  waypointMeta: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    marginTop: 1,
+  },
+  addStopForm: {
+    backgroundColor: colors.light.muted,
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 4,
+  },
+  kindRow: { flexDirection: "row", gap: 6, marginBottom: 8 },
+  kindChip: {
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    backgroundColor: colors.light.card,
+  },
+  kindChipActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+  kindChipText: { color: colors.light.foreground, fontSize: 12 },
+  kindChipTextActive: { color: colors.light.primaryForeground },
+  cancelStopBtn: { alignSelf: "flex-end", marginTop: 8 },
+  cancelStopBtnText: { color: colors.light.mutedForeground, fontSize: 12 },
   sectionLabel: {
     color: colors.light.mutedForeground,
     fontSize: 11,

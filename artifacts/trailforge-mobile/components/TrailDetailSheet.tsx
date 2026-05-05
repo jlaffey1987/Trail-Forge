@@ -5,8 +5,9 @@
  * library — task #220 may upgrade to `@gorhom/bottom-sheet` later.
  */
 import { Feather } from "@expo/vector-icons";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSaveTrail } from "@workspace/api-client-react";
+import { router } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
@@ -22,7 +23,12 @@ import {
 
 import { ElevationChart } from "@/components/ElevationChart";
 import colors from "@/constants/colors";
-import { markTrailRidden, unmarkTrailRidden } from "@/lib/api";
+import {
+  listTrailAmendments,
+  listTrailNotes,
+  markTrailRidden,
+  unmarkTrailRidden,
+} from "@/lib/api";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 
 export interface TrailDetailData {
@@ -35,6 +41,10 @@ export interface TrailDetailData {
   elevation_gain_m?: number | null;
   altitudes?: number[];
   photo_urls?: string[];
+  /** UK access taxonomy (BOAT / Green Lane / UCR / etc) — surfaced as a
+   *  shield badge so the rider can spot legal status without opening
+   *  the full detail screen. */
+  legal_status?: string | null;
 }
 
 interface TrailDetailSheetProps {
@@ -77,6 +87,27 @@ export function TrailDetailSheet({
     },
   });
 
+  // Pull lightweight content counts so the sheet can advertise "5 notes •
+  // 1 pending amendment" without forcing the rider to open the full
+  // /trail/[id] screen first. Cached for 30s so flipping between trails
+  // on the map doesn't hammer the API.
+  const notesQ = useQuery({
+    queryKey: ["trail-notes-count", trail?.id],
+    queryFn: () => listTrailNotes(trail!.id),
+    enabled: !!trail && visible,
+    staleTime: 30_000,
+  });
+  const amendmentsQ = useQuery({
+    queryKey: ["trail-amendments-count", trail?.id],
+    queryFn: () => listTrailAmendments(trail!.id),
+    enabled: !!trail && visible,
+    staleTime: 30_000,
+  });
+  const notesCount = notesQ.data?.items?.length ?? 0;
+  const pendingCount = (amendmentsQ.data?.items ?? []).filter(
+    (a) => a.status === "pending",
+  ).length;
+
   if (!trail) return null;
 
   return (
@@ -103,6 +134,18 @@ export function TrailDetailSheet({
                 {trail.terrain ? (
                   <View style={styles.terrainBadge}>
                     <Text style={styles.terrainBadgeText}>{trail.terrain}</Text>
+                  </View>
+                ) : null}
+                {trail.legal_status ? (
+                  <View style={styles.legalBadge}>
+                    <Feather
+                      name="shield"
+                      size={11}
+                      color={colors.light.primaryForeground}
+                    />
+                    <Text style={styles.legalBadgeText}>
+                      {trail.legal_status}
+                    </Text>
                   </View>
                 ) : null}
               </View>
@@ -194,6 +237,46 @@ export function TrailDetailSheet({
                 )}
               </TouchableOpacity>
             </View>
+
+            {/* Quick-glance counts + jump-off to the full-detail screen
+                where notes, photos, amendments and share-to-group live.
+                Keeps the sheet itself uncluttered while preserving full
+                feature parity with the web TrailDetailSheet tabs. */}
+            <View style={styles.contentRow}>
+              <ContentChip
+                icon="message-square"
+                label={`${notesCount} note${notesCount === 1 ? "" : "s"}`}
+              />
+              <ContentChip
+                icon="image"
+                label={`${trail.photo_urls?.length ?? 0} photo${
+                  (trail.photo_urls?.length ?? 0) === 1 ? "" : "s"
+                }`}
+              />
+              {pendingCount > 0 ? (
+                <ContentChip
+                  icon="edit-3"
+                  label={`${pendingCount} pending`}
+                  highlight
+                />
+              ) : null}
+            </View>
+            <TouchableOpacity
+              style={styles.viewFullBtn}
+              onPress={() => {
+                onClose();
+                router.push(`/trail/${encodeURIComponent(trail.id)}`);
+              }}
+            >
+              <Feather
+                name="external-link"
+                size={14}
+                color={colors.light.primary}
+              />
+              <Text style={styles.viewFullBtnText}>
+                View full details, notes &amp; share
+              </Text>
+            </TouchableOpacity>
           </ScrollView>
         </Pressable>
       </Pressable>
@@ -224,6 +307,38 @@ function DiffBadge({
       <Text style={styles.diffBadgeText}>
         {prefix ?? ""}
         {difficultyLabel(difficulty)}
+      </Text>
+    </View>
+  );
+}
+
+function ContentChip({
+  icon,
+  label,
+  highlight,
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  highlight?: boolean;
+}) {
+  return (
+    <View
+      style={[styles.contentChip, highlight && styles.contentChipHighlight]}
+    >
+      <Feather
+        name={icon}
+        size={12}
+        color={
+          highlight ? colors.light.primaryForeground : colors.light.mutedForeground
+        }
+      />
+      <Text
+        style={[
+          styles.contentChipText,
+          highlight && { color: colors.light.primaryForeground },
+        ]}
+      >
+        {label}
       </Text>
     </View>
   );
@@ -285,6 +400,49 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   terrainBadgeText: { color: colors.light.mutedForeground, fontSize: 11 },
+  legalBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.light.primary,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  legalBadgeText: {
+    color: colors.light.primaryForeground,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  contentRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 14,
+  },
+  contentChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.light.muted,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  contentChipHighlight: { backgroundColor: colors.light.primary },
+  contentChipText: { color: colors.light.mutedForeground, fontSize: 11 },
+  viewFullBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    borderRadius: 10,
+    paddingVertical: 10,
+  },
+  viewFullBtnText: { color: colors.light.primary, fontWeight: "600" },
   statsRow: { flexDirection: "row", gap: 12 },
   stat: {
     flex: 1,
