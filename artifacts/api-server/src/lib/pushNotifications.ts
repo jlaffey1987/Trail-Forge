@@ -1,32 +1,10 @@
-/**
- * Web-Push (VAPID) helpers for fanning OS-level notifications out to riders'
- * phones whenever a new row lands in `trail_shares` or `group_members`.
- *
- * Design notes:
- *   * Send is fire-and-forget — callers should *not* await the returned
- *     promise on the request hot path. We log failures via the request
- *     logger and never throw out of `sendPushToUsers` so a flaky push
- *     provider can never poison a successful share / join.
- *   * Subscriptions that come back with HTTP 404/410 are stale (the user
- *     uninstalled the PWA, revoked permission, etc.) — we delete them from
- *     `push_subscriptions` so we stop wasting requests on them.
- *   * If VAPID env vars aren't configured the helpers all become no-ops.
- *     This keeps local dev / tests working without secrets, and lets the
- *     server boot even before the operator generates keys.
- */
+// Web Push (VAPID) + Expo Push fan-out. Stale subscriptions (HTTP 404/410
+// or DeviceNotRegistered) are pruned. Fire-and-forget; never throws.
 
 import webpush, { type PushSubscription, type WebPushError } from "web-push";
 import { getSupabaseAdmin } from "./supabaseAdmin";
 
-// Expo's HTTP/2 push API. Anyone — anonymous — can POST tokens here; we
-// don't need an Expo "access token" unless the project enables Enhanced
-// Push Security, which TrailForge does not. See
-// https://docs.expo.dev/push-notifications/sending-notifications/.
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
-
-// Same shape we accept from `/me/push/subscribe`. Tokens that match this
-// pattern are routed through Expo's API; everything else is treated as a
-// Web Push subscription and sent via VAPID.
 const EXPO_PUSH_TOKEN_RE = /^Exp(?:o|onent)PushToken\[[A-Za-z0-9_\-]+\]$/;
 
 function isExpoEndpoint(endpoint: string): boolean {
@@ -45,22 +23,24 @@ interface ExpoPushResponse {
   errors?: Array<{ code?: string; message?: string }>;
 }
 
-/**
- * Send a single batch of Expo push messages. Returns the per-message
- * tickets so the caller can prune tokens whose `details.error` is
- * `DeviceNotRegistered` (the Expo equivalent of HTTP 410). Never throws —
- * any network failure is reported via `log.warn` and treated as a no-op.
- */
-// Expo Push API caps each request at 100 messages — larger payloads are
-// rejected. Chunk the input and reconcile tickets positionally so the
-// caller still gets one ticket per input token in input order.
+// Expo caps each request at 100 messages.
 const EXPO_PUSH_CHUNK = 100;
+
+type ExpoTicketOrNull = ExpoPushTicket | null;
+
+function padTickets(
+  arr: ExpoTicketOrNull[],
+  length: number,
+): ExpoTicketOrNull[] {
+  while (arr.length < length) arr.push(null);
+  return arr;
+}
 
 async function sendExpoPushChunk(
   tokens: string[],
   payload: PushPayload,
   log: MinimalLogger,
-): Promise<ExpoPushTicket[]> {
+): Promise<ExpoTicketOrNull[]> {
   if (tokens.length === 0) return [];
   const messages = tokens.map((to) => ({
     to,
@@ -82,43 +62,38 @@ async function sendExpoPushChunk(
     });
   } catch (err) {
     log.warn({ err, count: tokens.length }, "push: expo fetch failed");
-    return tokens.map(() => null as unknown as ExpoPushTicket);
+    return padTickets([], tokens.length);
   }
   if (!res.ok) {
     log.warn(
       { status: res.status, count: tokens.length },
       "push: expo non-2xx",
     );
-    return tokens.map(() => null as unknown as ExpoPushTicket);
+    return padTickets([], tokens.length);
   }
   let parsed: ExpoPushResponse;
   try {
     parsed = (await res.json()) as ExpoPushResponse;
   } catch (err) {
     log.warn({ err }, "push: expo body parse failed");
-    return tokens.map(() => null as unknown as ExpoPushTicket);
+    return padTickets([], tokens.length);
   }
   if (parsed.errors && parsed.errors.length > 0) {
     log.warn({ errors: parsed.errors }, "push: expo top-level errors");
   }
   const data = parsed.data;
-  if (!data) return tokens.map(() => null as unknown as ExpoPushTicket);
-  const arr = Array.isArray(data) ? data : [data];
-  // Pad to chunk length so positional reconciliation in the caller stays
-  // aligned even when Expo returns fewer entries than we sent.
-  while (arr.length < tokens.length) {
-    arr.push(null as unknown as ExpoPushTicket);
-  }
-  return arr;
+  if (!data) return padTickets([], tokens.length);
+  const arr: ExpoTicketOrNull[] = Array.isArray(data) ? [...data] : [data];
+  return padTickets(arr, tokens.length);
 }
 
 async function sendExpoPushBatch(
   tokens: string[],
   payload: PushPayload,
   log: MinimalLogger,
-): Promise<ExpoPushTicket[]> {
+): Promise<ExpoTicketOrNull[]> {
   if (tokens.length === 0) return [];
-  const out: ExpoPushTicket[] = [];
+  const out: ExpoTicketOrNull[] = [];
   for (let i = 0; i < tokens.length; i += EXPO_PUSH_CHUNK) {
     const chunk = tokens.slice(i, i + EXPO_PUSH_CHUNK);
     const tickets = await sendExpoPushChunk(chunk, payload, log);
@@ -176,13 +151,7 @@ export function getVapidPublicKey(): string | null {
 }
 
 export function isPushConfigured(): boolean {
-  // Push is "configured" when at least one transport can deliver:
-  //   - Web Push (requires VAPID env vars), or
-  //   - Expo Push (no server keys needed; Expo's server accepts any token).
-  // Since Expo always works, this returns true unconditionally. Notify
-  // helpers used to early-return on `!isPushConfigured()` and would
-  // accidentally drop Expo deliveries in environments where VAPID was
-  // unset. Transport-level branching now lives inside `sendPushToUsers`.
+  // Expo Push needs no server keys, so at least one transport is always available.
   return true;
 }
 
@@ -288,10 +257,7 @@ export async function sendPushToUsers(
         payload,
         log,
       );
-      // Tickets come back in the same order we sent them, so we can match
-      // them positionally to the originating subscription. A `DeviceNotRegistered`
-      // ticket means the Expo token has been invalidated and we should drop
-      // the row to stop wasting requests on it.
+      // Positional match; DeviceNotRegistered means prune.
       for (let i = 0; i < tickets.length; i++) {
         const ticket = tickets[i];
         const sub = expoSubs[i];
