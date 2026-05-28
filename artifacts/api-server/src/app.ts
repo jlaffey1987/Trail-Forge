@@ -1,4 +1,9 @@
-import express, { type Express } from "express";
+import express, {
+  type Express,
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import { clerkMiddleware } from "@clerk/express";
@@ -44,5 +49,22 @@ app.use(express.urlencoded({ extended: true, limit: "16mb" }));
 app.use(clerkMiddleware());
 
 app.use("/api", router);
+
+// ---------------------------------------------------------------------------
+// Global error handler — catches anything forwarded via next(err) from route
+// handlers, including errors thrown inside `requireAuth`-wrapped handlers.
+// Must be declared AFTER all routes (Express recognises the 4-arg signature).
+// ---------------------------------------------------------------------------
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  const id = (req as Request & { id?: string }).id;
+  logger.error({ err, reqId: id }, "Unhandled route error");
+  if (res.headersSent) return;
+  const status =
+    err instanceof Error && "status" in err && typeof (err as { status: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : 500;
+  res.status(status).json({ error: "Internal server error" });
+});
 
 export default app;

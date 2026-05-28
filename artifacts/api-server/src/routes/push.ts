@@ -19,48 +19,15 @@ import {
   type IRouter,
   type Request,
   type Response,
-  type NextFunction,
 } from "express";
-import { getAuth } from "@clerk/express";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { requireAuth, type AuthedHandler } from "../middlewares/requireAuth";
+import { isMissingTableError, isMissingColumnError } from "../lib/dbErrors";
 import { getVapidPublicKey, isPushConfigured } from "../lib/pushNotifications";
 
 const router: IRouter = Router();
 
-interface AuthedHandler {
-  (req: Request, res: Response, userId: string): Promise<void>;
-}
-
-function requireAuth(handler: AuthedHandler) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    const auth = getAuth(req);
-    if (!auth.userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    try {
-      await handler(req, res, auth.userId);
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
-function isMissingTableError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "") ||
-    /Could not find the table/i.test(err.message ?? "")
-  );
-}
-
-function isMissingColumnError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return err.code === "42703" || /column .* does not exist/i.test(err.message ?? "");
-}
 
 // Known push-provider hostnames. Web Push endpoints are issued by the
 // browser's push service (FCM for Chromium, Mozilla autopush for Firefox,

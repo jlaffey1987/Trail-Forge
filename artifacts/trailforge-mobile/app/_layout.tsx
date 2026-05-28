@@ -1,3 +1,5 @@
+import "react-native-gesture-handler";
+
 import { ClerkProvider, useAuth } from "@clerk/clerk-expo";
 import {
   Inter_400Regular,
@@ -17,6 +19,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { BrandedLoader } from "@/components/BrandedLoader";
 import colors from "@/constants/colors";
 import { tokenCache } from "@/lib/clerkTokenCache";
 import { setSharedBearerGetter } from "@/lib/api";
@@ -29,8 +32,13 @@ import { subscribeToNotificationTaps } from "@/lib/notificationRouting";
 // development, EXPO_PUBLIC_DOMAIN is the Replit dev domain; in production
 // EAS builds, it is the published `.replit.app` domain.
 // ---------------------------------------------------------------------------
-if (process.env.EXPO_PUBLIC_DOMAIN) {
-  setBaseUrl(`https://${process.env.EXPO_PUBLIC_DOMAIN}`);
+const API_BASE_URL =
+  process.env.EXPO_PUBLIC_API_BASE_URL?.trim() ||
+  (process.env.EXPO_PUBLIC_DOMAIN
+    ? `https://${process.env.EXPO_PUBLIC_DOMAIN}`
+    : "");
+if (API_BASE_URL) {
+  setBaseUrl(API_BASE_URL.replace(/\/+$/, ""));
 }
 
 // `app.json` is the canonical place for the Clerk publishable key. We read
@@ -71,7 +79,7 @@ const queryClient = new QueryClient({
  * tree. Mounted inside `<ClerkProvider>` so `useAuth` is available.
  */
 function ApiAuthBridge({ children }: { children: React.ReactNode }) {
-  const { getToken, isLoaded } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAuth();
 
   useEffect(() => {
     const fn = async () => {
@@ -88,6 +96,24 @@ function ApiAuthBridge({ children }: { children: React.ReactNode }) {
       setSharedBearerGetter(null);
     };
   }, [getToken, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (__DEV__) {
+      console.log(
+        `[ApiAuthBridge] isLoaded=${isLoaded} isSignedIn=${isSignedIn} API=${API_BASE_URL || "(none)"}`,
+      );
+      if (isSignedIn) {
+        getToken()
+          .then((t) =>
+            console.log(
+              `[ApiAuthBridge] token present=${Boolean(t)} prefix=${t?.slice(0, 12) ?? "null"}`,
+            ),
+          )
+          .catch((e) => console.warn("[ApiAuthBridge] getToken error:", e));
+      }
+    }
+  }, [isLoaded, isSignedIn, getToken]);
 
   return <>{children}</>;
 }
@@ -145,7 +171,7 @@ export default function RootLayout() {
     }
   }, [fontsLoaded, fontError]);
 
-  if (!fontsLoaded && !fontError) return null;
+  if (!fontsLoaded && !fontError) return <BrandedLoader />;
 
   return (
     <SafeAreaProvider>

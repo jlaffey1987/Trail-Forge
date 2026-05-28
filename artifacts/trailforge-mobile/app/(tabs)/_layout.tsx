@@ -2,11 +2,16 @@ import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import { useSyncMe } from "@workspace/api-client-react";
 import { Tabs } from "expo-router";
-import React, { useEffect } from "react";
-import { Platform, StyleSheet, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { Platform, StyleSheet, Text, View } from "react-native";
 
 import { AuthGate } from "@/components/AuthGate";
 import { NotificationsBell } from "@/components/NotificationsBell";
+import {
+  ProfileProvider,
+  useProfile,
+  type BikeType,
+} from "@/components/ProfileContext";
 import { UserMenu } from "@/components/UserMenu";
 import colors from "@/constants/colors";
 import { adminWhoami } from "@/lib/api";
@@ -18,24 +23,53 @@ import { rehydrate as rehydrateRecording } from "@/lib/recording";
  * Mounted inside the auth gate so we know the bearer token is available.
  */
 function PostLoginBootstrap() {
-  // `useSyncMe` is the generated React Query mutation hook for
-  // `POST /me/sync`. We fire it once per mount so the server has a row
-  // for this Clerk user before any other API call.
   const sync = useSyncMe();
+  const { setProfile } = useProfile();
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   useEffect(() => {
-    sync.mutate();
-    // Registering for push is idempotent — if the user already granted
-    // permission and the token hasn't changed, nothing happens server-side.
+    sync.mutate(undefined, {
+      onSuccess(data) {
+        setProfile({
+          isPremium: data.is_premium ?? false,
+          preferredBikeType: (data.preferred_bike_type as BikeType | undefined) ?? "all",
+        });
+      },
+      onError(err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn("[PostLoginBootstrap] /me/sync failed:", msg);
+        setSyncError(msg);
+      },
+    });
     void registerForPushAndSubscribe();
-    // Rehydrate any in-progress ride from AsyncStorage so a crash or
-    // process kill during recording doesn't lose the user's points. The
-    // record screen subscribes to recording state on mount and will
-    // immediately reflect the restored buffer.
     void rehydrateRecording();
     // We deliberately want this to run exactly once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  if (syncError) {
+    if (__DEV__) {
+      return (
+        <View
+          style={{
+            position: "absolute",
+            bottom: 100,
+            left: 16,
+            right: 16,
+            backgroundColor: "#7f1d1d",
+            borderRadius: 8,
+            padding: 12,
+            zIndex: 9999,
+          }}
+          pointerEvents="none"
+        >
+          <Text style={{ color: "#fca5a5", fontSize: 11, fontFamily: "monospace" }}>
+            API sync failed: {syncError}
+          </Text>
+        </View>
+      );
+    }
+  }
 
   return null;
 }
@@ -52,6 +86,7 @@ export default function TabLayout() {
   const isAdmin = adminQ.data?.isModerator === true;
 
   return (
+    <ProfileProvider>
     <AuthGate>
       <PostLoginBootstrap />
       <Tabs
@@ -155,5 +190,6 @@ export default function TabLayout() {
         />
       </Tabs>
     </AuthGate>
+    </ProfileProvider>
   );
 }

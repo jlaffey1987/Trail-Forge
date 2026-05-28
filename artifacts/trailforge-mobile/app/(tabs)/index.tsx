@@ -1,24 +1,18 @@
 /**
  * Planner tab — set an A and B point, fetch suggested trails along the
  * corridor, and persist the result as a named saved route.
- *
- * Suggestions come from `getPlannerSuggestions` (direct fetch — Task #214
- * has not yet merged into the OpenAPI contract). When that ships, swap
- * to `useGetPlannerSuggestions`.
  */
 import { Feather } from "@expo/vector-icons";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   useCreateMySavedRoute,
   useListMySavedRoutes,
 } from "@workspace/api-client-react";
-import { useLocalSearchParams } from "expo-router";
-import { useQuery } from "@tanstack/react-query";
+import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Platform,
   Pressable,
   ScrollView,
@@ -51,8 +45,10 @@ import {
   type MapTrail,
   type PlannerSuggestion,
 } from "@/lib/api";
-import { difficultyColor } from "@/lib/trailColors";
+import { difficultyColor, gradeFromDifficulty } from "@/lib/trailColors";
+import { useProfile, type BikeType } from "@/components/ProfileContext";
 import { geocode, type NominatimResult } from "@/lib/nominatim";
+import { setActiveNavRoute } from "@/lib/activeNavRoute";
 
 interface Endpoint {
   label: string;
@@ -104,6 +100,26 @@ export default function PlannerTab() {
   const [routeName, setRouteName] = useState("");
   const [hydratedFor, setHydratedFor] = useState<string | null>(null);
 
+  // Filters applied before calling getPlannerSuggestions.
+  // Seeded from the user's profile but can be overridden here.
+  const { profile } = useProfile();
+  type GradeFilter = "all" | "easy" | "intermediate" | "hard" | "extreme";
+  const [gradeFilter, setGradeFilter] = useState<GradeFilter>("all");
+  const [bikeFilter, setBikeFilter] = useState<BikeType>(
+    profile.preferredBikeType ?? "all",
+  );
+
+  /** Max numeric grade allowed by the current bike/grade filter combo. */
+  function maxGrade(): number | null {
+    if (bikeFilter === "adventure") return 6;
+    if (bikeFilter === "trail") return 9;
+    if (gradeFilter === "easy") return 3;
+    if (gradeFilter === "intermediate") return 6;
+    if (gradeFilter === "hard") return 9;
+    if (gradeFilter === "extreme") return 10;
+    return null; // "all" → no cap
+  }
+
   useEffect(() => {
     if (!routeId || hydratedFor === routeId) return;
     const list =
@@ -151,7 +167,16 @@ export default function PlannerTab() {
   });
   const createRoute = useCreateMySavedRoute();
 
-  const suggestions = suggestionsMut.data?.suggestions ?? [];
+  const allSuggestions = suggestionsMut.data?.suggestions ?? [];
+
+  // Filter suggestions by difficulty grade / bike type client-side.
+  const cap = maxGrade();
+  const suggestions: PlannerSuggestion[] = cap == null
+    ? allSuggestions
+    : allSuggestions.filter((s) => {
+        const grade = gradeFromDifficulty(s.difficulty ?? null);
+        return grade == null || grade <= cap;
+      });
 
   // Pull the polylines for whatever trails the user has ticked so the
   // corridor preview can render them on the inline map. We deliberately
@@ -167,6 +192,13 @@ export default function PlannerTab() {
     staleTime: 30_000,
   });
   const previewTrails: MapTrail[] = previewTrailsQ.data?.trails ?? [];
+
+  // Route summary: total distance of selected trails + estimated ride time.
+  const totalTrailKm = previewTrails
+    .filter((t) => selected.includes(t.id))
+    .reduce((sum, t) => sum + (t.distance_km ?? 0), 0);
+  // ~20 km/h average off-road riding speed for time estimate.
+  const estimatedTimeMin = Math.round((totalTrailKm / 20) * 60);
 
   // Refetch whenever both endpoints are set.
   useEffect(() => {
@@ -330,6 +362,42 @@ export default function PlannerTab() {
         placeholder="Search a destination…"
       />
 
+      {/* ── Filters ─────────────────────────────────────────────────── */}
+      <View style={styles.filterSection}>
+        <Text style={styles.sectionLabel}>Max difficulty</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View style={styles.filterRow}>
+            {(["all","easy","intermediate","hard","extreme"] as GradeFilter[]).map((f) => (
+              <TouchableOpacity
+                key={f}
+                onPress={() => setGradeFilter(f)}
+                style={[styles.filterChip, gradeFilter === f && styles.filterChipActive]}
+              >
+                <Text style={[styles.filterChipText, gradeFilter === f && styles.filterChipTextActive]}>
+                  {f === "all" ? "All grades" : f === "easy" ? "Easy 1-3" : f === "intermediate" ? "Inter 4-6" : f === "hard" ? "Hard 7-9" : "Extreme 10"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+        <Text style={[styles.sectionLabel, { marginTop: 8 }]}>Bike type</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View style={styles.filterRow}>
+            {(["all","adventure","trail","enduro"] as BikeType[]).map((b) => (
+              <TouchableOpacity
+                key={b}
+                onPress={() => setBikeFilter(b)}
+                style={[styles.filterChip, bikeFilter === b && styles.filterChipActive]}
+              >
+                <Text style={[styles.filterChipText, bikeFilter === b && styles.filterChipTextActive]}>
+                  {b === "all" ? "All bikes" : b.charAt(0).toUpperCase() + b.slice(1)}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+      </View>
+
       {from && to ? (
         <>
           <View style={styles.previewBlock}>
@@ -341,6 +409,16 @@ export default function PlannerTab() {
               waypoints={waypoints}
             />
           </View>
+          {selected.length > 0 ? (
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryTitle}>Route summary</Text>
+              <View style={styles.summaryRow}>
+                <SummaryStat label="Trail distance" value={`${totalTrailKm.toFixed(1)} km`} />
+                <SummaryStat label="Trails selected" value={String(selected.length)} />
+                <SummaryStat label="Est. ride time" value={estimatedTimeMin >= 60 ? `${Math.floor(estimatedTimeMin/60)}h ${estimatedTimeMin%60}m` : `${estimatedTimeMin}m`} />
+              </View>
+            </View>
+          ) : null}
           <WaypointsSection
             waypoints={waypoints}
             onAdd={(wp) => setWaypoints((prev) => [...prev, wp])}
@@ -386,47 +464,79 @@ export default function PlannerTab() {
       )}
 
       {from && to ? (
-        <View style={styles.saveRow}>
-          <TextInput
-            value={routeName}
-            onChangeText={setRouteName}
-            placeholder="Name this route"
-            placeholderTextColor={colors.light.mutedForeground}
-            style={styles.routeNameInput}
-          />
+        <>
+          {/* Navigate button — prominent CTA above name/save row */}
           <TouchableOpacity
-            onPress={onSave}
-            disabled={createRoute.isPending}
-            style={[
-              styles.saveBtn,
-              createRoute.isPending && { opacity: 0.6 },
-            ]}
+            style={styles.navigateBtn}
+            onPress={() => {
+              // Build NavTrailInput array from currently selected + loaded preview trails.
+              const selectedTrails = previewTrails
+                .filter((t) => selected.includes(t.id))
+                .map((t) => ({
+                  id: t.id,
+                  name: t.name,
+                  difficulty: t.difficulty ?? null,
+                  distance_km: t.distance_km ?? null,
+                  path: t.path,
+                }));
+              setActiveNavRoute({
+                from: { latitude: from.lat, longitude: from.lon, label: from.label },
+                to: { latitude: to.lat, longitude: to.lon, label: to.label },
+                trails: selectedTrails,
+              });
+              // /navigate is not yet in the generated expo-router type map — use
+              // a double cast until `npx expo start` regenerates .expo/types/router.d.ts
+              router.push({ pathname: "/navigate" } as unknown as Parameters<typeof router.push>[0]);
+            }}
           >
-            {createRoute.isPending ? (
-              <ActivityIndicator color={colors.light.primaryForeground} />
-            ) : (
-              <Text style={styles.saveBtnText}>Save route</Text>
-            )}
+            <Feather name="navigation" size={20} color={colors.light.primaryForeground} />
+            <Text style={styles.navigateBtnText}>
+              Navigate{selected.length > 0 ? ` (${selected.length} trail${selected.length === 1 ? "" : "s"})` : ""}
+            </Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            onPress={onExportGpx}
-            disabled={exporting}
-            style={[styles.gpxBtn, exporting && { opacity: 0.6 }]}
-          >
-            {exporting ? (
-              <ActivityIndicator color={colors.light.foreground} />
-            ) : (
-              <>
-                <Feather
-                  name="download"
-                  size={16}
-                  color={colors.light.foreground}
-                />
-                <Text style={styles.gpxBtnText}>GPX</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
+
+          <View style={styles.saveRow}>
+            <TextInput
+              value={routeName}
+              onChangeText={setRouteName}
+              placeholder="Name this route"
+              placeholderTextColor={colors.light.mutedForeground}
+              style={styles.routeNameInput}
+            />
+            <TouchableOpacity
+              onPress={onSave}
+              disabled={createRoute.isPending}
+              style={[
+                styles.saveBtn,
+                createRoute.isPending && { opacity: 0.6 },
+              ]}
+            >
+              {createRoute.isPending ? (
+                <ActivityIndicator color={colors.light.primaryForeground} />
+              ) : (
+                <Text style={styles.saveBtnText}>Save</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onExportGpx}
+              disabled={exporting}
+              style={[styles.gpxBtn, exporting && { opacity: 0.6 }]}
+            >
+              {exporting ? (
+                <ActivityIndicator color={colors.light.foreground} />
+              ) : (
+                <>
+                  <Feather
+                    name="download"
+                    size={16}
+                    color={colors.light.foreground}
+                  />
+                  <Text style={styles.gpxBtnText}>GPX</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        </>
       ) : null}
     </ScrollView>
   );
@@ -834,6 +944,15 @@ function SuggestionRow({
   );
 }
 
+function SummaryStat({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.summaryStat}>
+      <Text style={styles.summaryStatValue}>{value}</Text>
+      <Text style={styles.summaryStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
 function EmptyState({
   icon,
   title,
@@ -943,9 +1062,25 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     fontSize: 14,
   },
+  navigateBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: "#2D7D46",  // deep green — distinct from primary orange
+    paddingVertical: 16,
+    borderRadius: 14,
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  navigateBtnText: {
+    color: "#fff",
+    fontWeight: "800",
+    fontSize: 16,
+  },
   saveBtn: {
     backgroundColor: colors.light.primary,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 12,
     borderRadius: 10,
   },
@@ -1058,6 +1193,42 @@ const styles = StyleSheet.create({
   kindChipTextActive: { color: colors.light.primaryForeground },
   cancelStopBtn: { alignSelf: "flex-end", marginTop: 8 },
   cancelStopBtnText: { color: colors.light.mutedForeground, fontSize: 12 },
+  filterSection: { marginBottom: 12 },
+  filterRow: { flexDirection: "row", gap: 6, paddingBottom: 4 },
+  filterChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.light.card,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+  },
+  filterChipActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+  filterChipText: { color: colors.light.foreground, fontSize: 11, fontWeight: "600" },
+  filterChipTextActive: { color: colors.light.primaryForeground },
+  summaryCard: {
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.primary,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 10,
+  },
+  summaryTitle: {
+    color: colors.light.primary,
+    fontWeight: "700",
+    fontSize: 12,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 10,
+  },
+  summaryRow: { flexDirection: "row", gap: 8 },
+  summaryStat: { flex: 1, alignItems: "center" },
+  summaryStatValue: { color: colors.light.foreground, fontSize: 18, fontWeight: "800" },
+  summaryStatLabel: { color: colors.light.mutedForeground, fontSize: 10, marginTop: 2 },
   sectionLabel: {
     color: colors.light.mutedForeground,
     fontSize: 11,

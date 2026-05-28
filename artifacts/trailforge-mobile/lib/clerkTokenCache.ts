@@ -22,8 +22,17 @@ export const tokenCache: TokenCache | undefined =
     : {
         async getToken(key: string) {
           try {
-            return await SecureStore.getItemAsync(safeKey(key));
-          } catch {
+            const value = await SecureStore.getItemAsync(safeKey(key));
+            if (__DEV__) {
+              console.log(
+                `[tokenCache] getToken key=${safeKey(key)} found=${Boolean(value)}`,
+              );
+            }
+            return value;
+          } catch (err) {
+            if (__DEV__) {
+              console.warn(`[tokenCache] getToken error for key=${safeKey(key)}:`, err);
+            }
             // A previously-corrupt entry — drop it so Clerk re-authenticates.
             try {
               await SecureStore.deleteItemAsync(safeKey(key));
@@ -36,9 +45,27 @@ export const tokenCache: TokenCache | undefined =
         async saveToken(key: string, value: string) {
           try {
             await SecureStore.setItemAsync(safeKey(key), value);
-          } catch {
+            if (__DEV__) {
+              console.log(`[tokenCache] saveToken key=${safeKey(key)} ok`);
+            }
+          } catch (err) {
             // Storage full / hardware-unavailable: silently degrade. Clerk
             // will prompt the user to sign in next launch.
+            if (__DEV__) {
+              console.warn(`[tokenCache] saveToken error for key=${safeKey(key)}:`, err);
+            }
+          }
+        },
+        async clearToken(key: string) {
+          try {
+            await SecureStore.deleteItemAsync(safeKey(key));
+            if (__DEV__) {
+              console.log(`[tokenCache] clearToken key=${safeKey(key)} ok`);
+            }
+          } catch (err) {
+            if (__DEV__) {
+              console.warn(`[tokenCache] clearToken error for key=${safeKey(key)}:`, err);
+            }
           }
         },
       };

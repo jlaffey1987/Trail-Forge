@@ -1,11 +1,14 @@
-import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { Router, type IRouter, type Request, type Response } from "express";
 import { getAuth } from "@clerk/express";
 import { z } from "zod";
 import { CreateTrailBody, CreateTrailResponse, SearchTrailsQueryParams, SearchTrailsResponse } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { requireAuth, type AuthedHandler } from "../middlewares/requireAuth";
+import { isMissingTableError, isMissingColumnError } from "../lib/dbErrors";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import { mintGpxUploadTicket, consumeGpxUploadTicket } from "../lib/uploadTickets";
 import { notifyTrailShared, notifyTrailUnshared } from "../lib/pushNotifications";
+import { logger } from "../lib/logger";
 
 const objectStorage = new ObjectStorageService();
 
@@ -62,40 +65,6 @@ const ReplaceGpxBody = z.object({
   // any) is deleted from object storage as part of the replace.
   gpx_object_path: z.string().min(1).max(512).nullish(),
 });
-
-interface AuthedHandler {
-  (req: Request, res: Response, userId: string): Promise<void>;
-}
-
-function requireAuth(handler: AuthedHandler) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    const auth = getAuth(req);
-    if (!auth.userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    try {
-      await handler(req, res, auth.userId);
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
-function isMissingTableError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "") ||
-    /Could not find the table/i.test(err.message ?? "")
-  );
-}
-
-function isMissingColumnError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return err.code === "42703" || /column .* does not exist/i.test(err.message ?? "");
-}
 
 function getTrailId(req: Request, res: Response): string | null {
   const parsed = TrailIdParam.safeParse(req.params.trailId);
@@ -381,7 +350,7 @@ router.post(
     } catch (err) {
       res.status(500).json({ error: "Failed to generate upload URL" });
       // eslint-disable-next-line no-console
-      console.error("[trails] gpx upload-url failed", err);
+      logger.error({ err }, "[trails] gpx upload-url failed");
     }
   }),
 );

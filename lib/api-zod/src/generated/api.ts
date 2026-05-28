@@ -94,6 +94,16 @@ export const SyncMeResponse = zod.object({
     .describe(
       'True when the row carries `users.is_moderator = true`. The client\nuses this to surface moderator-only affordances (e.g. the \"Hide\"\nbutton on others\' route comments). Server endpoints still re-check\nthe flag — this field is purely a UI hint.\n',
     ),
+  is_premium: zod
+    .boolean()
+    .optional()
+    .describe(
+      'True when the user has an active paid subscription. Gates advanced\nmap features (filtering, navigation) in the mobile app. The server\nalways re-checks this — the field is a UI hint only.\n',
+    ),
+  preferred_bike_type: zod
+    .enum(["all", "adventure", "trail", "enduro"])
+    .optional()
+    .describe("User's preferred bike-type filter, persisted server-side."),
 });
 
 /**

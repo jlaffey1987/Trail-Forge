@@ -18,4 +18,11 @@ button on others' route comments). Server endpoints still re-check
 the flag — this field is purely a UI hint.
  */
   is_moderator?: boolean;
+  /** True when the user has an active paid subscription. Gates advanced
+map features (filtering, navigation) in the mobile app. The server
+always re-checks this — the field is a UI hint only.
+ */
+  is_premium?: boolean;
+  /** User's preferred bike-type filter, persisted server-side. */
+  preferred_bike_type?: "all" | "adventure" | "trail" | "enduro";
 }

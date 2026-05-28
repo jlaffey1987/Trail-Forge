@@ -6,6 +6,7 @@ import React, { useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -18,6 +19,8 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+
+const appIcon = require("../assets/images/icon.png") as number;
 
 // Required so the OAuth in-app browser closes itself after the redirect
 // instead of dangling open.
@@ -116,9 +119,11 @@ export default function SignInScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.brand}>
-          <View style={styles.brandBadge}>
-            <Feather name="map" size={26} color={colors.light.primary} />
-          </View>
+          <Image
+            source={appIcon}
+            style={styles.brandIcon}
+            resizeMode="contain"
+          />
           <Text style={styles.brandTitle}>TrailForge</Text>
           <Text style={styles.brandSubtitle}>
             Plan, ride, and share singletrack with confidence.
@@ -276,15 +281,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.background,
   },
   brand: { alignItems: "center", marginBottom: 28 },
-  brandBadge: {
-    width: 64,
-    height: 64,
-    borderRadius: 16,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.primary,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
+  brandIcon: {
+    width: 96,
+    height: 96,
     marginBottom: 12,
   },
   brandTitle: {

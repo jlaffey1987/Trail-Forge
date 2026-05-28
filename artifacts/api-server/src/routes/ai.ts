@@ -1,10 +1,12 @@
-import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { Router, type IRouter, type Request, type Response } from "express";
 import { clerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
 import { anthropic } from "@workspace/integrations-anthropic-ai";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { logger } from "../lib/logger";
-import { explainAdminAccess, getAdminAccessState } from "../lib/admin";
+import { explainAdminAccess, getAdminAccessState, readEnvAdminList } from "../lib/admin";
+import { requireAuth, type AuthedHandler } from "../middlewares/requireAuth";
+import { isMissingTableError, isMissingColumnError } from "../lib/dbErrors";
 import {
   computeRouteStats,
   fetchOsmTagSummary,
@@ -39,25 +41,6 @@ const SYSTEM_PROMPT = [
 // Helpers shared across routes
 // ---------------------------------------------------------------------------
 
-interface AuthedHandler {
-  (req: Request, res: Response, userId: string): Promise<void>;
-}
-
-function requireAuth(handler: AuthedHandler) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    const auth = getAuth(req);
-    if (!auth.userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    try {
-      await handler(req, res, auth.userId);
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
 function requireAdmin(handler: AuthedHandler) {
   return requireAuth(async (req, res, userId) => {
     const state = await getAdminAccessState(userId);
@@ -74,20 +57,6 @@ function requireAdmin(handler: AuthedHandler) {
   });
 }
 
-function isMissingTableError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "") ||
-    /Could not find the table/i.test(err.message ?? "")
-  );
-}
-
-function isMissingColumnError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return err.code === "42703" || /column .* does not exist/i.test(err.message ?? "");
-}
 
 function gpxJsonToPoints(gpxData: unknown): GpxPoint[] {
   if (typeof gpxData === "string") return parseGpxText(gpxData);
@@ -151,13 +120,6 @@ router.get("/admin/whoami", async (req, res) => {
 // rows in `system_admins` for that check — env-var admins are an
 // implementation detail of the bootstrap path.
 // ---------------------------------------------------------------------------
-function parseEnvAdmins(): string[] {
-  return (process.env.SYSTEM_ADMIN_USER_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
 router.get(
   "/admin/admins",
   requireAdmin(async (_req, res) => {
@@ -176,7 +138,7 @@ router.get(
       if (isMissingTableError(error)) {
         res.json({
           items: [],
-          envAdmins: parseEnvAdmins(),
+          envAdmins: readEnvAdminList(),
           note: "system_admins table missing — apply migration 0007",
         });
         return;
@@ -211,7 +173,7 @@ router.get(
       ...r,
       users: userById.get(r.user_id) ?? null,
     }));
-    res.json({ items, envAdmins: parseEnvAdmins() });
+    res.json({ items, envAdmins: readEnvAdminList() });
   }),
 );
 
@@ -366,6 +328,14 @@ const ChatBody = z.object({
 });
 
 router.post("/ai/chat", async (req, res, next) => {
+  // Require authentication — unauthenticated AI chat calls Anthropic and is
+  // expensive to abuse. Returning 401 here also prevents guest data exposure.
+  const _earlyAuth = getAuth(req);
+  if (!_earlyAuth.userId) {
+    res.status(401).json({ error: "Sign in to use the AI trail assistant" });
+    return;
+  }
+
   try {
     const parsed = ChatBody.safeParse(req.body);
     if (!parsed.success) {

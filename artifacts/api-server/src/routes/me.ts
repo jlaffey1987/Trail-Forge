@@ -10,6 +10,7 @@ import {
   MigrateSessionSavedTrailsResponse,
 } from "@workspace/api-zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { isMissingTableError, isMissingColumnError } from "../lib/dbErrors";
 import {
   PLANNER_MAX_TRAILS,
   PLANNER_MAX_WAYPOINTS,
@@ -113,20 +114,33 @@ router.post("/me/sync", async (req: Request, res: Response) => {
     const avatarUrl = user.imageUrl ?? null;
 
     const supa = getSupabaseAdmin();
-    const { data, error } = await supa
+
+    const upsertPayload = {
+      id: auth.userId,
+      email,
+      display_name: displayName,
+      avatar_url: avatarUrl,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Try the full select including premium fields (requires migration 0028).
+    // Fall back to the pre-0028 column set if those columns don't exist yet.
+    let { data, error } = await supa
       .from("users")
-      .upsert(
-        {
-          id: auth.userId,
-          email,
-          display_name: displayName,
-          avatar_url: avatarUrl,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "id" },
-      )
-      .select("id, email, display_name, avatar_url, created_at, is_moderator")
+      .upsert(upsertPayload, { onConflict: "id" })
+      .select("id, email, display_name, avatar_url, created_at, is_moderator, is_premium, preferred_bike_type")
       .single();
+
+    if (error && isMissingColumnError(error)) {
+      req.log.warn(
+        "is_premium / preferred_bike_type columns missing — apply migration 0028_user_premium.sql",
+      );
+      ({ data, error } = await supa
+        .from("users")
+        .upsert(upsertPayload, { onConflict: "id" })
+        .select("id, email, display_name, avatar_url, created_at, is_moderator")
+        .single());
+    }
 
     if (error) {
       // Tolerate missing-table state (migration not yet applied) so the UI
@@ -160,6 +174,56 @@ router.post("/me/sync", async (req: Request, res: Response) => {
     req.log.error({ err }, "syncMe failed");
     res.status(500).json({ error: "Failed to sync user" });
   }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /me/preferences — persist user's preferred bike type (and future prefs)
+// ---------------------------------------------------------------------------
+
+const PatchPreferencesBody = z.object({
+  preferred_bike_type: z.enum(["all", "adventure", "trail", "enduro"]).optional(),
+});
+
+router.patch("/me/preferences", async (req: Request, res: Response) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const parsed = PatchPreferencesBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid preferences payload" });
+    return;
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (parsed.data.preferred_bike_type !== undefined) {
+    updates.preferred_bike_type = parsed.data.preferred_bike_type;
+  }
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: "No recognised preference fields supplied" });
+    return;
+  }
+
+  const supa = getSupabaseAdmin();
+  const { error } = await supa
+    .from("users")
+    .update(updates)
+    .eq("id", auth.userId);
+
+  if (error) {
+    if (isMissingColumnError(error)) {
+      req.log.warn("Preferences columns missing — apply migration 0028_user_premium.sql");
+      res.json({ ok: true }); // silently succeed so the client isn't broken
+      return;
+    }
+    req.log.error({ err: error }, "preferences update failed");
+    res.status(500).json({ error: "Failed to update preferences" });
+    return;
+  }
+
+  res.json({ ok: true });
 });
 
 router.get("/me/saved-trails", async (req: Request, res: Response) => {
@@ -415,15 +479,6 @@ const PLANNER_TRAIL_COLUMNS = [
   "path_geojson",
   "path_point_count",
 ].join(",");
-
-function isMissingTableError(err: { code?: string; message?: string } | null) {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "")
-  );
-}
 
 router.get("/me/planner-route", async (req: Request, res: Response) => {
   const auth = getAuth(req);
@@ -726,6 +781,179 @@ router.put("/me/planner-route", async (req: Request, res: Response) => {
   } catch (err) {
     req.log.error({ err }, "planner-route PUT failed");
     res.status(500).json({ error: "Failed to save planner route" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /me/planner/suggestions
+// ---------------------------------------------------------------------------
+// Returns trails along the corridor between two lat/lon points, sorted by
+// along-track position so the list reads start → end geographically.
+// This is the mobile-app endpoint that the web handles client-side via
+// `selectTrailsAlongCorridor` + a Supabase bbox fetch.
+// ---------------------------------------------------------------------------
+
+const PlannerSuggestionsBody = z.object({
+  fromLat: z.number().finite().min(-90).max(90),
+  fromLon: z.number().finite().min(-180).max(180),
+  toLat: z.number().finite().min(-90).max(90),
+  toLon: z.number().finite().min(-180).max(180),
+  /** Half-width of the corridor in km (defaults to 25 km). */
+  corridorKm: z.number().finite().positive().max(200).optional(),
+  /** Max suggestions to return (defaults to 8). */
+  maxTrails: z.number().int().positive().max(30).optional(),
+});
+
+const KM_PER_DEG_LAT = 111.32;
+
+router.post("/me/planner/suggestions", async (req: Request, res: Response) => {
+  // Suggestions are useful even for unauthenticated users (guest planning),
+  // so we don't require auth here.  Group-shared trails are excluded; only
+  // public trails are surfaced in corridor suggestions.
+
+  const parsed = PlannerSuggestionsBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid suggestions payload" });
+    return;
+  }
+
+  const { fromLat, fromLon, toLat, toLon } = parsed.data;
+  const corridorKm = parsed.data.corridorKm ?? 25;
+  const maxTrails = parsed.data.maxTrails ?? 8;
+
+  // Expand a bbox around the corridor with generous padding so we capture
+  // trails near the edges of a curved real-world route.
+  const corridorPadDeg = (corridorKm / KM_PER_DEG_LAT) * 1.3;
+  const minLat = Math.min(fromLat, toLat) - corridorPadDeg;
+  const maxLat = Math.max(fromLat, toLat) + corridorPadDeg;
+  const minLon = Math.min(fromLon, toLon) - corridorPadDeg;
+  const maxLon = Math.max(fromLon, toLon) + corridorPadDeg;
+
+  try {
+    const supa = getSupabaseAdmin();
+
+    // Query trails whose bbox overlaps the corridor bbox.
+    const { data, error } = await supa
+      .from("trails")
+      .select(
+        "id, name, difficulty, distance_km, bbox_min_lat, bbox_max_lat, bbox_min_lng, bbox_max_lng",
+      )
+      .eq("is_public", true)
+      .is("deleted_at", null)
+      .neq("verification_status", "ai-approximated")
+      .gte("bbox_max_lat", minLat)
+      .lte("bbox_min_lat", maxLat)
+      .gte("bbox_max_lng", minLon)
+      .lte("bbox_min_lng", maxLon)
+      .limit(600);
+
+    if (error) {
+      req.log.error({ err: error }, "planner suggestions query failed");
+      res.status(500).json({ error: "Suggestions query failed" });
+      return;
+    }
+
+    type Row = {
+      id: string;
+      name: string;
+      difficulty: string | null;
+      distance_km: number | null;
+      bbox_min_lat: number | null;
+      bbox_max_lat: number | null;
+      bbox_min_lng: number | null;
+      bbox_max_lng: number | null;
+    };
+
+    const rows = (data ?? []) as Row[];
+
+    // --- corridor scoring (ported from artifacts/trailforge/src/lib/routing.ts) ---
+    const meanLat = ((fromLat + toLat) / 2) * (Math.PI / 180);
+    const kmPerDegLng = KM_PER_DEG_LAT * Math.cos(meanLat);
+    const bx = (toLon - fromLon) * kmPerDegLng;
+    const by = (toLat - fromLat) * KM_PER_DEG_LAT;
+    const totalKm = Math.hypot(bx, by);
+
+    type ScoredRow = Row & { alongKm: number; perpKm: number };
+    const scored: ScoredRow[] = [];
+
+    for (const t of rows) {
+      const cLat =
+        t.bbox_min_lat != null && t.bbox_max_lat != null
+          ? (t.bbox_min_lat + t.bbox_max_lat) / 2
+          : null;
+      const cLon =
+        t.bbox_min_lng != null && t.bbox_max_lng != null
+          ? (t.bbox_min_lng + t.bbox_max_lng) / 2
+          : null;
+      if (cLat == null || cLon == null) continue;
+
+      const px = (cLon - fromLon) * kmPerDegLng;
+      const py = (cLat - fromLat) * KM_PER_DEG_LAT;
+      let alongKm: number;
+      let perpKm: number;
+
+      if (totalKm < 0.01) {
+        alongKm = 0;
+        perpKm = Math.hypot(px, py);
+      } else {
+        const t01 = (px * bx + py * by) / (totalKm * totalKm);
+        const tc = Math.max(0, Math.min(1, t01));
+        perpKm = Math.hypot(px - tc * bx, py - tc * by);
+        alongKm = tc * totalKm;
+      }
+
+      if (perpKm > corridorKm) continue;
+      scored.push({ ...t, alongKm, perpKm });
+    }
+
+    // Bucket by along-track position → pick the closest-to-centreline trail
+    // per bucket, then backfill with remaining closest trails.
+    let selected: ScoredRow[];
+    if (totalKm < 1 || maxTrails === 1) {
+      selected = [...scored]
+        .sort((a, b) => a.perpKm - b.perpKm)
+        .slice(0, maxTrails);
+    } else {
+      const buckets: ScoredRow[][] = Array.from({ length: maxTrails }, () => []);
+      for (const s of scored) {
+        const idx = Math.min(
+          maxTrails - 1,
+          Math.max(0, Math.floor((s.alongKm / totalKm) * maxTrails)),
+        );
+        buckets[idx].push(s);
+      }
+      const picked: ScoredRow[] = [];
+      const pickedIds = new Set<string>();
+      for (const b of buckets) {
+        if (b.length === 0) continue;
+        b.sort((x, y) => x.perpKm - y.perpKm);
+        picked.push(b[0]);
+        pickedIds.add(b[0].id);
+      }
+      if (picked.length < maxTrails) {
+        for (const s of scored.filter((s) => !pickedIds.has(s.id))
+          .sort((a, b) => a.perpKm - b.perpKm)) {
+          if (picked.length >= maxTrails) break;
+          picked.push(s);
+        }
+      }
+      selected = picked;
+    }
+
+    selected.sort((a, b) => a.alongKm - b.alongKm);
+
+    const suggestions = selected.map((s) => ({
+      trailId: s.id,
+      name: s.name,
+      distance_km: s.distance_km ?? null,
+      difficulty: s.difficulty ?? null,
+      detourMeters: Math.round(s.perpKm * 1000),
+    }));
+
+    res.json({ suggestions });
+  } catch (err) {
+    req.log.error({ err }, "planner/suggestions failed");
+    res.status(500).json({ error: "Failed to compute suggestions" });
   }
 });
 

@@ -1,8 +1,8 @@
-import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
-import { getAuth } from "@clerk/express";
+import { Router, type IRouter, type Request, type Response } from "express";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
-import { logger } from "../lib/logger";
+import { requireAuth, type AuthedHandler } from "../middlewares/requireAuth";
+import { isMissingTableError } from "../lib/dbErrors";
 
 const router: IRouter = Router();
 
@@ -12,34 +12,6 @@ const SendMessageBody = z.object({
   body: z.string().min(1).max(2000),
 });
 
-interface AuthedHandler {
-  (req: Request, res: Response, userId: string): Promise<void>;
-}
-
-function requireAuth(handler: AuthedHandler) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    const auth = getAuth(req);
-    if (!auth.userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    try {
-      await handler(req, res, auth.userId);
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
-function isMissingTableError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "") ||
-    /Could not find the table/i.test(err.message ?? "")
-  );
-}
 
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 30;

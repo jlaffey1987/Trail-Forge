@@ -3,11 +3,13 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "preinstall": "node ./scripts/src/preinstallCheck.mjs",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
-    "test:e2e": "pnpm --filter @workspace/trailforge run test:e2e"
+    "test:e2e": "pnpm --filter @workspace/trailforge run test:e2e",
+    "dev:mobile-api": "pnpm -r --parallel --filter @workspace/api-server --filter @workspace/trailforge-mobile run dev:local",
+    "dev:mobile-api:tunnel": "pnpm -r --parallel --filter @workspace/api-server --filter @workspace/trailforge-mobile run dev:tunnel"
   },
   "private": true,
   "devDependencies": {

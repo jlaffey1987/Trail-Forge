@@ -17,10 +17,15 @@ export function setSharedBearerGetter(
 }
 
 export function apiBaseUrl(): string {
+  const explicitBase = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
+  if (explicitBase) {
+    return explicitBase.replace(/\/+$/, "");
+  }
+
   const domain = process.env.EXPO_PUBLIC_DOMAIN;
   if (!domain) {
     throw new Error(
-      "EXPO_PUBLIC_DOMAIN is not set. Mobile app cannot reach the API.",
+      "Set EXPO_PUBLIC_API_BASE_URL or EXPO_PUBLIC_DOMAIN so mobile can reach the API.",
     );
   }
   return `https://${domain}`;
@@ -86,6 +91,33 @@ export async function subscribeExpoPushToken(
     method: "POST",
     body: JSON.stringify({ kind: "expo", expoPushToken }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// User preferences
+// ---------------------------------------------------------------------------
+
+export async function patchPreferences(prefs: {
+  preferred_bike_type?: "all" | "adventure" | "trail" | "enduro";
+}): Promise<void> {
+  await apiJson("/api/me/preferences", {
+    method: "PATCH",
+    body: JSON.stringify(prefs),
+  });
+}
+
+export interface GroupTrail {
+  id: string;
+  name: string;
+  difficulty: string | null;
+  distance_km: number | null;
+  path?: unknown;
+  /** Groups this trail is shared into (for the current user's memberships). */
+  sharedVia?: Array<{ id: string; name: string }>;
+}
+
+export async function listMyGroupTrails(): Promise<{ trails: GroupTrail[] }> {
+  return apiJson<{ trails: GroupTrail[] }>("/api/me/group-trails");
 }
 
 // ---------------------------------------------------------------------------

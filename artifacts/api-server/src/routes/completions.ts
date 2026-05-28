@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { getAuth } from "@clerk/express";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { isMissingTableError } from "../lib/dbErrors";
 
 const router: IRouter = Router();
 
@@ -42,7 +43,7 @@ interface CompletionRow {
 router.get("/me/completions", async (req: Request, res: Response) => {
   const auth = getAuth(req);
   if (!auth.userId) {
-    res.json({ items: [] });
+    res.status(401).json({ error: "Unauthorized" });
     return;
   }
   try {
@@ -53,11 +54,7 @@ router.get("/me/completions", async (req: Request, res: Response) => {
       .eq("user_id", auth.userId)
       .order("completed_at", { ascending: false });
     if (error) {
-      if (
-        error.code === "42P01" ||
-        error.code === "PGRST205" ||
-        /relation .* does not exist/i.test(error.message ?? "")
-      ) {
+      if (isMissingTableError(error)) {
         res.json({ items: [] });
         return;
       }

@@ -6,15 +6,17 @@
  * saved route opens the planner with that route preloaded.
  */
 import { Feather } from "@expo/vector-icons";
+
 import { useQuery } from "@tanstack/react-query";
 import {
   useListMySavedRoutes,
   useListMySavedTrails,
 } from "@workspace/api-client-react";
 import { router } from "expo-router";
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -26,6 +28,13 @@ import {
 
 import colors from "@/constants/colors";
 import { listRecentlyRidden, type RecentlyRiddenTrail } from "@/lib/api";
+import {
+  clearAllOffline,
+  getOfflineStorageStats,
+  listOfflineTrails,
+  removeOfflineTrail,
+  type OfflineTrail,
+} from "@/lib/offlineStore";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 
 interface SavedTrail {
@@ -68,6 +77,26 @@ export default function TrailsTab() {
     queryFn: listRecentlyRidden,
     staleTime: 60_000,
   });
+
+  // Offline maps state
+  const [offlineTrails, setOfflineTrails] = useState<OfflineTrail[]>([]);
+  const [offlineStats, setOfflineStats] = useState<{
+    trailCount: number;
+    trailSizeBytes: number;
+    tileSizeBytes: number;
+    totalSizeBytes: number;
+  } | null>(null);
+
+  const refreshOffline = useCallback(async () => {
+    const [trails, stats] = await Promise.all([
+      listOfflineTrails(),
+      getOfflineStorageStats(),
+    ]);
+    setOfflineTrails(trails);
+    setOfflineStats(stats);
+  }, []);
+
+  useEffect(() => { void refreshOffline(); }, [refreshOffline]);
 
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [diffFilter, setDiffFilter] = useState<DiffFilter>("all");
@@ -192,8 +221,93 @@ export default function TrailsTab() {
           />
         ))}
       </Section>
+
+      {/* ── Offline maps ─────────────────────────────────────────────── */}
+      <View style={{ marginBottom: 22 }}>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>Offline maps</Text>
+          {offlineStats && offlineStats.totalSizeBytes > 0 ? (
+            <TouchableOpacity
+              onPress={() => {
+                Alert.alert(
+                  "Clear offline data?",
+                  "This removes all downloaded trail data and tiles.",
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Clear",
+                      style: "destructive",
+                      onPress: async () => {
+                        await clearAllOffline();
+                        await refreshOffline();
+                      },
+                    },
+                  ],
+                );
+              }}
+            >
+              <Text style={styles.clearBtn}>Clear all</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
+        {offlineStats ? (
+          <View style={styles.storageCard}>
+            <StorageStat label="Trails" value={String(offlineStats.trailCount)} />
+            <StorageStat label="Trail data" value={formatBytes(offlineStats.trailSizeBytes)} />
+            <StorageStat label="Tile cache" value={formatBytes(offlineStats.tileSizeBytes)} />
+            <StorageStat label="Total" value={formatBytes(offlineStats.totalSizeBytes)} accent />
+          </View>
+        ) : null}
+
+        {offlineTrails.length === 0 ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>
+              No offline trails saved yet. Open a trail on the map and tap "Save offline" to cache it.
+            </Text>
+          </View>
+        ) : (
+          offlineTrails.map((t) => (
+            <View key={t.id} style={[styles.row, { gap: 8 }]}>
+              <View style={[styles.diffDot, { backgroundColor: difficultyColor(t.difficulty) }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowTitle} numberOfLines={1}>{t.name}</Text>
+                <Text style={styles.rowMeta}>
+                  {t.distance_km != null ? `${t.distance_km.toFixed(1)} km` : "—"}
+                  {" · "}
+                  Saved {new Date(t.savedAt).toLocaleDateString()}
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={async () => {
+                  await removeOfflineTrail(t.id);
+                  await refreshOffline();
+                }}
+              >
+                <Feather name="trash-2" size={16} color={colors.light.destructive} />
+              </TouchableOpacity>
+            </View>
+          ))
+        )}
+      </View>
     </ScrollView>
   );
+}
+
+function StorageStat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <View style={styles.storageStat}>
+      <Text style={[styles.storageValue, accent && { color: colors.light.primary }]}>{value}</Text>
+      <Text style={styles.storageLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Section({
@@ -330,6 +444,26 @@ function RouteRow({ route }: { route: SavedRoute }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.light.background },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  clearBtn: { color: colors.light.destructive, fontSize: 12, fontWeight: "700" },
+  storageCard: {
+    flexDirection: "row",
+    backgroundColor: colors.light.card,
+    borderRadius: 12,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 10,
+    gap: 4,
+  },
+  storageStat: { flex: 1, alignItems: "center" },
+  storageValue: { color: colors.light.foreground, fontWeight: "800", fontSize: 15 },
+  storageLabel: { color: colors.light.mutedForeground, fontSize: 10, marginTop: 2 },
   sectionTitle: {
     color: colors.light.foreground,
     fontSize: 16,

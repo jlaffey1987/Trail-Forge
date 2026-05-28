@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "./supabaseAdmin";
+import { isMissingTableError } from "./dbErrors";
 
 /**
  * Admin gating has three "not-admin" states we deliberately surface to the
@@ -66,17 +67,7 @@ export function explainAdminAccess(state: AdminAccessState): AdminAccessExplaine
   }
 }
 
-function isMissingTableError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "") ||
-    /Could not find the table/i.test(err.message ?? "")
-  );
-}
-
-function readEnvAdminList(): string[] {
+export function readEnvAdminList(): string[] {
   return (process.env.SYSTEM_ADMIN_USER_IDS ?? "")
     .split(",")
     .map((s) => s.trim())

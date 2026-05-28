@@ -36,10 +36,6 @@ export function publishVisibleTrails(next: VisibleViewport): void {
   }
 }
 
-export function getVisibleTrails(): VisibleViewport {
-  return current;
-}
-
 /**
  * Subscribe to viewport changes from any screen. Returns the latest
  * snapshot synchronously and re-renders on every publish.

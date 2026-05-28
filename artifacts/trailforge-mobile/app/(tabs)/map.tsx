@@ -1,7 +1,11 @@
 /**
- * Map tab — react-native-maps centered on the user's location, with
- * polylines for every trail returned by the search endpoint within the
- * visible region. Tap a polyline to open the TrailDetailSheet.
+ * Map tab — react-native-maps centred on the user's location, with
+ * polylines for every trail in the visible region.
+ *
+ * Filter rows (all gated behind Premium):
+ *   1. Grade difficulty  — All · Easy 1-3 · Inter 4-6 · Hard 7-9 · Extreme 10
+ *   2. Bike suitability  — All bikes · Adventure · Trail · Enduro
+ *   3. Trail visibility  — All trails · Public + groups · Groups only
  */
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
@@ -11,6 +15,7 @@ import {
   ActivityIndicator,
   Keyboard,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -32,43 +37,114 @@ import {
   TrailDetailSheet,
   type TrailDetailData,
 } from "@/components/TrailDetailSheet";
+import { UpgradePrompt } from "@/components/UpgradePrompt";
+import { useProfile } from "@/components/ProfileContext";
 import colors from "@/constants/colors";
 import {
   listCompletions,
+  patchPreferences,
   searchTrailsByBbox,
   type MapTrail as ApiTrail,
 } from "@/lib/api";
-import { difficultyColor } from "@/lib/trailColors";
+import {
+  difficultyColor,
+  gradeFromDifficulty,
+  TRAIL_ORANGE,
+} from "@/lib/trailColors";
+import { parseGeoJsonPath } from "@/lib/geo";
 import { publishVisibleTrails } from "@/lib/visibleTrails";
 
-type DifficultyFilter = "all" | "green" | "blue" | "black" | "double-black";
+// ---------------------------------------------------------------------------
+// Filter types
+// ---------------------------------------------------------------------------
 
-function matchesDifficulty(
-  trail: ApiTrail,
-  filter: DifficultyFilter,
-): boolean {
+/** Numeric grade tier filter.  Maps to grade ranges 1-10. */
+type GradeFilter = "all" | "easy" | "intermediate" | "hard" | "extreme";
+
+/** Bike suitability filter.  Derived from the maximum grade a bike can handle. */
+type BikeFilter = "all" | "adventure" | "trail" | "enduro";
+
+/**
+ * Which trails to show:
+ *   all            → public + group-shared + owned (default — API already does this)
+ *   public_groups  → same as "all" (alias kept for label clarity)
+ *   groups_only    → hide public trails (is_public !== true)
+ */
+type VisibilityFilter = "all" | "public_groups" | "groups_only";
+
+// ---------------------------------------------------------------------------
+// Filter helpers
+// ---------------------------------------------------------------------------
+
+function matchesGrade(trail: ApiTrail, filter: GradeFilter): boolean {
   if (filter === "all") return true;
-  const raw = (trail.difficulty ?? trail.ai_difficulty ?? "").toLowerCase();
-  if (filter === "green") return raw.includes("green") || raw.includes("easy");
-  if (filter === "blue")
-    return (
-      raw.includes("blue") || raw.includes("intermediate") || raw === "moderate"
-    );
-  if (filter === "black")
-    return raw.includes("black") && !raw.includes("double");
-  if (filter === "double-black")
-    return raw.includes("double") || raw.includes("expert");
+  const grade =
+    gradeFromDifficulty(trail.difficulty) ??
+    gradeFromDifficulty(trail.ai_difficulty ?? null);
+  if (grade == null) return true; // unknown grade → always visible
+  if (filter === "easy") return grade <= 3;
+  if (filter === "intermediate") return grade >= 4 && grade <= 6;
+  if (filter === "hard") return grade >= 7 && grade <= 9;
+  if (filter === "extreme") return grade >= 10;
   return true;
 }
 
-// Default region centred on a generic mid-Atlantic ride hub so the map
-// has *something* to show before location loads.
+function matchesBike(trail: ApiTrail, filter: BikeFilter): boolean {
+  if (filter === "all" || filter === "enduro") return true;
+  const grade =
+    gradeFromDifficulty(trail.difficulty) ??
+    gradeFromDifficulty(trail.ai_difficulty ?? null);
+  if (grade == null) return true;
+  if (filter === "adventure") return grade <= 6;
+  if (filter === "trail") return grade <= 9;
+  return true;
+}
+
+function matchesVisibility(trail: ApiTrail, filter: VisibilityFilter): boolean {
+  if (filter === "all" || filter === "public_groups") return true;
+  if (filter === "groups_only") return trail.is_public !== true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Filter chip configs
+// ---------------------------------------------------------------------------
+
+const GRADE_CHIPS: { id: GradeFilter; label: string; color?: string }[] = [
+  { id: "all", label: "All" },
+  { id: "easy", label: "Easy 1-3", color: colors.light.trailGreen },
+  { id: "intermediate", label: "Inter 4-6", color: colors.light.trailBlue },
+  { id: "hard", label: "Hard 7-9", color: TRAIL_ORANGE },
+  { id: "extreme", label: "Extreme 10", color: colors.light.destructive },
+];
+
+const BIKE_CHIPS: { id: BikeFilter; label: string }[] = [
+  { id: "all", label: "All bikes" },
+  { id: "adventure", label: "Adventure" },
+  { id: "trail", label: "Trail" },
+  { id: "enduro", label: "Enduro" },
+];
+
+const VISIBILITY_CHIPS: { id: VisibilityFilter; label: string }[] = [
+  { id: "all", label: "All trails" },
+  { id: "public_groups", label: "Public + groups" },
+  { id: "groups_only", label: "Groups only" },
+];
+
+// ---------------------------------------------------------------------------
+// Default region
+// ---------------------------------------------------------------------------
+
 const FALLBACK_REGION: Region = {
   latitude: 39.7,
   longitude: -77.5,
   latitudeDelta: 1.6,
   longitudeDelta: 1.6,
 };
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function MapTab() {
   const mapRef = useRef<MapView | null>(null);
@@ -77,15 +153,67 @@ export default function MapTab() {
     "unknown" | "granted" | "denied"
   >("unknown");
   const [selected, setSelected] = useState<TrailDetailData | null>(null);
-  const [difficultyFilter, setDifficultyFilter] = useState<DifficultyFilter>("all");
   const [mapKind, setMapKind] = useState<"standard" | "satellite">("standard");
   const [searchText, setSearchText] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchHits, setSearchHits] = useState<NominatimResult[]>([]);
 
-  // Geocode the search box and pan the map to the first match. We keep
-  // the rest of the hits around so the user can pick a different one
-  // from the dropdown if Nominatim's first guess is wrong.
+  // Active filters
+  const [gradeFilter, setGradeFilter] = useState<GradeFilter>("all");
+  const [bikeFilter, setBikeFilter] = useState<BikeFilter>("all");
+  const [visibilityFilter, setVisibilityFilter] =
+    useState<VisibilityFilter>("all");
+
+  // Upgrade prompt
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
+  const [upgradedFeature, setUpgradedFeature] = useState("");
+  const { profile } = useProfile();
+  const isPremium = profile.isPremium;
+
+  // Seed the bike filter from the profile on mount
+  useEffect(() => {
+    if (profile.preferredBikeType && profile.preferredBikeType !== "all") {
+      setBikeFilter(profile.preferredBikeType);
+    }
+  // Only run once after the profile first populates
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function showUpgrade(feature: string) {
+    setUpgradedFeature(feature);
+    setUpgradeVisible(true);
+  }
+
+  function handleGradeFilter(f: GradeFilter) {
+    if (f !== "all" && !isPremium) {
+      showUpgrade("Trail difficulty filtering");
+      return;
+    }
+    setGradeFilter(f);
+  }
+
+  function handleBikeFilter(f: BikeFilter) {
+    if (f !== "all" && !isPremium) {
+      showUpgrade("Bike type filtering");
+      return;
+    }
+    setBikeFilter(f);
+    // Best-effort persist — don't block the UI on a network round-trip.
+    void patchPreferences({ preferred_bike_type: f }).catch(() => undefined);
+  }
+
+  function handleVisibilityFilter(f: VisibilityFilter) {
+    if (f !== "all" && !isPremium) {
+      showUpgrade("Groups-only map view");
+      return;
+    }
+    setVisibilityFilter(f);
+  }
+
+  // -------------------------------------------------------------------------
+  // Geocode search
+  // -------------------------------------------------------------------------
+
   async function runSearch(): Promise<void> {
     const q = searchText.trim();
     if (!q) return;
@@ -94,16 +222,13 @@ export default function MapTab() {
     try {
       const results = await geocode(q);
       setSearchHits(results);
-      if (results[0]) {
-        flyTo(results[0]);
-      }
+      if (results[0]) flyTo(results[0]);
     } finally {
       setSearching(false);
     }
   }
 
   function flyTo(hit: NominatimResult): void {
-    // Nominatim returns lat/lon as strings — coerce before handing to MapView.
     const lat = Number(hit.lat);
     const lon = Number(hit.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
@@ -118,11 +243,10 @@ export default function MapTab() {
     setSearchHits([]);
   }
 
-  // Fetch trails for the current viewport. We hit the bbox-aware route
-  // directly rather than through the generated `useSearchTrails` hook —
-  // the OpenAPI spec only advertises `q`/`limit`, but the server route
-  // also accepts `bbox`. Wiring it through React Query gives us the same
-  // dedupe + staleTime semantics without forcing a spec change.
+  // -------------------------------------------------------------------------
+  // Trail data
+  // -------------------------------------------------------------------------
+
   const bbox = bboxFromRegion(region);
   const trailsQ = useQuery({
     queryKey: ["trails-bbox", bbox],
@@ -132,8 +256,13 @@ export default function MapTab() {
 
   const trails: ApiTrail[] = useMemo(() => {
     const all = trailsQ.data?.trails ?? [];
-    return all.filter((t) => matchesDifficulty(t, difficultyFilter));
-  }, [trailsQ.data, difficultyFilter]);
+    return all.filter(
+      (t) =>
+        matchesGrade(t, gradeFilter) &&
+        matchesBike(t, bikeFilter) &&
+        matchesVisibility(t, visibilityFilter),
+    );
+  }, [trailsQ.data, gradeFilter, bikeFilter, visibilityFilter]);
 
   const completionsQ = useQuery({
     queryKey: ["my-completions"],
@@ -148,9 +277,15 @@ export default function MapTab() {
     return set;
   }, [completionsQ.data]);
 
-  // Publish the currently-visible viewport so the AI tab can ground
-  // replies on what the user is actually looking at. Cap the id list so
-  // we don't blow up the JSON payload sent to /api/ai/chat.
+  // Pre-compute polyline coordinates so extractCoords is not called per render.
+  const trailPolylines = useMemo(
+    () =>
+      trails
+        .map((t) => ({ id: t.id, trail: t, coords: extractCoords(t.path) }))
+        .filter((p) => p.coords.length >= 2),
+    [trails],
+  );
+
   useEffect(() => {
     publishVisibleTrails({
       bbox: {
@@ -187,10 +322,14 @@ export default function MapTab() {
         setRegion(next);
         mapRef.current?.animateToRegion(next, 600);
       } catch {
-        // ignore — keep fallback region
+        // keep fallback region
       }
     })();
   }, []);
+
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
 
   return (
     <View style={styles.container}>
@@ -219,52 +358,23 @@ export default function MapTab() {
               coordinate={{ latitude: lat, longitude: lon }}
               tracksViewChanges={false}
               pinColor={difficultyColor(t.difficulty)}
-              onPress={() =>
-                setSelected({
-                  id: t.id,
-                  name: t.name,
-                  difficulty: t.difficulty,
-                  ai_difficulty: t.ai_difficulty ?? null,
-                  terrain: t.terrain ?? null,
-                  distance_km: t.distance_km ?? null,
-                  elevation_gain_m: t.elevation_gain_m ?? null,
-                  altitudes: t.altitudes ?? [],
-                  photo_urls: t.photo_urls ?? [],
-                  legal_status: t.legal_status ?? null,
-                })
-              }
+              onPress={() => setSelected(trailDetailData(t))}
             />
           );
         })}
-        {trails.map((t) => {
-          const coords = extractCoords(t.path);
-          if (coords.length < 2) return null;
-          return (
-            <Polyline
-              key={t.id}
-              coordinates={coords}
-              strokeColor={difficultyColor(t.difficulty)}
-              strokeWidth={4}
-              tappable
-              onPress={() =>
-                setSelected({
-                  id: t.id,
-                  name: t.name,
-                  difficulty: t.difficulty,
-                  ai_difficulty: t.ai_difficulty ?? null,
-                  terrain: t.terrain ?? null,
-                  distance_km: t.distance_km ?? null,
-                  elevation_gain_m: t.elevation_gain_m ?? null,
-                  altitudes: t.altitudes ?? [],
-                  photo_urls: t.photo_urls ?? [],
-                  legal_status: t.legal_status ?? null,
-                })
-              }
-            />
-          );
-        })}
+        {trailPolylines.map(({ id, trail, coords }) => (
+          <Polyline
+            key={id}
+            coordinates={coords}
+            strokeColor={difficultyColor(trail.difficulty)}
+            strokeWidth={4}
+            tappable
+            onPress={() => setSelected(trailDetailData(trail))}
+          />
+        ))}
       </ClusterMapView>
 
+      {/* ── Search bar ─────────────────────────────────────────────────── */}
       <View style={styles.searchRow} pointerEvents="box-none">
         <View style={styles.searchBar}>
           <Feather name="search" size={16} color={colors.light.mutedForeground} />
@@ -313,13 +423,11 @@ export default function MapTab() {
         ) : null}
       </View>
 
+      {/* ── Status pill + map controls ─────────────────────────────────── */}
       <View style={styles.headerCard} pointerEvents="box-none">
         <View style={styles.statusPill} pointerEvents="none">
           {trailsQ.isFetching ? (
-            <ActivityIndicator
-              color={colors.light.primary}
-              size="small"
-            />
+            <ActivityIndicator color={colors.light.primary} size="small" />
           ) : (
             <Feather name="map" size={14} color={colors.light.primary} />
           )}
@@ -330,7 +438,7 @@ export default function MapTab() {
 
         <View style={{ flexDirection: "row", gap: 6 }}>
           <TouchableOpacity
-            style={styles.recenterBtn}
+            style={styles.mapBtn}
             onPress={() =>
               setMapKind((k) => (k === "standard" ? "satellite" : "standard"))
             }
@@ -342,7 +450,7 @@ export default function MapTab() {
             />
           </TouchableOpacity>
           <TouchableOpacity
-            style={styles.recenterBtn}
+            style={styles.mapBtn}
             onPress={() => {
               void (async () => {
                 try {
@@ -362,39 +470,141 @@ export default function MapTab() {
               })();
             }}
           >
-            <Feather
-              name="navigation"
-              size={18}
-              color={colors.light.primary}
-            />
+            <Feather name="navigation" size={18} color={colors.light.primary} />
           </TouchableOpacity>
         </View>
       </View>
 
-      <View style={styles.filterBar} pointerEvents="box-none">
-        {(["all", "green", "blue", "black", "double-black"] as DifficultyFilter[]).map(
-          (f) => (
-            <TouchableOpacity
-              key={f}
-              onPress={() => setDifficultyFilter(f)}
-              style={[
-                styles.filterChip,
-                difficultyFilter === f && styles.filterChipActive,
-              ]}
-            >
-              <Text
+      {/* ── Filter rows ────────────────────────────────────────────────── */}
+      <View style={styles.filtersContainer} pointerEvents="box-none">
+        {/* Row 1 — Grade difficulty */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+          pointerEvents="box-none"
+        >
+          {GRADE_CHIPS.map((chip) => {
+            const active = gradeFilter === chip.id;
+            const locked = chip.id !== "all" && !isPremium;
+            return (
+              <TouchableOpacity
+                key={chip.id}
+                onPress={() => handleGradeFilter(chip.id)}
                 style={[
-                  styles.filterChipText,
-                  difficultyFilter === f && styles.filterChipTextActive,
+                  styles.filterChip,
+                  active && styles.filterChipActive,
+                  active && chip.color ? { backgroundColor: chip.color, borderColor: chip.color } : null,
                 ]}
               >
-                {f === "double-black" ? "2×black" : f}
-              </Text>
-            </TouchableOpacity>
-          ),
-        )}
+                {locked ? (
+                  <Feather
+                    name="lock"
+                    size={9}
+                    color={colors.light.mutedForeground}
+                    style={styles.lockIcon}
+                  />
+                ) : null}
+                {chip.color && !active ? (
+                  <View
+                    style={[styles.colorDot, { backgroundColor: chip.color }]}
+                  />
+                ) : null}
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    active && styles.filterChipTextActive,
+                  ]}
+                >
+                  {chip.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+
+        {/* Row 2 — Bike type */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+          pointerEvents="box-none"
+        >
+          {BIKE_CHIPS.map((chip) => {
+            const active = bikeFilter === chip.id;
+            const locked = chip.id !== "all" && !isPremium;
+            return (
+              <TouchableOpacity
+                key={chip.id}
+                onPress={() => handleBikeFilter(chip.id)}
+                style={[
+                  styles.filterChip,
+                  active && styles.filterChipActive,
+                ]}
+              >
+                {locked ? (
+                  <Feather
+                    name="lock"
+                    size={9}
+                    color={colors.light.mutedForeground}
+                    style={styles.lockIcon}
+                  />
+                ) : null}
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    active && styles.filterChipTextActive,
+                  ]}
+                >
+                  {chip.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+
+        {/* Row 3 — Trail visibility */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+          pointerEvents="box-none"
+        >
+          {VISIBILITY_CHIPS.map((chip) => {
+            const active = visibilityFilter === chip.id;
+            const locked = chip.id !== "all" && !isPremium;
+            return (
+              <TouchableOpacity
+                key={chip.id}
+                onPress={() => handleVisibilityFilter(chip.id)}
+                style={[
+                  styles.filterChip,
+                  active && styles.filterChipActive,
+                ]}
+              >
+                {locked ? (
+                  <Feather
+                    name="lock"
+                    size={9}
+                    color={colors.light.mutedForeground}
+                    style={styles.lockIcon}
+                  />
+                ) : null}
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    active && styles.filterChipTextActive,
+                  ]}
+                >
+                  {chip.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
       </View>
 
+      {/* ── Location denied banner ──────────────────────────────────────── */}
       {permission === "denied" ? (
         <View style={styles.permBanner}>
           <Text style={styles.permBannerText}>
@@ -403,6 +613,7 @@ export default function MapTab() {
         </View>
       ) : null}
 
+      {/* ── Trail detail sheet ──────────────────────────────────────────── */}
       <TrailDetailSheet
         visible={!!selected}
         trail={selected}
@@ -410,8 +621,34 @@ export default function MapTab() {
         onClose={() => setSelected(null)}
         onMarkRiddenChange={() => void completionsQ.refetch()}
       />
+
+      {/* ── Upgrade prompt ──────────────────────────────────────────────── */}
+      <UpgradePrompt
+        visible={upgradeVisible}
+        featureName={upgradedFeature}
+        onDismiss={() => setUpgradeVisible(false)}
+      />
     </View>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function trailDetailData(t: ApiTrail): TrailDetailData {
+  return {
+    id: t.id,
+    name: t.name,
+    difficulty: t.difficulty,
+    ai_difficulty: t.ai_difficulty ?? null,
+    terrain: t.terrain ?? null,
+    distance_km: t.distance_km ?? null,
+    elevation_gain_m: t.elevation_gain_m ?? null,
+    altitudes: t.altitudes ?? [],
+    photo_urls: t.photo_urls ?? [],
+    legal_status: t.legal_status ?? null,
+  };
 }
 
 function bboxFromRegion(r: Region): string {
@@ -423,24 +660,26 @@ function bboxFromRegion(r: Region): string {
 }
 
 /**
- * Coerce the trail.path payload (which may be GeoJSON `[lon,lat]`,
- * `{lat,lon}`, `{latitude,longitude}`, or an array of any of those) into
- * react-native-maps' `{latitude, longitude}` shape. Skip anything that
- * doesn't parse.
+ * Coerce trail.path (GeoJSON `[lon,lat]` arrays OR legacy `{lat,lon}` objects)
+ * into react-native-maps `{latitude, longitude}` shape.
+ *
+ * The GeoJSON array case is handled by `parseGeoJsonPath` from lib/geo.
+ * The object case exists for defensive backward-compatibility with any legacy
+ * data that might use `{lat, lon}` or `{latitude, longitude}` objects.
  */
 function extractCoords(
   path: unknown,
 ): Array<{ latitude: number; longitude: number }> {
   if (!Array.isArray(path)) return [];
+
+  // Fast path: all elements are [lon, lat] arrays (standard API format).
+  if (path.length > 0 && Array.isArray(path[0])) {
+    return parseGeoJsonPath(path);
+  }
+
+  // Slow path: elements are objects with lat/lon fields (legacy).
   const out: Array<{ latitude: number; longitude: number }> = [];
   for (const pt of path) {
-    if (Array.isArray(pt) && pt.length >= 2) {
-      const [lon, lat] = pt as [unknown, unknown];
-      if (typeof lat === "number" && typeof lon === "number") {
-        out.push({ latitude: lat, longitude: lon });
-      }
-      continue;
-    }
     if (pt && typeof pt === "object") {
       const o = pt as Record<string, unknown>;
       const lat =
@@ -465,17 +704,14 @@ function extractCoords(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.light.background },
-  headerCard: {
-    position: "absolute",
-    top: 64,
-    left: 12,
-    right: 12,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
+
+  // Search
   searchRow: {
     position: "absolute",
     top: 12,
@@ -517,6 +753,17 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.light.border,
   },
   searchHitText: { flex: 1, color: colors.light.foreground, fontSize: 12 },
+
+  // Header (status + controls)
+  headerCard: {
+    position: "absolute",
+    top: 64,
+    left: 12,
+    right: 12,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
   statusPill: {
     flexDirection: "row",
     alignItems: "center",
@@ -528,8 +775,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: 999,
   },
-  statusText: { color: colors.light.foreground, fontSize: 12, fontWeight: "600" },
-  recenterBtn: {
+  statusText: {
+    color: colors.light.foreground,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  mapBtn: {
     backgroundColor: colors.light.card,
     borderColor: colors.light.border,
     borderWidth: 1,
@@ -539,28 +790,25 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  permBanner: {
+
+  // Filter rows
+  filtersContainer: {
     position: "absolute",
-    bottom: 12,
-    left: 12,
-    right: 12,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.destructive,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 10,
+    top: 114,
+    left: 0,
+    right: 0,
+    gap: 4,
   },
-  permBannerText: { color: colors.light.foreground, fontSize: 12 },
-  filterBar: {
-    position: "absolute",
-    top: 112,
-    left: 12,
-    right: 12,
+  filterRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
     gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 2,
   },
   filterChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 999,
@@ -576,7 +824,28 @@ const styles = StyleSheet.create({
     color: colors.light.foreground,
     fontSize: 11,
     fontWeight: "600",
-    textTransform: "capitalize",
   },
   filterChipTextActive: { color: colors.light.primaryForeground },
+  colorDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  lockIcon: {
+    marginRight: 1,
+  },
+
+  // Location permission banner
+  permBanner: {
+    position: "absolute",
+    bottom: 12,
+    left: 12,
+    right: 12,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.destructive,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+  },
+  permBannerText: { color: colors.light.foreground, fontSize: 12 },
 });

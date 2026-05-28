@@ -31,6 +31,13 @@ import {
   type Group,
   type TrailNote,
 } from "@/lib/api";
+import {
+  cacheTiles,
+  isTrailSavedOffline,
+  removeOfflineTrail,
+  saveTrailOffline,
+  type TileDownloadProgress,
+} from "@/lib/offlineStore";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 
 export default function TrailDetailScreen() {
@@ -76,6 +83,14 @@ export default function TrailDetailScreen() {
   });
 
   const [shareOpen, setShareOpen] = useState(false);
+  const [isSavedOffline, setIsSavedOffline] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<TileDownloadProgress | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  useEffect(() => {
+    if (!id) return;
+    void isTrailSavedOffline(id).then(setIsSavedOffline);
+  }, [id]);
 
   function navigateTo(targetId: string) {
     const path = `/trail/${encodeURIComponent(targetId)}` as const;
@@ -193,7 +208,97 @@ export default function TrailDetailScreen() {
         </View>
       </View>
 
+      {/* Offline download progress */}
+      {downloadProgress ? (
+        <View style={styles.downloadBar}>
+          <View
+            style={[
+              styles.downloadFill,
+              {
+                width: `${Math.round(
+                  ((downloadProgress.downloaded + downloadProgress.failed) /
+                    Math.max(1, downloadProgress.total)) * 100,
+                )}%`,
+              },
+            ]}
+          />
+          <Text style={styles.downloadText}>
+            Caching tiles {downloadProgress.downloaded}/{downloadProgress.total}
+            {downloadProgress.failed > 0 ? ` (${downloadProgress.failed} failed)` : ""}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.actionRow}>
+        <TouchableOpacity
+          style={[styles.actionBtn, isSavedOffline && { borderColor: colors.light.primary }]}
+          disabled={downloading}
+          onPress={async () => {
+            if (isSavedOffline) {
+              Alert.alert("Remove offline data?", "Trail map data will be removed.", [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Remove",
+                  style: "destructive",
+                  onPress: async () => {
+                    await removeOfflineTrail(trail.id);
+                    setIsSavedOffline(false);
+                  },
+                },
+              ]);
+              return;
+            }
+            setDownloading(true);
+            setDownloadProgress(null);
+
+            // Build bbox from trail path.
+            const path = trail.path as unknown as Array<[number, number]> | null;
+            let bbox = {
+              minLat: 90, maxLat: -90, minLon: 180, maxLon: -180,
+            };
+            if (Array.isArray(path)) {
+              for (const [lon, lat] of path) {
+                if (lat < bbox.minLat) bbox.minLat = lat;
+                if (lat > bbox.maxLat) bbox.maxLat = lat;
+                if (lon < bbox.minLon) bbox.minLon = lon;
+                if (lon > bbox.maxLon) bbox.maxLon = lon;
+              }
+            }
+
+            // Save trail data.
+            await saveTrailOffline({
+              id: trail.id,
+              name: trail.name,
+              difficulty: trail.difficulty ?? null,
+              distance_km: trail.distance_km ?? null,
+              path: Array.isArray(path) ? path : [],
+              legal_status: trail.legal_status ?? null,
+              terrain: trail.terrain ?? null,
+              bbox,
+            });
+
+            // Download map tiles.
+            const progress = await cacheTiles(bbox, (p) => setDownloadProgress(p));
+            setDownloadProgress(progress);
+            setIsSavedOffline(true);
+            setDownloading(false);
+
+            setTimeout(() => setDownloadProgress(null), 2000);
+          }}
+        >
+          {downloading ? (
+            <ActivityIndicator size="small" color={colors.light.foreground} />
+          ) : (
+            <Feather
+              name={isSavedOffline ? "check-circle" : "download"}
+              size={14}
+              color={isSavedOffline ? colors.light.primary : colors.light.foreground}
+            />
+          )}
+          <Text style={[styles.actionBtnText, isSavedOffline && { color: colors.light.primary }]}>
+            {isSavedOffline ? "Saved offline" : "Save offline"}
+          </Text>
+        </TouchableOpacity>
         <TouchableOpacity
           style={styles.actionBtn}
           onPress={() => setShareOpen(true)}
@@ -499,6 +604,26 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 0.5,
     marginBottom: 6,
+  },
+  downloadBar: {
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: colors.light.muted,
+    overflow: "hidden",
+    marginTop: 10,
+    justifyContent: "center",
+  },
+  downloadFill: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: colors.light.primary,
+    opacity: 0.25,
+  },
+  downloadText: {
+    color: colors.light.foreground,
+    fontSize: 11,
+    fontWeight: "700",
+    textAlign: "center",
+    zIndex: 1,
   },
   actionRow: {
     flexDirection: "row",

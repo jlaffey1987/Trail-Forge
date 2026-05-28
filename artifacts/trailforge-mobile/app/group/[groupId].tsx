@@ -1,7 +1,8 @@
 /**
  * Group detail / management — mirrors the web GroupDetail + EditGroupDialog
  * panels. Owners and admins see member management, invite generation /
- * revocation, and cover-photo upload. Members see a read-only roster.
+ * revocation, cover-photo upload, and join-request approval. Members see a
+ * read-only roster. All members see a live map of the group's shared trails.
  */
 import { Feather } from "@expo/vector-icons";
 import {
@@ -18,6 +19,7 @@ import {
   Alert,
   Image,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -25,20 +27,30 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import MapView, {
+  Polyline,
+  PROVIDER_DEFAULT,
+  PROVIDER_GOOGLE,
+} from "react-native-maps";
 
 import colors from "@/constants/colors";
 import {
+  approveGroupJoinRequest,
   createGroupInvite,
+  declineGroupJoinRequest,
   fetchGroupDetail,
   finalizeGroupCover,
   groupCoverPhotoUrl,
+  listMyGroupTrails,
   removeGroupCover,
   removeGroupMember,
   requestGroupCoverUploadUrl,
   revokeGroupInvite,
   type GroupInvite,
+  type GroupJoinRequest,
   type GroupMember,
 } from "@/lib/api";
+import { difficultyColor } from "@/lib/trailColors";
 
 export default function GroupDetailScreen() {
   const { groupId } = useLocalSearchParams<{ groupId: string }>();
@@ -86,7 +98,15 @@ export default function GroupDetailScreen() {
         }
       />
 
-      <Text style={styles.h1}>{detail.group.name}</Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 }}>
+        <Text style={styles.h1}>{detail.group.name}</Text>
+        {(detail.group as { is_verified?: boolean }).is_verified ? (
+          <View style={styles.verifiedBadge}>
+            <Feather name="check-circle" size={14} color={colors.light.primaryForeground} />
+            <Text style={styles.verifiedBadgeText}>Verified</Text>
+          </View>
+        ) : null}
+      </View>
       {detail.group.description ? (
         <Text style={styles.body}>{detail.group.description}</Text>
       ) : null}
@@ -118,6 +138,36 @@ export default function GroupDetailScreen() {
           />
         ))}
       </Section>
+
+      {/* ── Join requests (owners / admins only) ─────────────────────── */}
+      {canManage && detail.joinRequests.length > 0 ? (
+        <Section
+          title={`Join Requests (${detail.joinRequests.length})`}
+        >
+          {detail.joinRequests.map((jr) => (
+            <JoinRequestRow
+              key={jr.id}
+              request={jr}
+              onApprove={async () => {
+                try {
+                  await approveGroupJoinRequest(id, jr.id);
+                  await qc.invalidateQueries({ queryKey: ["group-detail", id] });
+                } catch (err) {
+                  Alert.alert("Approve failed", err instanceof Error ? err.message : "Error");
+                }
+              }}
+              onDecline={async () => {
+                try {
+                  await declineGroupJoinRequest(id, jr.id);
+                  await qc.invalidateQueries({ queryKey: ["group-detail", id] });
+                } catch (err) {
+                  Alert.alert("Decline failed", err instanceof Error ? err.message : "Error");
+                }
+              }}
+            />
+          ))}
+        </Section>
+      ) : null}
 
       {canManage ? (
         <Section
@@ -157,6 +207,9 @@ export default function GroupDetailScreen() {
           )}
         </Section>
       ) : null}
+
+      {/* ── Group trails map ──────────────────────────────────────────── */}
+      <GroupTrailsMap groupId={id} />
 
       <CreateInviteModal
         visible={inviteModal}
@@ -500,6 +553,134 @@ function CreateInviteModal({
   );
 }
 
+function JoinRequestRow({
+  request,
+  onApprove,
+  onDecline,
+}: {
+  request: GroupJoinRequest;
+  onApprove: () => void;
+  onDecline: () => void;
+}) {
+  const name = request.display_name ?? `User ${request.user_id.slice(0, 8)}`;
+  return (
+    <View style={styles.memberRow}>
+      <View style={styles.avatar}>
+        <Feather name="user-plus" size={16} color={colors.light.primary} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.memberName}>{name}</Text>
+        {request.message ? (
+          <Text style={styles.muted} numberOfLines={1}>
+            "{request.message}"
+          </Text>
+        ) : null}
+      </View>
+      <TouchableOpacity onPress={onApprove} style={styles.approveBtn}>
+        <Feather name="check" size={14} color="#fff" />
+      </TouchableOpacity>
+      <TouchableOpacity onPress={onDecline} style={styles.kickBtn}>
+        <Feather name="x" size={14} color={colors.light.destructive} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function GroupTrailsMap({ groupId: _groupId }: { groupId: string }) {
+  const trailsQ = useQuery({
+    queryKey: ["my-group-trails"],
+    queryFn: listMyGroupTrails,
+    staleTime: 60_000,
+  });
+
+  const trails = trailsQ.data?.trails ?? [];
+
+  if (trailsQ.isLoading) {
+    return (
+      <View style={styles.section}>
+        <Text style={styles.h2}>Group trails</Text>
+        <ActivityIndicator color={colors.light.primary} style={{ marginTop: 10 }} />
+      </View>
+    );
+  }
+
+  if (trails.length === 0) {
+    return (
+      <View style={styles.section}>
+        <Text style={styles.h2}>Group trails</Text>
+        <Text style={[styles.muted, { marginTop: 8 }]}>
+          No trails shared to your groups yet.
+        </Text>
+      </View>
+    );
+  }
+
+  // Build polylines and compute a bbox for the initial region.
+  type Coord = { latitude: number; longitude: number };
+  const polylines: Array<{ key: string; coords: Coord[]; color: string }> = [];
+  let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+
+  for (const t of trails) {
+    if (!Array.isArray(t.path)) continue;
+    const coords: Coord[] = [];
+    for (const p of t.path as unknown[]) {
+      if (Array.isArray(p) && p.length >= 2) {
+        const [lon, lat] = p as [unknown, unknown];
+        if (typeof lat === "number" && typeof lon === "number") {
+          coords.push({ latitude: lat, longitude: lon });
+          if (lat < minLat) minLat = lat;
+          if (lat > maxLat) maxLat = lat;
+          if (lon < minLon) minLon = lon;
+          if (lon > maxLon) maxLon = lon;
+        }
+      }
+    }
+    if (coords.length >= 2) {
+      polylines.push({ key: t.id, coords, color: difficultyColor(t.difficulty) });
+    }
+  }
+
+  if (polylines.length === 0) {
+    return (
+      <View style={styles.section}>
+        <Text style={styles.h2}>Group trails ({trails.length})</Text>
+        <Text style={[styles.muted, { marginTop: 8 }]}>Trail paths not yet available.</Text>
+      </View>
+    );
+  }
+
+  const region = {
+    latitude: (minLat + maxLat) / 2,
+    longitude: (minLon + maxLon) / 2,
+    latitudeDelta: Math.max(0.05, (maxLat - minLat) * 1.4),
+    longitudeDelta: Math.max(0.05, (maxLon - minLon) * 1.4),
+  };
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.h2}>Group trails ({trails.length})</Text>
+      <View style={styles.mapWrap}>
+        <MapView
+          style={{ flex: 1 }}
+          provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
+          initialRegion={region}
+          scrollEnabled={false}
+          zoomEnabled={false}
+        >
+          {polylines.map((p) => (
+            <Polyline
+              key={p.key}
+              coordinates={p.coords}
+              strokeColor={p.color}
+              strokeWidth={3}
+            />
+          ))}
+        </MapView>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.light.background },
   center: {
@@ -590,6 +771,37 @@ const styles = StyleSheet.create({
     backgroundColor: colors.light.muted,
     alignItems: "center",
     justifyContent: "center",
+  },
+  approveBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.light.secondary,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 6,
+  },
+  mapWrap: {
+    height: 200,
+    borderRadius: 12,
+    overflow: "hidden",
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    marginTop: 10,
+  },
+  verifiedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.light.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  verifiedBadgeText: {
+    color: colors.light.primaryForeground,
+    fontSize: 11,
+    fontWeight: "700",
   },
   copyBtn: {
     width: 32,

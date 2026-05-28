@@ -24,7 +24,34 @@ describe("runPreflightCheck", () => {
     expect(result.missingIndex).toBe(false);
   });
 
+  it("skips in development by default", async () => {
+    process.env.NODE_ENV = "development";
+    delete process.env.SKIP_SCHEMA_PREFLIGHT;
+    const { runPreflightCheck } = await import("../src/lib/preflightCheck");
+    const result = await runPreflightCheck();
+    expect(result.ok).toBe(true);
+    expect(result.missingColumns).toEqual([]);
+    expect(result.missingIndex).toBe(false);
+  });
+
+  it("continues when Supabase is unreachable", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.SKIP_SCHEMA_PREFLIGHT;
+
+    const supa = getMockSupa();
+    supa.forcedErrors.set("trails:select", {
+      message: "TypeError: fetch failed",
+    });
+
+    const mod = await import("../src/lib/preflightCheck");
+    const result = await mod.runPreflightCheck();
+    expect(result.ok).toBe(true);
+    expect(result.missingColumns).toEqual([]);
+    expect(result.missingIndex).toBe(false);
+  });
+
   it("reports missing columns when trails table lacks them", async () => {
+    process.env.NODE_ENV = "production";
     const supa = getMockSupa();
     supa.seed("trails", [{ id: "1", name: "test" }]);
     supa.forcedErrors.set("trails:select", {
@@ -47,6 +74,7 @@ describe("runPreflightCheck", () => {
   });
 
   it("reports ok when columns exist and index probe succeeds", async () => {
+    process.env.NODE_ENV = "production";
     const supa = getMockSupa();
     supa.seed("trails", [
       {
@@ -74,6 +102,7 @@ describe("runPreflightCheck", () => {
   });
 
   it("reports missing index when PostgREST returns 42P10", async () => {
+    process.env.NODE_ENV = "production";
     const supa = getMockSupa();
     supa.seed("trails", [
       {
@@ -109,6 +138,7 @@ describe("runPreflightCheck", () => {
   });
 
   it("treats unexpected non-OK probe response as unknown (index assumed present) and logs a warning", async () => {
+    process.env.NODE_ENV = "production";
     const supa = getMockSupa();
     supa.seed("trails", [
       {

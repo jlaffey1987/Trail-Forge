@@ -1,8 +1,10 @@
-import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
-import { getAuth, clerkClient } from "@clerk/express";
+import { Router, type IRouter, type Request, type Response } from "express";
+import { clerkClient } from "@clerk/express";
 import { randomBytes, randomUUID } from "crypto";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
+import { requireAuth, type AuthedHandler } from "../middlewares/requireAuth";
+import { isMissingTableError } from "../lib/dbErrors";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import {
   ObjectAccessGroupType,
@@ -59,40 +61,9 @@ const ShareTrailBody = z.object({
   group_ids: z.array(z.string().uuid()).min(0).max(50),
 });
 
-const RoleEnum = z.enum(["owner", "admin", "member"]);
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-interface AuthedHandler {
-  (req: Request, res: Response, userId: string): Promise<void>;
-}
-
-function requireAuth(handler: AuthedHandler) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    const auth = getAuth(req);
-    if (!auth.userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    try {
-      await handler(req, res, auth.userId);
-    } catch (err) {
-      next(err);
-    }
-  };
-}
-
-function isMissingTableError(err: { code?: string; message?: string } | null): boolean {
-  if (!err) return false;
-  return (
-    err.code === "42P01" ||
-    err.code === "PGRST205" ||
-    /relation .* does not exist/i.test(err.message ?? "") ||
-    /Could not find the table/i.test(err.message ?? "")
-  );
-}
 
 function generateInviteToken(): string {
   // 24 random bytes → 32-char URL-safe base64url string.

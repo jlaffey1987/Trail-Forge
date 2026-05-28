@@ -11,18 +11,43 @@ const REQUIRED_COLUMNS = ["source_region", "segment_hash"] as const;
 
 const INDEX_NAME = "trails_source_segment_unique";
 
+function isConnectivityError(message: string): boolean {
+  return /fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|network|socket hang up/i.test(
+    message,
+  );
+}
+
 async function columnExists(column: string): Promise<boolean> {
-  const sb = getSupabaseAdmin();
-  const { error } = await sb.from("trails").select(column).limit(1);
-  if (!error) return true;
-  if (
-    /column .* does not exist|undefined column|42703|PGRST204/i.test(
-      error.message + (error.code ?? ""),
-    )
-  ) {
-    return false;
+  try {
+    const sb = getSupabaseAdmin();
+    const { error } = await sb.from("trails").select(column).limit(1);
+    if (!error) return true;
+    if (
+      /column .* does not exist|undefined column|42703|PGRST204/i.test(
+        error.message + (error.code ?? ""),
+      )
+    ) {
+      return false;
+    }
+    if (isConnectivityError(error.message)) {
+      throw new Error(error.message);
+    }
+    logger.warn(
+      { column, err: error.message },
+      "Preflight: unexpected column probe response — treating column as present",
+    );
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (isConnectivityError(message)) {
+      throw err;
+    }
+    logger.warn(
+      { column, err: message },
+      "Preflight: column probe failed — treating column as present",
+    );
+    return true;
   }
-  throw new Error(`Preflight column probe failed for "${column}": ${error.message}`);
 }
 
 async function uniqueIndexExists(): Promise<boolean> {
@@ -109,51 +134,70 @@ async function uniqueIndexExists(): Promise<boolean> {
 }
 
 export async function runPreflightCheck(): Promise<PreflightResult> {
-  if (process.env.SKIP_SCHEMA_PREFLIGHT === "true") {
-    logger.info("Schema preflight check skipped (SKIP_SCHEMA_PREFLIGHT=true)");
+  const skip =
+    process.env.SKIP_SCHEMA_PREFLIGHT === "true" ||
+    process.env.NODE_ENV === "development";
+
+  if (skip) {
+    logger.info(
+      process.env.SKIP_SCHEMA_PREFLIGHT === "true"
+        ? "Schema preflight check skipped (SKIP_SCHEMA_PREFLIGHT=true)"
+        : "Schema preflight check skipped in development (set SKIP_SCHEMA_PREFLIGHT=false to enable)",
+    );
     return { ok: true, missingColumns: [], missingIndex: false };
   }
 
-  logger.info("Running schema preflight check (migration 0009) …");
+  try {
+    logger.info("Running schema preflight check (migration 0009) …");
 
-  const missingColumns: string[] = [];
+    const missingColumns: string[] = [];
 
-  for (const col of REQUIRED_COLUMNS) {
-    const exists = await columnExists(col);
-    if (!exists) {
-      missingColumns.push(col);
+    for (const col of REQUIRED_COLUMNS) {
+      const exists = await columnExists(col);
+      if (!exists) {
+        missingColumns.push(col);
+      }
     }
-  }
 
-  let missingIndex = false;
-  if (!missingColumns.includes("segment_hash")) {
-    const exists = await uniqueIndexExists();
-    if (!exists) {
+    let missingIndex = false;
+    if (!missingColumns.includes("segment_hash")) {
+      const exists = await uniqueIndexExists();
+      if (!exists) {
+        missingIndex = true;
+      }
+    } else {
       missingIndex = true;
     }
-  } else {
-    missingIndex = true;
-  }
 
-  const ok = missingColumns.length === 0 && !missingIndex;
+    const ok = missingColumns.length === 0 && !missingIndex;
 
-  if (!ok) {
-    const parts: string[] = [];
-    if (missingColumns.length > 0) {
-      parts.push(`missing columns: ${missingColumns.join(", ")}`);
+    if (!ok) {
+      const parts: string[] = [];
+      if (missingColumns.length > 0) {
+        parts.push(`missing columns: ${missingColumns.join(", ")}`);
+      }
+      if (missingIndex) {
+        parts.push(
+          `missing unique index: ${INDEX_NAME} (source, source_url, segment_hash)`,
+        );
+      }
+      logger.warn(
+        { missingColumns, missingIndex },
+        `Schema preflight WARNING — migration 0009 may not be applied: ${parts.join("; ")}. ` +
+          `The ACT/TET importer will refuse to run until this is fixed. ` +
+          `Set SKIP_SCHEMA_PREFLIGHT=true to suppress this check.`,
+      );
+    } else {
+      logger.info("Schema preflight check passed ✓");
     }
-    if (missingIndex) {
-      parts.push(`missing unique index: ${INDEX_NAME} (source, source_url, segment_hash)`);
-    }
+
+    return { ok, missingColumns, missingIndex };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     logger.warn(
-      { missingColumns, missingIndex },
-      `Schema preflight WARNING — migration 0009 may not be applied: ${parts.join("; ")}. ` +
-        `The ACT/TET importer will refuse to run until this is fixed. ` +
-        `Set SKIP_SCHEMA_PREFLIGHT=true to suppress this check.`,
+      { err: message },
+      "Schema preflight check could not reach Supabase — continuing without blocking startup",
     );
-  } else {
-    logger.info("Schema preflight check passed ✓");
+    return { ok: true, missingColumns: [], missingIndex: false };
   }
-
-  return { ok, missingColumns, missingIndex };
 }

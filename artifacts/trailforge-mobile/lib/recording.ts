@@ -21,6 +21,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
+import { haversineMeters } from "./geo";
 
 const LOCATION_TASK_NAME = "trailforge-ride-recording";
 const STORAGE_KEY = "trailforge:active-ride";
@@ -131,19 +132,6 @@ function notify(): void {
       // ignore listener errors
     }
   }
-}
-
-function haversineMeters(a: RidePoint, b: RidePoint): number {
-  const R = 6371000;
-  const toRad = (deg: number) => (deg * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
 }
 
 function computeStats(pts: RidePoint[]): RideStats {

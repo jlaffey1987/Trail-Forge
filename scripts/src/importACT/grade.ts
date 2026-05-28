@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { anthropic } from "@workspace/integrations-anthropic-ai";
 import type { GpxPoint } from "./parseBundle.js";
 
 /**
@@ -168,6 +167,7 @@ export async function gradeSegment(input: GradeInput): Promise<GradeResult> {
   }
 
   try {
+    const { anthropic } = await import("@workspace/integrations-anthropic-ai");
     const message = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 1024,
