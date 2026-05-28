@@ -53,3 +53,6 @@ artifacts/trailforge/playwright-report/
 artifacts/trailforge/test-results/
 artifacts/trailforge/tests/e2e/.e2e-state.json
 .cache/ms-playwright/
+artifacts/api-server/.env.local
+artifacts/trailforge-mobile/.env.local
+scripts/.env.local
