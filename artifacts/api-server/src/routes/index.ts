@@ -10,6 +10,9 @@ import aiRouter from "./ai";
 import pushRouter from "./push";
 import chatRouter from "./chat";
 import geocodeRouter from "./geocode";
+import adminRouter from "./admin";
+import conditionsRouter from "./conditions";
+import leaderboardRouter from "./leaderboard";
 
 const router: IRouter = Router();
 
@@ -24,5 +27,8 @@ router.use(aiRouter);
 router.use(pushRouter);
 router.use(chatRouter);
 router.use(geocodeRouter);
+router.use(adminRouter);
+router.use(conditionsRouter);
+router.use(leaderboardRouter);
 
 export default router;

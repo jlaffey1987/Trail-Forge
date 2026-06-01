@@ -1039,3 +1039,102 @@ export function groupCoverPhotoUrl(coverKey: string | null | undefined): string 
     : "";
   return `${base}/api/storage/objects/${coverKey}`;
 }
+
+// ---------------------------------------------------------------------------
+// Trail condition reports
+// ---------------------------------------------------------------------------
+
+export type ConditionType =
+  | "good"
+  | "wet_muddy"
+  | "overgrown"
+  | "damaged"
+  | "temporary_closure"
+  | "legal_status_changed"
+  | "landowner_closed"
+  | "dangerous";
+
+export const CONDITION_LABELS: Record<ConditionType, string> = {
+  good:                 "Good condition",
+  wet_muddy:            "Wet / Muddy",
+  overgrown:            "Overgrown",
+  damaged:              "Damaged / Impassable",
+  temporary_closure:    "Temporary Closure",
+  legal_status_changed: "Legal Status Changed",
+  landowner_closed:     "Landowner Closed Access",
+  dangerous:            "Dangerous Condition",
+};
+
+export const CONDITION_SEVERITY: Record<ConditionType, "success" | "warning" | "danger"> = {
+  good:                 "success",
+  wet_muddy:            "warning",
+  overgrown:            "warning",
+  damaged:              "danger",
+  temporary_closure:    "danger",
+  legal_status_changed: "danger",
+  landowner_closed:     "danger",
+  dangerous:            "danger",
+};
+
+export const CONDITION_COLORS: Record<ConditionType, string> = {
+  good:                 "#22c55e",
+  wet_muddy:            "#f59e0b",
+  overgrown:            "#84cc16",
+  damaged:              "#ef4444",
+  temporary_closure:    "#ef4444",
+  legal_status_changed: "#6b21a8",
+  landowner_closed:     "#ef4444",
+  dangerous:            "#ef4444",
+};
+
+export interface TrailCondition {
+  id: string;
+  trail_id: string;
+  reporter_user_id: string;
+  condition: ConditionType;
+  note: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+export async function submitConditionReport(
+  trailId: string,
+  condition: ConditionType,
+  note?: string,
+): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`/api/trails/${encodeURIComponent(trailId)}/conditions`, {
+    method: "POST",
+    body: JSON.stringify({ condition, note: note ?? null }),
+  });
+  if (!res.ok) throw new Error("Failed to submit condition report");
+  return res.json() as Promise<{ ok: boolean }>;
+}
+
+export async function listTrailConditions(trailId: string): Promise<TrailCondition[]> {
+  const res = await apiFetch(`/api/trails/${encodeURIComponent(trailId)}/conditions`, {
+    allowAnonymous: true,
+  });
+  if (!res.ok) return [];
+  return (res.json() as Promise<{ conditions: TrailCondition[] }>).then(d => d.conditions ?? []);
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard / Feed
+// ---------------------------------------------------------------------------
+
+export interface LeaderboardEntry {
+  rank: number;
+  display_name: string;
+  avatar_url: string | null;
+  score: number;
+  user_id: string;
+}
+
+export async function fetchLeaderboard(
+  type: string,
+  period: string,
+): Promise<LeaderboardEntry[]> {
+  const res = await apiFetch(`/api/leaderboard?type=${type}&period=${period}`);
+  if (!res.ok) return [];
+  return (res.json() as Promise<{ entries: LeaderboardEntry[] }>).then(d => d.entries ?? []);
+}

@@ -1,7 +1,8 @@
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import { useSyncMe } from "@workspace/api-client-react";
-import { Tabs } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Tabs, router } from "expo-router";
 import React, { useEffect, useState } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 
@@ -17,6 +18,7 @@ import colors from "@/constants/colors";
 import { adminWhoami } from "@/lib/api";
 import { registerForPushAndSubscribe } from "@/lib/pushSetup";
 import { rehydrate as rehydrateRecording } from "@/lib/recording";
+import { ONBOARDING_KEY } from "@/lib/storageKeys";
 
 /**
  * Mirror the Clerk user into Supabase + register for Expo push on launch.
@@ -28,6 +30,20 @@ function PostLoginBootstrap() {
   const [syncError, setSyncError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Redirect to onboarding on first launch after sign-up.
+    // The check is fast (AsyncStorage is synchronous-backed on device) so
+    // the flash before the redirect is imperceptible in practice.
+    void AsyncStorage.getItem(ONBOARDING_KEY).then(done => {
+      if (!done) {
+        // "/onboarding" is not in the generated type union until `expo-router`
+        // rebuilds its type manifest. The cast is intentional.
+        router.replace(
+          "/onboarding" as unknown as Parameters<typeof router.replace>[0]
+        );
+        return;
+      }
+    });
+
     sync.mutate(undefined, {
       onSuccess(data) {
         setProfile({
@@ -148,9 +164,28 @@ export default function TabLayout() {
           }}
         />
         <Tabs.Screen
+          name="explore"
+          options={{
+            title: "Explore",
+            tabBarIcon: ({ color }) => (
+              <Feather name="compass" size={20} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="feed"
+          options={{
+            title: "Feed",
+            tabBarIcon: ({ color }) => (
+              <Feather name="activity" size={20} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
           name="discover"
           options={{
             title: "Discover",
+            href: null, // hidden — superseded by Explore tab
             tabBarIcon: ({ color }) => (
               <Feather name="search" size={20} color={color} />
             ),

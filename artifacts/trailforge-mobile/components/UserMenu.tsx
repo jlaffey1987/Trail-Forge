@@ -5,6 +5,7 @@
  */
 import { useAuth, useUser } from "@clerk/clerk-expo";
 import { Feather } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import React, { useState } from "react";
 import {
@@ -17,6 +18,7 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+import { ONBOARDING_KEY } from "@/lib/storageKeys";
 
 export function UserMenu() {
   const { user } = useUser();
@@ -68,6 +70,18 @@ export function UserMenu() {
               onPress={() => {
                 setOpen(false);
                 router.push("/record");
+              }}
+            />
+            <MenuItem
+              icon="play-circle"
+              label="Redo onboarding"
+              onPress={async () => {
+                setOpen(false);
+                await AsyncStorage.removeItem(ONBOARDING_KEY);
+                // Cast needed until expo-router rebuilds its type manifest
+                router.replace(
+                  "/onboarding" as unknown as Parameters<typeof router.replace>[0]
+                );
               }}
             />
             <View style={styles.divider} />

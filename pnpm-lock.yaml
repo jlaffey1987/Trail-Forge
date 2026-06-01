@@ -930,6 +930,9 @@ importers:
 
   scripts:
     dependencies:
+      '@supabase/supabase-js':
+        specifier: ^2.104.0
+        version: 2.104.0
       '@workspace/integrations-anthropic-ai':
         specifier: workspace:*
         version: link:../lib/integrations-anthropic-ai

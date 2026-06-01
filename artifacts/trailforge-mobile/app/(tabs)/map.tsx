@@ -10,18 +10,21 @@
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import * as Location from "expo-location";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Keyboard,
   Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { geocode, type NominatimResult } from "@/lib/nominatim";
 import ClusterMapView from "react-native-map-clustering";
@@ -132,6 +135,135 @@ const VISIBILITY_CHIPS: { id: VisibilityFilter; label: string }[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Layer system
+// ---------------------------------------------------------------------------
+
+const LAYER_STORAGE_KEY = "@trailforge/map_layers_v1";
+
+export type LayerId = "osm" | "tet" | "trf" | "my_trails" | "my_groups";
+
+interface LayerDef {
+  id: LayerId;
+  label: string;
+  /** Source tag or null for ownership-based layers */
+  source?: string;
+  color: string;
+  defaultOn: boolean;
+}
+
+export const LAYER_DEFS: LayerDef[] = [
+  { id: "osm",       label: "Public Trails",    source: "OSM-UK",  color: "#22c55e", defaultOn: true },
+  { id: "tet",       label: "Trans Euro Trail",  source: "TET-UK",  color: "#D97706", defaultOn: true },
+  { id: "trf",       label: "TRF Routes",        source: "TRF",     color: "#2563EB", defaultOn: true },
+  { id: "my_trails", label: "My Trails",                            color: "#7C3AED", defaultOn: true },
+  { id: "my_groups", label: "My Groups",                            color: "#EA580C", defaultOn: true },
+];
+
+function defaultLayerState(): Record<LayerId, boolean> {
+  return Object.fromEntries(LAYER_DEFS.map(l => [l.id, l.defaultOn])) as Record<LayerId, boolean>;
+}
+
+// ---------------------------------------------------------------------------
+// LayerPanel component
+// ---------------------------------------------------------------------------
+
+function LayerPanel({
+  layers,
+  onToggle,
+}: {
+  layers: Record<LayerId, boolean>;
+  onToggle: (id: LayerId) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const anim = useRef(new Animated.Value(0)).current;
+
+  function toggle() {
+    Animated.spring(anim, {
+      toValue: expanded ? 0 : 1,
+      useNativeDriver: false,
+      tension: 60,
+      friction: 10,
+    }).start();
+    setExpanded(e => !e);
+  }
+
+  const panelHeight = anim.interpolate({ inputRange: [0, 1], outputRange: [0, LAYER_DEFS.length * 46 + 8] });
+  const panelOpacity = anim.interpolate({ inputRange: [0, 0.4, 1], outputRange: [0, 0, 1] });
+
+  return (
+    <View style={layerStyles.container} pointerEvents="box-none">
+      <Animated.View style={[layerStyles.panel, { height: panelHeight, opacity: panelOpacity }]}>
+        {LAYER_DEFS.map(layer => (
+          <View key={layer.id} style={layerStyles.row}>
+            <View style={[layerStyles.swatch, { backgroundColor: layer.color }]} />
+            <Text style={layerStyles.label}>{layer.label}</Text>
+            <Switch
+              value={layers[layer.id]}
+              onValueChange={() => onToggle(layer.id)}
+              trackColor={{ false: "#ccc", true: layer.color }}
+              thumbColor="#fff"
+              style={layerStyles.switch}
+            />
+          </View>
+        ))}
+      </Animated.View>
+
+      <TouchableOpacity
+        style={[layerStyles.btn, expanded && layerStyles.btnActive]}
+        onPress={toggle}
+        activeOpacity={0.8}
+      >
+        <Feather name="layers" size={18} color={expanded ? "#fff" : colors.light.primary} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const layerStyles = StyleSheet.create({
+  container: {
+    position: "absolute",
+    bottom: 24,
+    left: 12,
+    alignItems: "flex-start",
+  },
+  panel: {
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    marginBottom: 8,
+    overflow: "hidden",
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    width: 220,
+  },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    height: 46,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.light.border,
+  },
+  swatch: { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
+  label: { flex: 1, color: colors.light.foreground, fontSize: 13 },
+  switch: { transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] },
+  btn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: colors.light.card,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  btnActive: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Default region
 // ---------------------------------------------------------------------------
 
@@ -169,6 +301,28 @@ export default function MapTab() {
   const [upgradedFeature, setUpgradedFeature] = useState("");
   const { profile } = useProfile();
   const isPremium = profile.isPremium;
+
+  // ── Layer visibility state ────────────────────────────────────────────────
+  const [layers, setLayers] = useState<Record<LayerId, boolean>>(defaultLayerState);
+
+  // Persist and rehydrate layer state from AsyncStorage
+  useEffect(() => {
+    void AsyncStorage.getItem(LAYER_STORAGE_KEY).then(stored => {
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as Partial<Record<LayerId, boolean>>;
+        setLayers(prev => ({ ...prev, ...parsed }));
+      } catch { /* ignore */ }
+    });
+  }, []);
+
+  const toggleLayer = useCallback((id: LayerId) => {
+    setLayers(prev => {
+      const next = { ...prev, [id]: !prev[id] };
+      void AsyncStorage.setItem(LAYER_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
 
   // Seed the bike filter from the profile on mount
   useEffect(() => {
@@ -254,15 +408,50 @@ export default function MapTab() {
     staleTime: 60_000,
   });
 
-  const trails: ApiTrail[] = useMemo(() => {
+  // Separate road liaison connectors (terrain="road") from rideable trail sections.
+  // Split trail sections by layer for colour-coded rendering.
+  const { trailData, roadData, layeredTrails } = useMemo(() => {
     const all = trailsQ.data?.trails ?? [];
-    return all.filter(
-      (t) =>
-        matchesGrade(t, gradeFilter) &&
-        matchesBike(t, bikeFilter) &&
-        matchesVisibility(t, visibilityFilter),
-    );
-  }, [trailsQ.data, gradeFilter, bikeFilter, visibilityFilter]);
+    const trailData: ApiTrail[] = [];
+    const roadData: ApiTrail[] = [];
+    const layerMap: Record<LayerId, ApiTrail[]> = {
+      osm: [], tet: [], trf: [], my_trails: [], my_groups: [],
+    };
+
+    for (const t of all) {
+      if (t.terrain === "road") {
+        roadData.push(t);
+        continue;
+      }
+      trailData.push(t);
+
+      // Assign to layer bucket by source tag
+      const tAny = t as unknown as Record<string, unknown>;
+      const src = tAny["source"] as string | undefined;
+      if (src === "TET-UK") layerMap.tet.push(t);
+      else if (src === "TRF") layerMap.trf.push(t);
+      else if (src === "OSM-UK") layerMap.osm.push(t);
+      else if (tAny["owner_user_id"]) layerMap.my_trails.push(t);
+      else layerMap.osm.push(t); // default bucket
+    }
+
+    // Apply active-layer filter and difficulty/bike filters
+    const layeredTrails: Array<{ trail: ApiTrail; layerColor: string; isOsm: boolean }> = [];
+    for (const def of LAYER_DEFS) {
+      if (!layers[def.id]) continue;
+      for (const t of layerMap[def.id]) {
+        if (!matchesGrade(t, gradeFilter)) continue;
+        if (!matchesBike(t, bikeFilter)) continue;
+        if (!matchesVisibility(t, visibilityFilter)) continue;
+        layeredTrails.push({ trail: t, layerColor: def.color, isOsm: def.id === "osm" });
+      }
+    }
+
+    return { trailData, roadData, layeredTrails };
+  }, [trailsQ.data, layers, gradeFilter, bikeFilter, visibilityFilter]);
+
+  // Flat list of trail sections (for markers, completions lookup, etc.)
+  const trails: ApiTrail[] = useMemo(() => layeredTrails.map(l => l.trail), [layeredTrails]);
 
   const completionsQ = useQuery({
     queryKey: ["my-completions"],
@@ -280,10 +469,26 @@ export default function MapTab() {
   // Pre-compute polyline coordinates so extractCoords is not called per render.
   const trailPolylines = useMemo(
     () =>
-      trails
-        .map((t) => ({ id: t.id, trail: t, coords: extractCoords(t.path) }))
+      layeredTrails
+        .map(({ trail: t, layerColor, isOsm }) => ({
+          id: t.id,
+          trail: t,
+          coords: extractCoords(t.path),
+          layerColor,
+          isOsm,
+          isSeasonal: !!((t as unknown as Record<string, unknown>)["is_seasonal"]),
+        }))
         .filter((p) => p.coords.length >= 2),
-    [trails],
+    [layeredTrails],
+  );
+
+  // Road liaison connectors — always shown regardless of filters; never tappable.
+  const roadPolylines = useMemo(
+    () =>
+      roadData
+        .map((t) => ({ id: t.id, coords: extractCoords(t.path) }))
+        .filter((p) => p.coords.length >= 2),
+    [roadData],
   );
 
   useEffect(() => {
@@ -362,16 +567,37 @@ export default function MapTab() {
             />
           );
         })}
-        {trailPolylines.map(({ id, trail, coords }) => (
+        {/* Road liaison connectors — thin grey dashed lines, never interactive */}
+        {roadPolylines.map(({ id, coords }) => (
           <Polyline
-            key={id}
+            key={`road-${id}`}
             coordinates={coords}
-            strokeColor={difficultyColor(trail.difficulty)}
-            strokeWidth={4}
-            tappable
-            onPress={() => setSelected(trailDetailData(trail))}
+            strokeColor="#999999"
+            strokeWidth={1.5}
+            lineDashPattern={[4, 8]}
+            tappable={false}
           />
         ))}
+
+        {/* Trail sections — coloured by layer (premium) or grey (free).
+            OSM trails use difficulty colour; other layers use their layer colour.
+            Seasonal trails render as dashed lines. */}
+        {trailPolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
+          const color = isPremium
+            ? (isOsm ? difficultyColor(trail.difficulty) : layerColor)
+            : "#888888";
+          return (
+            <Polyline
+              key={id}
+              coordinates={coords}
+              strokeColor={color}
+              strokeWidth={isPremium ? 4 : 3}
+              lineDashPattern={isSeasonal ? [8, 6] : undefined}
+              tappable
+              onPress={() => setSelected(trailDetailData(trail))}
+            />
+          );
+        })}
       </ClusterMapView>
 
       {/* ── Search bar ─────────────────────────────────────────────────── */}
@@ -621,6 +847,9 @@ export default function MapTab() {
         onClose={() => setSelected(null)}
         onMarkRiddenChange={() => void completionsQ.refetch()}
       />
+
+      {/* ── Layer panel — bottom-left floating ─────────────────────────── */}
+      <LayerPanel layers={layers} onToggle={toggleLayer} />
 
       {/* ── Upgrade prompt ──────────────────────────────────────────────── */}
       <UpgradePrompt

@@ -163,7 +163,8 @@ async function tryDeleteGpxObject(rawPath: string | null | undefined, log: { err
 // Search
 // ---------------------------------------------------------------------------
 
-const SEARCH_COLUMNS = [
+// Core columns always present in the schema.
+const SEARCH_COLUMNS_BASE = [
   "id",
   "name",
   "type",
@@ -180,9 +181,149 @@ const SEARCH_COLUMNS = [
   "bbox_max_lng",
   "simplified_path",
   "path_geojson",
-].join(",");
+] as const;
+
+// Extended columns added by later migrations (0011, 0030). Fetched when
+// available; the handler falls back to SEARCH_COLUMNS_BASE on PGRST204.
+const SEARCH_COLUMNS_EXTENDED = [
+  ...SEARCH_COLUMNS_BASE,
+  "elevation_gain_m",
+  "elevation_loss_m",
+  "altitudes",
+  "photo_urls",
+  "source",
+  "is_seasonal",
+  "tet_track",
+  "tet_section_number",
+] as const;
+
+const SEARCH_COLUMNS = SEARCH_COLUMNS_BASE.join(",");
+const SEARCH_COLUMNS_FULL = SEARCH_COLUMNS_EXTENDED.join(",");
+
+// ---------------------------------------------------------------------------
+// Bbox / id-filter search — used by the mobile map and trail detail screen.
+// Handles ?bbox=minLat,minLng,maxLat,maxLng and/or ?ids=uuid,uuid and
+// optional ?source=TET-UK for the TET routes section.
+// ---------------------------------------------------------------------------
 
 router.get("/trails/search", async (req: Request, res: Response) => {
+  const { bbox: bboxParam, ids: idsParam, source: sourceParam } = req.query;
+
+  if (bboxParam || idsParam) {
+    const limitNum = Math.min(Number(req.query.limit ?? 500), 1000);
+    const supa = getSupabaseAdmin();
+    const auth = getAuth(req);
+
+    // Parse bbox string "minLat,minLng,maxLat,maxLng"
+    let bboxFilter: { minLat: number; minLng: number; maxLat: number; maxLng: number } | null = null;
+    if (typeof bboxParam === "string") {
+      const parts = bboxParam.split(",").map(Number);
+      if (parts.length === 4 && parts.every(Number.isFinite)) {
+        bboxFilter = { minLat: parts[0], minLng: parts[1], maxLat: parts[2], maxLng: parts[3] };
+      }
+    }
+
+    // Parse ids param "uuid,uuid,..."
+    const idList: string[] =
+      typeof idsParam === "string"
+        ? idsParam.split(",").map((s) => s.trim()).filter(Boolean)
+        : [];
+
+    // Build the base query
+    const buildQuery = (cols: string) => {
+      let q = supa
+        .from("trails")
+        .select(cols)
+        .eq("is_public", true)
+        .is("deleted_at", null)
+        .limit(limitNum);
+
+      if (bboxFilter) {
+        // Overlap check: trail bbox overlaps the viewport bbox.
+        q = q
+          .lte("bbox_min_lat", bboxFilter.maxLat)
+          .gte("bbox_max_lat", bboxFilter.minLat)
+          .lte("bbox_min_lng", bboxFilter.maxLng)
+          .gte("bbox_max_lng", bboxFilter.minLng);
+      }
+      if (idList.length > 0) {
+        q = q.in("id", idList);
+      }
+      if (typeof sourceParam === "string" && sourceParam) {
+        q = q.eq("source", sourceParam);
+      }
+      return q;
+    };
+
+    let { data: publicRows, error } = await buildQuery(SEARCH_COLUMNS_FULL);
+    if (error && isMissingColumnError(error)) {
+      ({ data: publicRows, error } = await buildQuery(SEARCH_COLUMNS));
+    }
+    if (error) {
+      req.log.error({ err: error }, "trails bbox/ids search failed");
+      res.status(500).json({ error: "Search failed" });
+      return;
+    }
+
+    const rows = ((publicRows ?? []) as unknown as Array<Record<string, unknown> & { deleted_at?: string | null }>)
+      .filter((r) => r.deleted_at == null);
+    const seen = new Set(rows.map((r) => r.id as string));
+
+    // For authenticated users, also include their private trails and group-shared trails.
+    if (auth.userId) {
+      const buildPrivateQuery = (cols: string) => {
+        let q = supa
+          .from("trails")
+          .select(cols)
+          .eq("owner_user_id", auth.userId!)
+          .eq("is_public", false)
+          .is("deleted_at", null)
+          .limit(limitNum);
+        if (bboxFilter) {
+          q = q
+            .lte("bbox_min_lat", bboxFilter!.maxLat)
+            .gte("bbox_max_lat", bboxFilter!.minLat)
+            .lte("bbox_min_lng", bboxFilter!.maxLng)
+            .gte("bbox_max_lng", bboxFilter!.minLng);
+        }
+        if (idList.length > 0) q = q.in("id", idList);
+        return q;
+      };
+      let { data: privateRows } = await buildPrivateQuery(SEARCH_COLUMNS_FULL);
+      if (!privateRows) ({ data: privateRows } = await buildPrivateQuery(SEARCH_COLUMNS));
+      for (const row of ((privateRows ?? []) as unknown as Array<Record<string, unknown> & { deleted_at?: string | null }>).filter(r => r.deleted_at == null)) {
+        const id = row.id as string;
+        if (!seen.has(id)) { seen.add(id); rows.push(row); }
+      }
+
+      // Group-shared trails
+      const { data: memberships } = await supa.from("group_members").select("group_id").eq("user_id", auth.userId);
+      if (memberships && memberships.length > 0) {
+        const gids = (memberships as Array<{ group_id: string }>).map(m => m.group_id);
+        const { data: shares } = await supa.from("trail_shares").select("trail_id").in("group_id", gids);
+        const sharedIds = [...new Set((shares ?? []).map((s: Record<string, string>) => s.trail_id))].filter(id => !seen.has(id));
+        if (sharedIds.length > 0) {
+          let sharedQ = supa.from("trails").select(SEARCH_COLUMNS_FULL).in("id", sharedIds).is("deleted_at", null);
+          let { data: sharedRows, error: shErr } = await sharedQ;
+          if (shErr && isMissingColumnError(shErr)) {
+            ({ data: sharedRows } = await supa.from("trails").select(SEARCH_COLUMNS).in("id", sharedIds).is("deleted_at", null));
+          }
+          for (const row of ((sharedRows ?? []) as unknown as Array<Record<string, unknown> & { deleted_at?: string | null }>).filter(r => r.deleted_at == null)) {
+            const id = row.id as string;
+            if (!seen.has(id)) { seen.add(id); rows.push(row); }
+          }
+        }
+      }
+    }
+
+    res.json({ trails: rows });
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Text search (original handler — requires ?q=...)
+  // ---------------------------------------------------------------------------
+
   const parsed = SearchTrailsQueryParams.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Missing or invalid query parameter 'q'" });

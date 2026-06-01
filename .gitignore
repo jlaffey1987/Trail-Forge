@@ -53,6 +53,15 @@ artifacts/trailforge/playwright-report/
 artifacts/trailforge/test-results/
 artifacts/trailforge/tests/e2e/.e2e-state.json
 .cache/ms-playwright/
+# Environment files — never commit secrets
 artifacts/api-server/.env.local
 artifacts/trailforge-mobile/.env.local
 scripts/.env.local
+**/.env.local
+**/.env.*.local
+.env.local
+.env.production
+.env.secret
+
+# AI grading cache (large, reproducible)
+.local/act-ai-cache/
