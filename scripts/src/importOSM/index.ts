@@ -116,34 +116,89 @@ interface OverpassResponse {
 function buildOverpassQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
   const b = `${s},${w},${n},${e}`;
-  return `
-[out:json][timeout:120];
-(
-  way["highway"="track"]["motor_vehicle"~"^(yes|permissive)$"](${b});
-  way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});
-  way["highway"="byway"](${b});
-  way["highway"="track"]["tracktype"~"^grade[2-5]$"](${b});
-);
-out geom;
-`.trim();
+  // Use separate filter lines instead of regex alternation — more compatible
+  // with all Overpass API versions and avoids regex-parsing edge cases.
+  return [
+    "[out:json][timeout:180];",
+    "(",
+    // motor_vehicle=yes
+    `  way["highway"="track"]["motor_vehicle"="yes"](${b});`,
+    // motor_vehicle=permissive
+    `  way["highway"="track"]["motor_vehicle"="permissive"](${b});`,
+    // BOAT designation
+    `  way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});`,
+    // legacy highway=byway tag
+    `  way["highway"="byway"](${b});`,
+    // rough tracktypes (grade2-5)
+    `  way["highway"="track"]["tracktype"="grade2"](${b});`,
+    `  way["highway"="track"]["tracktype"="grade3"](${b});`,
+    `  way["highway"="track"]["tracktype"="grade4"](${b});`,
+    `  way["highway"="track"]["tracktype"="grade5"](${b});`,
+    ");",
+    "out geom;",
+  ].join("\n");
 }
 
 async function fetchOverpass(query: string, attempt = 1): Promise<OverpassResponse> {
   const url = "https://overpass-api.de/api/interpreter";
+  const body = `data=${encodeURIComponent(query)}`;
+
+  console.log(`  [Overpass] POST ${url} (attempt ${attempt})`);
+  console.log(`  [Overpass] Query:\n${query}\n`);
+
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `data=${encodeURIComponent(query)}`,
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+      "User-Agent": "TrailForge/1.0 (trail-navigation-app)",
+    },
+    body,
   });
+
+  console.log(`  [Overpass] Response: HTTP ${res.status}`);
+
   if (res.status === 429 || res.status === 503) {
-    if (attempt >= 3) throw new Error(`Overpass rate-limited after ${attempt} attempts`);
+    if (attempt >= 4) throw new Error(`Overpass rate-limited after ${attempt} attempts`);
     const wait = attempt * 30_000;
-    console.log(`  Overpass busy, waiting ${wait / 1000}s...`);
+    console.log(`  Overpass busy (${res.status}), waiting ${wait / 1000}s...`);
     await new Promise(r => setTimeout(r, wait));
     return fetchOverpass(query, attempt + 1);
   }
-  if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "(could not read body)");
+    console.error(`  [Overpass] Error body:\n${text}`);
+    throw new Error(`Overpass HTTP ${res.status}: ${text.slice(0, 300)}`);
+  }
+
   return res.json() as Promise<OverpassResponse>;
+}
+
+/** Quick connectivity check — sends a minimal query to verify the API is reachable. */
+async function testOverpassConnectivity(): Promise<void> {
+  const testQuery = [
+    "[out:json][timeout:10];",
+    "node(51.5,-0.1,51.51,-0.09)[\"amenity\"=\"bench\"];",
+    "out count;",
+  ].join("\n");
+
+  console.log("\n[Overpass] Running connectivity test...");
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+      "User-Agent": "TrailForge/1.0",
+    },
+    body: `data=${encodeURIComponent(testQuery)}`,
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Overpass connectivity test failed: HTTP ${res.status}\n${txt.slice(0, 200)}`);
+  }
+  const data = await res.json() as { elements?: unknown[] };
+  console.log(`[Overpass] Connectivity OK — got ${data.elements?.length ?? 0} element(s) in test response\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +462,7 @@ async function importRegion(
         verification_status: "approved",
       };
 
-      const { error } = await supabase.from("trails").insert(row);
+      const { error } = await supabase.from("trails").insert(row as never);
       if (error) {
         console.error(`  Error inserting ${name}: ${error.message}`);
         errors++;
@@ -431,6 +486,9 @@ async function main() {
   console.log("=== TrailForge OSM Legal Trail Import ===");
   console.log(`Region: ${opts.region}`);
   if (opts.dryRun) console.log("DRY RUN — no database writes");
+
+  // Verify Overpass connectivity before doing anything else.
+  await testOverpassConnectivity();
 
   const supabaseUrl = process.env["SUPABASE_URL"];
   const supabaseKey = process.env["SUPABASE_SERVICE_ROLE_KEY"];

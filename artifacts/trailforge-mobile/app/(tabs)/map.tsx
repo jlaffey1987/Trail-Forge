@@ -16,7 +16,6 @@ import {
   Animated,
   Keyboard,
   Platform,
-  ScrollView,
   StyleSheet,
   Switch,
   Text,
@@ -163,119 +162,299 @@ function defaultLayerState(): Record<LayerId, boolean> {
   return Object.fromEntries(LAYER_DEFS.map(l => [l.id, l.defaultOn])) as Record<LayerId, boolean>;
 }
 
-// ---------------------------------------------------------------------------
-// LayerPanel component
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// FiltersSheet — floating FILTERS button + slide-up bottom sheet
+// ─────────────────────────────────────────────────────────────────────────────
 
-function LayerPanel({
-  layers,
-  onToggle,
-}: {
+const AMBER = "#F5A623";
+const SHEET_BG = "#1A1A1A";
+const SHEET_BORDER = "#2A2A2A";
+
+interface FiltersSheetProps {
+  // current filter values
+  gradeFilter: GradeFilter;
+  bikeFilter: BikeFilter;
+  visibilityFilter: VisibilityFilter;
   layers: Record<LayerId, boolean>;
-  onToggle: (id: LayerId) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const anim = useRef(new Animated.Value(0)).current;
+  isPremium: boolean;
+  hasFiltersActive: boolean;
+  // callbacks
+  onApply: (g: GradeFilter, b: BikeFilter, v: VisibilityFilter, l: Record<LayerId, boolean>) => void;
+  onShowUpgrade: (feature: string) => void;
+}
 
-  function toggle() {
-    Animated.spring(anim, {
-      toValue: expanded ? 0 : 1,
-      useNativeDriver: false,
-      tension: 60,
-      friction: 10,
-    }).start();
-    setExpanded(e => !e);
+function FiltersSheet({
+  gradeFilter,
+  bikeFilter,
+  visibilityFilter,
+  layers,
+  isPremium,
+  hasFiltersActive,
+  onApply,
+  onShowUpgrade,
+}: FiltersSheetProps) {
+  const [open, setOpen] = useState(false);
+  const slideAnim = useRef(new Animated.Value(0)).current;
+
+  // Draft state — only committed on APPLY
+  const [draftGrade, setDraftGrade] = useState<GradeFilter>(gradeFilter);
+  const [draftBike,  setDraftBike]  = useState<BikeFilter>(bikeFilter);
+  const [draftVis,   setDraftVis]   = useState<VisibilityFilter>(visibilityFilter);
+  const [draftLayers, setDraftLayers] = useState<Record<LayerId, boolean>>(layers);
+
+  // Grade numeric (1–10) derived from GradeFilter
+  const gradeNumFromFilter = (f: GradeFilter) => {
+    if (f === "easy") return 3;
+    if (f === "intermediate") return 5;
+    if (f === "hard") return 8;
+    if (f === "extreme") return 10;
+    return 0; // "all"
+  };
+  const gradeFilterFromNum = (n: number): GradeFilter => {
+    if (n === 0) return "all";
+    if (n <= 3) return "easy";
+    if (n <= 6) return "intermediate";
+    if (n <= 9) return "hard";
+    return "extreme";
+  };
+  const [gradeNum, setGradeNum] = useState(() => gradeNumFromFilter(gradeFilter));
+
+  function openSheet() {
+    // Reset draft to current values
+    setDraftGrade(gradeFilter); setGradeNum(gradeNumFromFilter(gradeFilter));
+    setDraftBike(bikeFilter);
+    setDraftVis(visibilityFilter);
+    setDraftLayers({ ...layers });
+    setOpen(true);
+    Animated.spring(slideAnim, { toValue: 1, useNativeDriver: true, tension: 65, friction: 11 }).start();
   }
 
-  const panelHeight = anim.interpolate({ inputRange: [0, 1], outputRange: [0, LAYER_DEFS.length * 46 + 8] });
-  const panelOpacity = anim.interpolate({ inputRange: [0, 0.4, 1], outputRange: [0, 0, 1] });
+  function closeSheet() {
+    Animated.timing(slideAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => setOpen(false));
+  }
+
+  function apply() {
+    const g = gradeFilterFromNum(gradeNum);
+    onApply(g, draftBike, draftVis, draftLayers);
+    closeSheet();
+  }
+
+  function reset() {
+    setGradeNum(0); setDraftBike("all"); setDraftVis("all");
+    setDraftLayers(defaultLayerState());
+    onApply("all", "all", "all", defaultLayerState());
+    closeSheet();
+  }
+
+  function handleBike(b: BikeFilter) {
+    if (b !== "all" && !isPremium) { onShowUpgrade("Bike type filtering"); return; }
+    setDraftBike(b);
+  }
+
+  const sheetTranslate = slideAnim.interpolate({ inputRange: [0, 1], outputRange: [600, 0] });
+
+  const GRADE_LABELS: Record<number, string> = {
+    0: "All grades", 1: "Grade 1 — Easy", 2: "Grade 2 — Easy", 3: "Grade 3 — Easy",
+    4: "Grade 4 — Intermediate", 5: "Grade 5 — Intermediate", 6: "Grade 6 — Intermediate",
+    7: "Grade 7 — Hard", 8: "Grade 8 — Hard", 9: "Grade 9 — Hard", 10: "Grade 10 — Extreme",
+  };
+  const gradeColor = (n: number) => {
+    if (n === 0) return "#A0A0A0";
+    if (n <= 3) return "#00C853";
+    if (n <= 6) return "#2979FF";
+    if (n <= 9) return "#FF6D00";
+    return "#D50000";
+  };
 
   return (
-    <View style={layerStyles.container} pointerEvents="box-none">
-      <Animated.View style={[layerStyles.panel, { height: panelHeight, opacity: panelOpacity }]}>
-        {LAYER_DEFS.map(layer => (
-          <View key={layer.id} style={layerStyles.row}>
-            <View style={[layerStyles.swatch, { backgroundColor: layer.color }]} />
-            <Text style={layerStyles.label}>{layer.label}</Text>
-            <Switch
-              value={layers[layer.id]}
-              onValueChange={() => onToggle(layer.id)}
-              trackColor={{ false: "#333", true: layer.color }}
-              thumbColor={layers[layer.id] ? "#fff" : "#666"}
-              style={layerStyles.switch}
-            />
-          </View>
-        ))}
-      </Animated.View>
-
-      <TouchableOpacity
-        style={[layerStyles.btn, expanded && layerStyles.btnActive]}
-        onPress={toggle}
-        activeOpacity={0.8}
-      >
-        <Feather name="layers" size={22} color={expanded ? "#0D0D0D" : AMBER} />
+    <>
+      {/* ── Floating FILTERS button ─────────────────────────────────────── */}
+      <TouchableOpacity style={fs.floatBtn} onPress={openSheet} activeOpacity={0.85}>
+        <Feather name="sliders" size={16} color="#000" />
+        <Text style={fs.floatBtnTxt}>FILTERS</Text>
+        {hasFiltersActive && <View style={fs.activeDot} />}
       </TouchableOpacity>
-    </View>
+
+      {/* ── Bottom sheet ────────────────────────────────────────────────── */}
+      {open && (
+        <>
+          {/* Scrim — tap to dismiss */}
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={closeSheet}
+          />
+          <Animated.View style={[fs.sheet, { transform: [{ translateY: sheetTranslate }] }]}>
+            <View style={fs.handle} />
+
+            <Text style={fs.sheetTitle}>FILTERS</Text>
+
+            {/* ── DIFFICULTY ────────────────────────────────────── */}
+            <Text style={fs.sectionLabel}>DIFFICULTY</Text>
+            <View style={[fs.gradeDisplay, { borderColor: gradeColor(gradeNum) }]}>
+              <Text style={[fs.gradeNum, { color: gradeColor(gradeNum) }]}>
+                {gradeNum === 0 ? "All" : gradeNum}
+              </Text>
+              <Text style={[fs.gradeDesc, { color: gradeColor(gradeNum) }]}>
+                {GRADE_LABELS[gradeNum]}
+              </Text>
+            </View>
+            {/* Tap-track slider */}
+            <View style={fs.trackWrap}>
+              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                <TouchableOpacity
+                  key={n}
+                  style={[
+                    fs.trackCell,
+                    n > 0 && n <= gradeNum && { backgroundColor: gradeColor(n), borderColor: gradeColor(n) },
+                    n === gradeNum && { borderColor: gradeColor(n), borderWidth: 2 },
+                  ]}
+                  onPress={() => setGradeNum(n)}
+                >
+                  <Text style={[fs.trackCellTxt, n > 0 && n <= gradeNum && { color: "#000" }]}>
+                    {n === 0 ? "★" : n}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* ── BIKE TYPE ─────────────────────────────────────── */}
+            <Text style={fs.sectionLabel}>BIKE TYPE</Text>
+            <View style={fs.bikeRow}>
+              {(["all", "adventure", "trail", "enduro"] as BikeFilter[]).map(b => (
+                <TouchableOpacity
+                  key={b}
+                  style={[fs.bikeChip, draftBike === b && fs.bikeChipActive]}
+                  onPress={() => handleBike(b)}
+                >
+                  <Text style={[fs.bikeChipTxt, draftBike === b && fs.bikeChipTxtActive]}>
+                    {b === "all" ? "Any" : b.charAt(0).toUpperCase() + b.slice(1)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* ── MAP LAYERS ────────────────────────────────────── */}
+            <Text style={fs.sectionLabel}>MAP LAYERS</Text>
+            {LAYER_DEFS.map(layer => (
+              <View key={layer.id} style={fs.layerRow}>
+                <View style={[fs.layerDot, { backgroundColor: layer.color }]} />
+                <Text style={fs.layerLabel}>{layer.label}</Text>
+                <Switch
+                  value={draftLayers[layer.id]}
+                  onValueChange={() => setDraftLayers(prev => ({ ...prev, [layer.id]: !prev[layer.id] }))}
+                  trackColor={{ false: "#333", true: layer.color }}
+                  thumbColor={draftLayers[layer.id] ? "#fff" : "#666"}
+                />
+              </View>
+            ))}
+
+            {/* ── Actions ───────────────────────────────────────── */}
+            <TouchableOpacity style={fs.applyBtn} onPress={apply}>
+              <Text style={fs.applyBtnTxt}>APPLY FILTERS</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={fs.resetBtn} onPress={reset}>
+              <Text style={fs.resetBtnTxt}>Reset to defaults</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </>
+      )}
+    </>
   );
 }
 
-const AMBER = "#F5A623";
-const LAYER_BG = "#1A1A1A";
-const LAYER_BORDER = "#2A2A2A";
-
-const layerStyles = StyleSheet.create({
-  container: {
+const fs = StyleSheet.create({
+  // Floating button
+  floatBtn: {
     position: "absolute",
     bottom: 24,
-    left: 12,
-    alignItems: "flex-start",
-  },
-  panel: {
-    backgroundColor: LAYER_BG,
-    borderColor: AMBER + "55",
-    borderWidth: 1.5,
-    borderRadius: 14,
-    marginBottom: 10,
-    overflow: "hidden",
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 4,
-    width: 240,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
-    elevation: 10,
-  },
-  row: {
+    right: 16,
     flexDirection: "row",
     alignItems: "center",
-    height: 50,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: LAYER_BORDER,
-  },
-  swatch: { width: 12, height: 12, borderRadius: 6, marginRight: 10 },
-  label: { flex: 1, color: "#FFFFFF", fontSize: 14, fontWeight: "600" },
-  switch: { transform: [{ scaleX: 0.9 }, { scaleY: 0.9 }] },
-  btn: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: LAYER_BG,
-    borderColor: AMBER + "55",
-    borderWidth: 1.5,
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 6,
-  },
-  btnActive: {
+    gap: 7,
     backgroundColor: AMBER,
-    borderColor: AMBER,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 999,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 8,
   },
+  floatBtnTxt: { color: "#000", fontSize: 13, fontWeight: "900", letterSpacing: 1 },
+  activeDot: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: "#D50000",
+    position: "absolute", top: -2, right: -2,
+    borderWidth: 1.5, borderColor: AMBER,
+  },
+
+  // Sheet
+  sheet: {
+    position: "absolute",
+    bottom: 0, left: 0, right: 0,
+    backgroundColor: SHEET_BG,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingBottom: 36,
+    paddingTop: 8,
+    maxHeight: "85%",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    elevation: 24,
+  },
+  handle: { alignSelf: "center", width: 44, height: 5, borderRadius: 3, backgroundColor: AMBER, marginBottom: 16 },
+  sheetTitle: { fontSize: 15, fontWeight: "900", color: "#FFF", letterSpacing: 1.5, marginBottom: 20 },
+
+  sectionLabel: { fontSize: 11, fontWeight: "800", color: AMBER, letterSpacing: 1.5, marginBottom: 10, marginTop: 4 },
+
+  // Grade
+  gradeDisplay: {
+    flexDirection: "row", alignItems: "baseline", gap: 10,
+    borderWidth: 1.5, borderRadius: 10,
+    paddingVertical: 8, paddingHorizontal: 14, marginBottom: 12,
+    alignSelf: "flex-start",
+  },
+  gradeNum: { fontSize: 32, fontWeight: "900", lineHeight: 36 },
+  gradeDesc: { fontSize: 14, fontWeight: "700" },
+  trackWrap: { flexDirection: "row", gap: 5, marginBottom: 20 },
+  trackCell: {
+    flex: 1, height: 44, borderRadius: 8,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "#0D0D0D", borderColor: SHEET_BORDER, borderWidth: 1,
+  },
+  trackCellTxt: { fontSize: 11, fontWeight: "800", color: "#A0A0A0" },
+
+  // Bike chips
+  bikeRow: { flexDirection: "row", gap: 8, marginBottom: 20 },
+  bikeChip: {
+    flex: 1, height: 52, borderRadius: 12,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "#0D0D0D", borderColor: SHEET_BORDER, borderWidth: 1.5,
+  },
+  bikeChipActive: { backgroundColor: AMBER + "22", borderColor: AMBER },
+  bikeChipTxt: { fontSize: 12, fontWeight: "800", color: "#A0A0A0" },
+  bikeChipTxtActive: { color: AMBER },
+
+  // Layer toggles
+  layerRow: {
+    flexDirection: "row", alignItems: "center", height: 56,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: SHEET_BORDER,
+  },
+  layerDot: { width: 12, height: 12, borderRadius: 6, marginRight: 12 },
+  layerLabel: { flex: 1, color: "#FFF", fontSize: 15, fontWeight: "600" },
+
+  // Buttons
+  applyBtn: {
+    height: 72, borderRadius: 16, backgroundColor: AMBER,
+    alignItems: "center", justifyContent: "center", marginTop: 24,
+  },
+  applyBtnTxt: { color: "#000", fontSize: 16, fontWeight: "900", letterSpacing: 1 },
+  resetBtn: { alignItems: "center", marginTop: 14 },
+  resetBtnTxt: { color: "#A0A0A0", fontSize: 14, fontWeight: "600" },
 });
 
 // ---------------------------------------------------------------------------
@@ -716,135 +895,6 @@ export default function MapTab() {
         </View>
       </View>
 
-      {/* ── Filter rows ────────────────────────────────────────────────── */}
-      <View style={styles.filtersContainer} pointerEvents="box-none">
-        {/* Row 1 — Grade difficulty */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filterRow}
-          pointerEvents="box-none"
-        >
-          {GRADE_CHIPS.map((chip) => {
-            const active = gradeFilter === chip.id;
-            const locked = chip.id !== "all" && !isPremium;
-            return (
-              <TouchableOpacity
-                key={chip.id}
-                onPress={() => handleGradeFilter(chip.id)}
-                style={[
-                  styles.filterChip,
-                  active && styles.filterChipActive,
-                  active && chip.color ? { backgroundColor: chip.color, borderColor: chip.color } : null,
-                ]}
-              >
-                {locked ? (
-                  <Feather
-                    name="lock"
-                    size={9}
-                    color={colors.light.mutedForeground}
-                    style={styles.lockIcon}
-                  />
-                ) : null}
-                {chip.color && !active ? (
-                  <View
-                    style={[styles.colorDot, { backgroundColor: chip.color }]}
-                  />
-                ) : null}
-                <Text
-                  style={[
-                    styles.filterChipText,
-                    active && styles.filterChipTextActive,
-                  ]}
-                >
-                  {chip.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-
-        {/* Row 2 — Bike type */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filterRow}
-          pointerEvents="box-none"
-        >
-          {BIKE_CHIPS.map((chip) => {
-            const active = bikeFilter === chip.id;
-            const locked = chip.id !== "all" && !isPremium;
-            return (
-              <TouchableOpacity
-                key={chip.id}
-                onPress={() => handleBikeFilter(chip.id)}
-                style={[
-                  styles.filterChip,
-                  active && styles.filterChipActive,
-                ]}
-              >
-                {locked ? (
-                  <Feather
-                    name="lock"
-                    size={9}
-                    color={colors.light.mutedForeground}
-                    style={styles.lockIcon}
-                  />
-                ) : null}
-                <Text
-                  style={[
-                    styles.filterChipText,
-                    active && styles.filterChipTextActive,
-                  ]}
-                >
-                  {chip.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-
-        {/* Row 3 — Trail visibility */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filterRow}
-          pointerEvents="box-none"
-        >
-          {VISIBILITY_CHIPS.map((chip) => {
-            const active = visibilityFilter === chip.id;
-            const locked = chip.id !== "all" && !isPremium;
-            return (
-              <TouchableOpacity
-                key={chip.id}
-                onPress={() => handleVisibilityFilter(chip.id)}
-                style={[
-                  styles.filterChip,
-                  active && styles.filterChipActive,
-                ]}
-              >
-                {locked ? (
-                  <Feather
-                    name="lock"
-                    size={9}
-                    color={colors.light.mutedForeground}
-                    style={styles.lockIcon}
-                  />
-                ) : null}
-                <Text
-                  style={[
-                    styles.filterChipText,
-                    active && styles.filterChipTextActive,
-                  ]}
-                >
-                  {chip.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
-
       {/* ── Location denied banner ──────────────────────────────────────── */}
       {permission === "denied" ? (
         <View style={styles.permBanner}>
@@ -863,8 +913,24 @@ export default function MapTab() {
         onMarkRiddenChange={() => void completionsQ.refetch()}
       />
 
-      {/* ── Layer panel — bottom-left floating ─────────────────────────── */}
-      <LayerPanel layers={layers} onToggle={toggleLayer} />
+      {/* ── Filters button + bottom sheet ───────────────────────────────── */}
+      <FiltersSheet
+        gradeFilter={gradeFilter}
+        bikeFilter={bikeFilter}
+        visibilityFilter={visibilityFilter}
+        layers={layers}
+        isPremium={isPremium}
+        hasFiltersActive={gradeFilter !== "all" || bikeFilter !== "all" || visibilityFilter !== "all" || Object.values(layers).some(v => !v)}
+        onApply={(g, b, v, l) => {
+          setGradeFilter(g);
+          setBikeFilter(b);
+          setVisibilityFilter(v);
+          setLayers(l);
+          void AsyncStorage.setItem(LAYER_STORAGE_KEY, JSON.stringify(l));
+          if (b !== "all") void patchPreferences({ preferred_bike_type: b }).catch(() => undefined);
+        }}
+        onShowUpgrade={showUpgrade}
+      />
 
       {/* ── Upgrade prompt ──────────────────────────────────────────────── */}
       <UpgradePrompt
