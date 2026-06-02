@@ -20,17 +20,16 @@ import {
   Dimensions,
   StatusBar,
   StyleSheet,
-  Text,
   TouchableOpacity,
+  Text,
   View,
 } from "react-native";
-import Svg, { Path } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { BrandLogo } from "@/components/BrandLogo";
 import { INTRO_SEEN_KEY, ONBOARDING_KEY } from "@/lib/storageKeys";
 
 const { width: W, height: H } = Dimensions.get("window");
-const AMBER = "#F5A623";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const VIDEO_SOURCE = require("../assets/videos/intro.mp4") as number;
@@ -120,14 +119,9 @@ export default function IntroScreen() {
       {/* Dark vignette around the edges so overlays read clearly */}
       <View style={s.vignette} pointerEvents="none" />
 
-      {/* TrailForge logo — centre, fades in at 1 s */}
+      {/* Brand logo — fades in at 1 s, centred over video */}
       <Animated.View style={[s.logoWrap, { opacity: logoOpacity }]} pointerEvents="none">
-        <View style={s.logoIconBg}>
-          <Svg width={28} height={28} viewBox="0 0 32 32">
-            <Path d="M16 2 L28 26 L16 21 L4 26 Z" fill={AMBER} />
-          </Svg>
-        </View>
-        <Text style={s.logoText}>TrailForge</Text>
+        <BrandLogo size={120} circular showWordmark />
       </Animated.View>
 
       {/* Skip button — top-right, fades in at 1.5 s */}
@@ -173,30 +167,9 @@ const s = StyleSheet.create({
     top: "50%",
     left: 0,
     right: 0,
-    marginTop: -40,           // half of ~80px logo height
-    flexDirection: "row",
+    marginTop: -80,           // half of logo + wordmark height
     alignItems: "center",
     justifyContent: "center",
-    gap: 12,
-  },
-  logoIconBg: {
-    width: 52,
-    height: 52,
-    borderRadius: 16,
-    backgroundColor: "rgba(245,166,35,0.18)",
-    borderWidth: 1.5,
-    borderColor: AMBER,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  logoText: {
-    color: "#FFFFFF",
-    fontSize: 34,
-    fontWeight: "900",
-    letterSpacing: -1.2,
-    textShadowColor: "rgba(0,0,0,0.6)",
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 8,
   },
 
   // Skip button — top-right

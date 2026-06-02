@@ -13,6 +13,7 @@
  */
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather } from "@expo/vector-icons";
+import { BrandLogo } from "@/components/BrandLogo";
 import { router } from "expo-router";
 import React, {
   useCallback,
@@ -379,10 +380,7 @@ export default function OnboardingScreen() {
           { top: insets.top + 56, opacity: logoOpacity },
         ]}
       >
-        <View style={styles.logoIconBg}>
-          <Feather name="map" size={28} color={colors.light.primary} />
-        </View>
-        <Text style={styles.logoText}>TrailForge</Text>
+        <BrandLogo size={88} circular showWordmark />
       </Animated.View>
 
       {/* Tagline — slides up from bottom third */}

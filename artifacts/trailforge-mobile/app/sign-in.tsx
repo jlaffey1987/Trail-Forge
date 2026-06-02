@@ -6,7 +6,6 @@ import React, { useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -19,8 +18,7 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-
-const appIcon = require("../assets/images/icon.png") as number;
+import { BrandLogo } from "@/components/BrandLogo";
 
 // Required so the OAuth in-app browser closes itself after the redirect
 // instead of dangling open.
@@ -119,12 +117,7 @@ export default function SignInScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.brand}>
-          <Image
-            source={appIcon}
-            style={styles.brandIcon}
-            resizeMode="contain"
-          />
-          <Text style={styles.brandTitle}>TrailForge</Text>
+          <BrandLogo size={100} circular showWordmark style={{ marginBottom: 8 }} />
           <Text style={styles.brandSubtitle}>
             Plan, ride, and share singletrack with confidence.
           </Text>
