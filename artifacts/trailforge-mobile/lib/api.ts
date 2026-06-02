@@ -17,11 +17,40 @@ export function setSharedBearerGetter(
 }
 
 export function apiBaseUrl(): string {
+  // 1. Explicit env var always wins (set in .env.local for production/staging)
   const explicitBase = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
   if (explicitBase) {
     return explicitBase.replace(/\/+$/, "");
   }
 
+  // 2. In development (Expo Go / Metro), derive the host dynamically from the
+  //    Expo manifest so a hardcoded IP is never needed.
+  //    The API server always runs on port 8080 on the same machine as Metro.
+  if (__DEV__) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const Constants = require("expo-constants").default as {
+        expoGoConfig?: { debuggerHost?: string };
+        manifest?:     { debuggerHost?: string };
+        expoConfig?:   { hostUri?: string };
+      };
+      const rawHost =
+        Constants.expoGoConfig?.debuggerHost          // Expo SDK 47+ / Expo Go
+        ?? (Constants.manifest as { debuggerHost?: string } | null)?.debuggerHost  // SDK <47
+        ?? Constants.expoConfig?.hostUri;             // EAS update / SDK 48+
+
+      if (rawHost) {
+        // rawHost looks like "192.168.1.85:8765" — we only want the IP/hostname
+        const host = rawHost.split(":")[0];
+        const derived = `http://${host}:8080`;
+        return derived;
+      }
+    } catch {
+      // expo-constants not available — fall through to domain check
+    }
+  }
+
+  // 3. Production: EXPO_PUBLIC_DOMAIN (e.g. "myapp.replit.app")
   const domain = process.env.EXPO_PUBLIC_DOMAIN;
   if (!domain) {
     throw new Error(

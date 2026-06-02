@@ -24,6 +24,7 @@ import colors from "@/constants/colors";
 import { tokenCache } from "@/lib/clerkTokenCache";
 import { setSharedBearerGetter } from "@/lib/api";
 import { subscribeToNotificationTaps } from "@/lib/notificationRouting";
+import { runStartupChecks } from "@/lib/startupChecks";
 
 // ---------------------------------------------------------------------------
 // Module-level wiring (runs once per JS bundle, before React mounts).
@@ -142,6 +143,12 @@ function RootLayoutNav() {
   // Notification taps — mounted inside the Stack tree so expo-router's
   // navigation context is live when the listener fires.
   useEffect(() => subscribeToNotificationTaps(), []);
+
+  // Startup diagnostics — logs API URL, Clerk env, and service reachability.
+  // Runs once on app mount, dev only. Output visible in Expo terminal / Metro.
+  useEffect(() => {
+    void runStartupChecks();
+  }, []);
 
   return (
     <Stack

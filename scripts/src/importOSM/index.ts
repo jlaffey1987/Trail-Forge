@@ -60,18 +60,22 @@ interface Opts {
   region: string;
   dryRun: boolean;
   skipAi: boolean;
+  /** Use the simplified single-clause query (motor_vehicle=yes only) — good for smoke tests */
+  simple: boolean;
 }
 
 function parseCli(): Opts {
-  const opts: Opts = { region: "all", dryRun: false, skipAi: false };
+  const opts: Opts = { region: "all", dryRun: false, skipAi: false, simple: false };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--region") opts.region = argv[++i] ?? "all";
     else if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--skip-ai") opts.skipAi = true;
+    else if (a === "--simple") opts.simple = true;
     else if (a === "--help" || a === "-h") {
-      console.log("Usage: import:osm [--region <name>] [--dry-run] [--skip-ai]");
+      console.log("Usage: import:osm [--region <name>] [--dry-run] [--skip-ai] [--simple]");
+      console.log("  --simple  Use basic single-clause query (motor_vehicle=yes only)");
       process.exit(0);
     }
   }
@@ -116,27 +120,21 @@ interface OverpassResponse {
 function buildOverpassQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
   const b = `${s},${w},${n},${e}`;
-  // Use separate filter lines instead of regex alternation — more compatible
-  // with all Overpass API versions and avoids regex-parsing edge cases.
-  return [
-    "[out:json][timeout:180];",
-    "(",
-    // motor_vehicle=yes
-    `  way["highway"="track"]["motor_vehicle"="yes"](${b});`,
-    // motor_vehicle=permissive
-    `  way["highway"="track"]["motor_vehicle"="permissive"](${b});`,
-    // BOAT designation
-    `  way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});`,
-    // legacy highway=byway tag
-    `  way["highway"="byway"](${b});`,
-    // rough tracktypes (grade2-5)
-    `  way["highway"="track"]["tracktype"="grade2"](${b});`,
-    `  way["highway"="track"]["tracktype"="grade3"](${b});`,
-    `  way["highway"="track"]["tracktype"="grade4"](${b});`,
-    `  way["highway"="track"]["tracktype"="grade5"](${b});`,
-    ");",
-    "out geom;",
-  ].join("\n");
+  // Timeout reduced to 60s — Overpass rejects queries with timeout>60 on the
+  // public API when the server is under load, which can return HTTP 406.
+  // Each union clause is a separate equality filter (no regex) for broadest
+  // compatibility across all Overpass API versions.
+  return `[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](${b});way["highway"="track"]["motor_vehicle"="permissive"](${b});way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});way["highway"="byway"](${b});way["highway"="track"]["tracktype"="grade2"](${b});way["highway"="track"]["tracktype"="grade3"](${b});way["highway"="track"]["tracktype"="grade4"](${b});way["highway"="track"]["tracktype"="grade5"](${b}););out geom;`;
+}
+
+/**
+ * Single-clause query for smoke-testing a region.
+ * Matches the exact format specified in the fix spec:
+ *   data=[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](<bbox>););out geom;
+ */
+function buildSimpleQuery(bbox: [number, number, number, number]): string {
+  const [s, w, n, e] = bbox;
+  return `[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](${s},${w},${n},${e}););out geom;`;
 }
 
 async function fetchOverpass(query: string, attempt = 1): Promise<OverpassResponse> {
@@ -387,7 +385,8 @@ async function importRegion(
   if (!reg) throw new Error(`Unknown region: ${regionKey}`);
 
   console.log(`\n[${reg.label}] Querying Overpass...`);
-  const query = buildOverpassQuery(reg.bbox);
+  const query = opts.simple ? buildSimpleQuery(reg.bbox) : buildOverpassQuery(reg.bbox);
+  if (opts.simple) console.log(`  [Overpass] Using simplified single-clause query (--simple mode)`);
   const response = await fetchOverpass(query);
   const ways = response.elements.filter((e): e is OsmWay => e.type === "way" && e.geometry?.length >= 2);
   console.log(`[${reg.label}] ${ways.length} ways received`);
@@ -486,6 +485,7 @@ async function main() {
   console.log("=== TrailForge OSM Legal Trail Import ===");
   console.log(`Region: ${opts.region}`);
   if (opts.dryRun) console.log("DRY RUN — no database writes");
+  if (opts.simple) console.log("SIMPLE MODE — single-clause motor_vehicle=yes query only");
 
   // Verify Overpass connectivity before doing anything else.
   await testOverpassConnectivity();
