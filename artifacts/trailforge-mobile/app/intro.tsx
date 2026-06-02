@@ -12,7 +12,7 @@
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Video, ResizeMode, type AVPlaybackStatus } from "expo-av";
+import { Video, ResizeMode, Audio, type AVPlaybackStatus } from "expo-av";
 import { router } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -56,6 +56,15 @@ export default function IntroScreen() {
       router.replace("/onboarding" as unknown as Parameters<typeof router.replace>[0]);
     }
   }, [advanced]);
+
+  // Silence the audio session entirely — video is visual only.
+  useEffect(() => {
+    void Audio.setAudioModeAsync({
+      playsInSilentModeIOS: false,   // respect the iOS silent switch
+      staysActiveInBackground: false,
+      shouldDuckAndroid: false,
+    });
+  }, []);
 
   // Start logo + skip animations when component mounts.
   useEffect(() => {
@@ -103,7 +112,8 @@ export default function IntroScreen() {
         resizeMode={ResizeMode.COVER}
         shouldPlay
         isLooping={false}
-        isMuted
+        isMuted={true}       // visual only — no audio ever
+        volume={0}           // belt-and-braces zero volume
         onPlaybackStatusUpdate={onPlaybackStatusUpdate}
       />
 
