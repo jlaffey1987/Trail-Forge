@@ -59,7 +59,7 @@ const DEMO_TRAILS: Array<{
   color: string;
 }> = [
   {
-    color: "#ef4444",
+    color: "#D50000",
     coords: [
       { latitude: 57.25, longitude: -4.62 },
       { latitude: 56.94, longitude: -4.31 },
@@ -68,7 +68,7 @@ const DEMO_TRAILS: Array<{
     ],
   },
   {
-    color: "#f97316",
+    color: "#FF6D00",
     coords: [
       { latitude: 55.22, longitude: -3.10 },
       { latitude: 55.00, longitude: -2.82 },
@@ -77,7 +77,7 @@ const DEMO_TRAILS: Array<{
     ],
   },
   {
-    color: "#3b82f6",
+    color: "#2979FF",
     coords: [
       { latitude: 54.52, longitude: -3.20 },
       { latitude: 54.42, longitude: -2.95 },
@@ -86,7 +86,7 @@ const DEMO_TRAILS: Array<{
     ],
   },
   {
-    color: "#22c55e",
+    color: "#00C853",
     coords: [
       { latitude: 53.58, longitude: -2.02 },
       { latitude: 53.38, longitude: -1.82 },
@@ -95,7 +95,7 @@ const DEMO_TRAILS: Array<{
     ],
   },
   {
-    color: "#22c55e",
+    color: "#00C853",
     coords: [
       { latitude: 52.52, longitude: -3.41 },
       { latitude: 52.22, longitude: -3.12 },
@@ -104,7 +104,7 @@ const DEMO_TRAILS: Array<{
     ],
   },
   {
-    color: "#f97316",
+    color: "#FF6D00",
     coords: [
       { latitude: 56.12, longitude: -4.10 },
       { latitude: 55.83, longitude: -3.81 },
@@ -115,18 +115,18 @@ const DEMO_TRAILS: Array<{
 ];
 
 const GRADE_CHIPS = [
-  { range: "1–3", label: "Easy",         color: "#22c55e" },
-  { range: "4–6", label: "Intermediate", color: "#3b82f6" },
-  { range: "7–9", label: "Hard",         color: "#f97316" },
-  { range: "10",  label: "Extreme",      color: "#ef4444" },
+  { range: "1–3", label: "Easy",         color: "#00C853" },
+  { range: "4–6", label: "Intermediate", color: "#2979FF" },
+  { range: "7–9", label: "Hard",         color: "#FF6D00" },
+  { range: "10",  label: "Extreme",      color: "#D50000" },
 ] as const;
 
 const ROUTE_SEGMENTS = [
-  { type: "trail", color: "#22c55e", label: "Easy trail section",      meta: "23 km · ↑340 m" },
+  { type: "trail", color: "#00C853", label: "Easy trail section",      meta: "23 km · ↑340 m" },
   { type: "road",  color: "#666666", label: "Road connector",          meta: null },
-  { type: "trail", color: "#f97316", label: "Hard trail section",      meta: "18 km · ↑580 m" },
+  { type: "trail", color: "#FF6D00", label: "Hard trail section",      meta: "18 km · ↑580 m" },
   { type: "road",  color: "#666666", label: "Road connector",          meta: null },
-  { type: "trail", color: "#3b82f6", label: "Intermediate section",    meta: "31 km · ↑210 m" },
+  { type: "trail", color: "#2979FF", label: "Intermediate section",    meta: "31 km · ↑210 m" },
 ] as const;
 
 type BikeType = "adventure" | "trail" | "enduro" | "all";
@@ -144,10 +144,10 @@ const BIKE_OPTIONS: Array<{
 ];
 
 function gradeColor(level: number): string {
-  if (level <= 3) return "#22c55e";
-  if (level <= 6) return "#3b82f6";
-  if (level <= 9) return "#f97316";
-  return "#ef4444";
+  if (level <= 3) return "#00C853";
+  if (level <= 6) return "#2979FF";
+  if (level <= 9) return "#FF6D00";
+  return "#D50000";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1045,7 +1045,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   trailBanner: {
-    backgroundColor: "#f9731618",
+    backgroundColor: "#FF6D0018",
     flexDirection: "row",
     alignItems: "center",
     gap: 9,
@@ -1053,16 +1053,16 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: "#f9731633",
+    borderColor: "#FF6D0033",
   },
   trailBannerDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: "#f97316",
+    backgroundColor: "#FF6D00",
   },
   trailBannerText: {
-    color: "#f97316",
+    color: "#FF6D00",
     fontSize: 13,
     fontWeight: "600",
   },
@@ -1179,22 +1179,22 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
-    backgroundColor: colors.light.primary,
-    borderRadius: 14,
-    paddingVertical: 16,
+    gap: 10,
+    backgroundColor: "#F5A623",
+    borderRadius: 16,
+    height: 72,
     marginTop: 24,
-    shadowColor: colors.light.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    elevation: 6,
+    shadowColor: "#F5A623",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 8,
   },
   startBtnTxt: {
-    color: "#fff",
-    fontSize: 17,
-    fontWeight: "800",
-    letterSpacing: -0.3,
+    color: "#000",
+    fontSize: 18,
+    fontWeight: "900",
+    letterSpacing: 1,
   },
 
   // ── Global overlays ──────────────────────────────────────────────────────────
@@ -1223,16 +1223,16 @@ const styles = StyleSheet.create({
     zIndex: 100,
   },
   dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "rgba(255,255,255,0.32)",
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "rgba(255,255,255,0.25)",
   },
   dotActive: {
-    width: 22,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.light.primary,
+    width: 28,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#F5A623",
   },
   bottomCta: {
     position: "absolute",
@@ -1244,36 +1244,38 @@ const styles = StyleSheet.create({
   },
   primaryBtn: {
     width: "100%",
-    backgroundColor: colors.light.primary,
-    borderRadius: 14,
-    paddingVertical: 16,
+    backgroundColor: "#F5A623",
+    borderRadius: 16,
+    height: 72,
     alignItems: "center",
-    shadowColor: colors.light.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    elevation: 6,
+    justifyContent: "center",
+    shadowColor: "#F5A623",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 8,
   },
   primaryBtnTxt: {
-    color: "#fff",
-    fontSize: 17,
-    fontWeight: "800",
-    letterSpacing: -0.3,
+    color: "#000",
+    fontSize: 18,
+    fontWeight: "900",
+    letterSpacing: 1,
   },
   ghostBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 22,
-    paddingVertical: 12,
-    borderRadius: 12,
+    justifyContent: "center",
+    gap: 6,
+    height: 56,
+    paddingHorizontal: 28,
+    borderRadius: 14,
     borderWidth: 1.5,
-    borderColor: colors.light.primary + "60",
-    backgroundColor: colors.light.primary + "10",
+    borderColor: "#F5A623" + "80",
+    backgroundColor: "#F5A623" + "12",
   },
   ghostBtnTxt: {
-    color: colors.light.primary,
-    fontSize: 15,
-    fontWeight: "700",
+    color: "#F5A623",
+    fontSize: 16,
+    fontWeight: "800",
   },
 });

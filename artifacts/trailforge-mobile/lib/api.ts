@@ -1138,3 +1138,123 @@ export async function fetchLeaderboard(
   if (!res.ok) return [];
   return (res.json() as Promise<{ entries: LeaderboardEntry[] }>).then(d => d.entries ?? []);
 }
+
+// ---------------------------------------------------------------------------
+// Linesman
+// ---------------------------------------------------------------------------
+
+export type FlagType =
+  | "closed" | "legal_issue" | "flood_damage"
+  | "overgrown" | "temp_closure" | "rerouted";
+
+export interface LinesmanEdit {
+  id: string;
+  trail_id: string | null;
+  trail_name: string | null;
+  edit_type: string;
+  new_values: Record<string, unknown> | null;
+  previous_values: Record<string, unknown> | null;
+  edit_reason: string | null;
+  created_at: string;
+  can_undo: boolean;
+}
+
+export async function linesmanPatchTrail(
+  trailId: string,
+  body: {
+    name?: string;
+    difficulty?: number;
+    terrain?: string;
+    legal_status?: string;
+    notes?: string;
+  },
+): Promise<void> {
+  const res = await apiFetch(`/api/trails/${encodeURIComponent(trailId)}/linesman`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error("Update failed");
+}
+
+export async function linesmanFlagTrail(
+  trailId: string,
+  flagType: FlagType,
+  note?: string,
+  photoUrl?: string,
+): Promise<void> {
+  const res = await apiFetch(`/api/trails/${encodeURIComponent(trailId)}/flag`, {
+    method: "POST",
+    body: JSON.stringify({ flag_type: flagType, note, photo_url: photoUrl }),
+  });
+  if (!res.ok) throw new Error("Flag failed");
+}
+
+export async function linesmanAddTrail(body: {
+  name: string;
+  difficulty: number;
+  terrain: string;
+  path_geojson: { type: "LineString"; coordinates: [number, number][] };
+  distance_km: number;
+}): Promise<{ id: string }> {
+  const res = await apiFetch("/api/trails/linesman", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error("Add trail failed");
+  return res.json() as Promise<{ id: string }>;
+}
+
+export async function fetchLinesmanRecentEdits(): Promise<LinesmanEdit[]> {
+  const res = await apiFetch("/api/linesman/recent-edits");
+  if (!res.ok) return [];
+  return (res.json() as Promise<{ edits: LinesmanEdit[] }>).then(d => d.edits ?? []);
+}
+
+export async function undoLinesmanEdit(editId: string): Promise<void> {
+  const res = await apiFetch(`/api/linesman/edits/${encodeURIComponent(editId)}/undo`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json() as { error?: string };
+    throw new Error(body.error ?? "Undo failed");
+  }
+}
+
+// Admin linesman management
+export async function adminListLinesfolk(): Promise<Array<{
+  id: string; display_name: string | null; email: string | null;
+  linesman_access: boolean; linesman_group_id: string | null; created_at: string;
+}>> {
+  const res = await apiFetch("/api/admin/linesfolk");
+  if (!res.ok) return [];
+  return (res.json() as Promise<{ linesfolk: unknown[] }>).then(d => d.linesfolk as never[]);
+}
+
+export async function adminGrantLinesman(
+  userId: string,
+  access: boolean,
+  groupId?: string | null,
+): Promise<void> {
+  const res = await apiFetch(`/api/admin/linesfolk/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      linesman_access: access,
+      ...(groupId !== undefined ? { linesman_group_id: groupId } : {}),
+    }),
+  });
+  if (!res.ok) throw new Error("Grant failed");
+}
+
+export async function adminGetLinesmanEdits(userId: string): Promise<LinesmanEdit[]> {
+  const res = await apiFetch(`/api/admin/linesfolk/${encodeURIComponent(userId)}/edits`);
+  if (!res.ok) return [];
+  return (res.json() as Promise<{ edits: LinesmanEdit[] }>).then(d => d.edits ?? []);
+}
+
+export async function adminUndoLinesmanEdit(editId: string): Promise<void> {
+  const res = await apiFetch(
+    `/api/admin/linesfolk/edits/${encodeURIComponent(editId)}/undo`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error("Admin undo failed");
+}

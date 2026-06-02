@@ -13,6 +13,7 @@ import geocodeRouter from "./geocode";
 import adminRouter from "./admin";
 import conditionsRouter from "./conditions";
 import leaderboardRouter from "./leaderboard";
+import linesmanRouter from "./linesman";
 
 const router: IRouter = Router();
 
@@ -30,5 +31,6 @@ router.use(geocodeRouter);
 router.use(adminRouter);
 router.use(conditionsRouter);
 router.use(leaderboardRouter);
+router.use(linesmanRouter);
 
 export default router;

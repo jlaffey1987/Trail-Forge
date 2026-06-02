@@ -1,69 +1,77 @@
 /**
- * TrailForge mobile design tokens. Mirrors the dark amber palette in the
- * web artifact's `index.css` so both apps feel like one product.
+ * TrailForge Premium Design System
  *
- * Source mapping (web `:root` -> mobile hex):
- *   --background:        22 15% 8%   ->  #18120e
- *   --foreground:        38 15% 90%  ->  #ebe5dc
- *   --card:              22 15% 11%  ->  #211a13
- *   --card-foreground:   38 15% 90%  ->  #ebe5dc
- *   --primary:           38 88% 44%  ->  #d28b0d  (matches web `--color-trail-amber`)
- *   --primary-foreground:22 15% 8%   ->  #18120e
- *   --secondary:         140 25% 25% ->  #305041
- *   --muted:             22 12% 16%  ->  #2c241d
- *   --muted-foreground:  30 10% 55%  ->  #9b8f80
- *   --accent:            140 30% 30% ->  #366b48
- *   --destructive:       0 72% 51%   ->  #dc3433
- *   --border:            30 12% 20%  ->  #3b332a
- *   --input:             30 12% 22%  ->  #423933
+ * Dark, vivid, glove-friendly. Inspired by Garmin + Strava + Google Maps.
+ * Designed for high contrast in direct sunlight, rain, and vibrating hands.
  *
- * The single-key brand amber `#f0a832` is the lighter "amber-light" shade used
- * for headings and the GPS dot; the deeper `#d28b0d` is the primary action.
+ * Primary accent: #F5A623  amber trail gold
+ * Grade colours:  vivid, high-saturation, readable at a glance
  */
 
 const light = {
-    text: "#ebe5dc",
-    tint: "#f0a832",
+  // ── Surfaces ─────────────────────────────────────────────────────────────
+  background:       "#0D0D0D",   // near-black
+  card:             "#1A1A1A",   // raised card surface
+  cardElevated:     "#232323",   // cards within cards
+  input:            "#1F1F1F",
 
-    background: "#18120e",
-    foreground: "#ebe5dc",
+  // ── Text ─────────────────────────────────────────────────────────────────
+  foreground:       "#FFFFFF",
+  text:             "#FFFFFF",
+  cardForeground:   "#FFFFFF",
+  mutedForeground:  "#A0A0A0",
+  tint:             "#F5A623",
 
-    card: "#211a13",
-    cardForeground: "#ebe5dc",
+  // ── Brand / Accent ────────────────────────────────────────────────────────
+  primary:          "#F5A623",   // amber — tap targets, highlights
+  primaryForeground:"#000000",
+  primaryLight:     "#FFD080",
 
-    primary: "#d28b0d",
-    primaryForeground: "#18120e",
-    primaryLight: "#f0a832",
+  secondary:        "#1F2C1F",
+  secondaryForeground: "#B8EAB8",
 
-    secondary: "#305041",
-    secondaryForeground: "#d8e6dc",
+  muted:            "#1F1F1F",
+  accent:           "#2A1E00",   // very dark amber tint
+  accentForeground: "#F5A623",
 
-    muted: "#2c241d",
-    mutedForeground: "#9b8f80",
+  // ── Status ───────────────────────────────────────────────────────────────
+  destructive:      "#D50000",   // vivid red
+  destructiveForeground: "#FFFFFF",
+  warning:          "#FF6D00",   // vivid orange
+  success:          "#00C853",   // vivid green
 
-    accent: "#366b48",
-    accentForeground: "#dde9e0",
+  // ── Structure ────────────────────────────────────────────────────────────
+  border:           "#2A2A2A",
+  borderFocus:      "#F5A623",
 
-    destructive: "#dc3433",
-    destructiveForeground: "#ffffff",
+  // ── Trail Difficulty (vivid, sunlight-readable) ──────────────────────────
+  trailGreen:       "#00C853",   // Grade 1-3 — easy
+  trailBlue:        "#2979FF",   // Grade 4-6 — intermediate
+  trailAmber:       "#FF6D00",   // Grade 7-9 — hard
+  trailRed:         "#D50000",   // Grade 10  — extreme
 
-    border: "#3b332a",
-    input: "#423933",
+  // Aliases kept for backward-compat
+  trailBlack:       "#0D0D0D",
+} as const;
 
-    // Trail-difficulty accents (from the web map's polyline palette).
-    trailGreen: "#6aab7a",
-    trailBlue: "#5aa7d4",
-    trailAmber: "#f0a832",
-    trailRed: "#dc6633",
-    trailBlack: "#0e0a07",
-  } as const;
+/** Grade 1-10 → vivid colour */
+export function gradeColour(g: number): string {
+  if (g <= 3) return light.trailGreen;
+  if (g <= 6) return light.trailBlue;
+  if (g <= 9) return light.trailAmber;
+  return light.trailRed;
+}
 
-// Single dark-only palette — the web app is dark-only too. Aliasing `dark`
-// to the same object means `useColors()` returns the same tokens
-// regardless of the device's `userColorScheme` setting.
+export const GRADE_LABEL: Record<number, string> = {
+  1: "Easy", 2: "Easy", 3: "Easy",
+  4: "Intermediate", 5: "Intermediate", 6: "Intermediate",
+  7: "Hard", 8: "Hard", 9: "Hard",
+  10: "Extreme",
+};
+
 const colors = {
   light,
-  dark: light,
+  dark: light,   // single dark-only palette
   radius: 12,
 };
 

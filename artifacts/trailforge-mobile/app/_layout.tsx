@@ -155,6 +155,8 @@ function RootLayoutNav() {
       <Stack.Screen name="blocked" options={{ title: "Blocked users" }} />
       <Stack.Screen name="activity" options={{ title: "Activity" }} />
       <Stack.Screen name="group/[groupId]" options={{ title: "Group" }} />
+      <Stack.Screen name="linesman" options={{ headerShown: false, animation: "slide_from_right" }} />
+        <Stack.Screen name="intro" options={{ headerShown: false, animation: "fade" }} />
     </Stack>
   );
 }

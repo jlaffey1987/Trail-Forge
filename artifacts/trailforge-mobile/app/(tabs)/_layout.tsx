@@ -18,7 +18,7 @@ import colors from "@/constants/colors";
 import { adminWhoami } from "@/lib/api";
 import { registerForPushAndSubscribe } from "@/lib/pushSetup";
 import { rehydrate as rehydrateRecording } from "@/lib/recording";
-import { ONBOARDING_KEY } from "@/lib/storageKeys";
+import { ONBOARDING_KEY, INTRO_SEEN_KEY } from "@/lib/storageKeys";
 
 /**
  * Mirror the Clerk user into Supabase + register for Expo push on launch.
@@ -33,22 +33,28 @@ function PostLoginBootstrap() {
     // Redirect to onboarding on first launch after sign-up.
     // The check is fast (AsyncStorage is synchronous-backed on device) so
     // the flash before the redirect is imperceptible in practice.
-    void AsyncStorage.getItem(ONBOARDING_KEY).then(done => {
-      if (!done) {
-        // "/onboarding" is not in the generated type union until `expo-router`
-        // rebuilds its type manifest. The cast is intentional.
-        router.replace(
-          "/onboarding" as unknown as Parameters<typeof router.replace>[0]
-        );
+    void (async () => {
+      const [introDone, obDone] = await Promise.all([
+        AsyncStorage.getItem(INTRO_SEEN_KEY),
+        AsyncStorage.getItem(ONBOARDING_KEY),
+      ]);
+      if (!introDone) {
+        router.replace("/intro" as unknown as Parameters<typeof router.replace>[0]);
         return;
       }
-    });
+      if (!obDone) {
+        router.replace("/onboarding" as unknown as Parameters<typeof router.replace>[0]);
+        return;
+      }
+    })();
 
     sync.mutate(undefined, {
       onSuccess(data) {
         setProfile({
-          isPremium: data.is_premium ?? false,
+          isPremium:        data.is_premium ?? false,
           preferredBikeType: (data.preferred_bike_type as BikeType | undefined) ?? "all",
+          isLinesman:        !!((data as unknown as Record<string, unknown>)["linesman_access"]),
+          linesmanGroupId:   ((data as unknown as Record<string, unknown>)["linesman_group_id"] as string | null) ?? null,
         });
       },
       onError(err) {

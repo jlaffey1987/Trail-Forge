@@ -11,6 +11,8 @@ export type BikeType = "all" | "adventure" | "trail" | "enduro";
 export interface UserProfile {
   isPremium: boolean;
   preferredBikeType: BikeType;
+  isLinesman: boolean;
+  linesmanGroupId: string | null;
 }
 
 interface ProfileContextValue {
@@ -21,6 +23,8 @@ interface ProfileContextValue {
 const DEFAULT_PROFILE: UserProfile = {
   isPremium: false,
   preferredBikeType: "all",
+  isLinesman: false,
+  linesmanGroupId: null,
 };
 
 const ProfileContext = createContext<ProfileContextValue>({

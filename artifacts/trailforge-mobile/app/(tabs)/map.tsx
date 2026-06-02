@@ -114,11 +114,11 @@ function matchesVisibility(trail: ApiTrail, filter: VisibilityFilter): boolean {
 // ---------------------------------------------------------------------------
 
 const GRADE_CHIPS: { id: GradeFilter; label: string; color?: string }[] = [
-  { id: "all", label: "All" },
-  { id: "easy", label: "Easy 1-3", color: colors.light.trailGreen },
-  { id: "intermediate", label: "Inter 4-6", color: colors.light.trailBlue },
-  { id: "hard", label: "Hard 7-9", color: TRAIL_ORANGE },
-  { id: "extreme", label: "Extreme 10", color: colors.light.destructive },
+  { id: "all", label: "ALL" },
+  { id: "easy", label: "EASY 1-3", color: "#00C853" },
+  { id: "intermediate", label: "INTER 4-6", color: "#2979FF" },
+  { id: "hard", label: "HARD 7-9", color: "#FF6D00" },
+  { id: "extreme", label: "EXTREME 10", color: "#D50000" },
 ];
 
 const BIKE_CHIPS: { id: BikeFilter; label: string }[] = [
@@ -152,11 +152,11 @@ interface LayerDef {
 }
 
 export const LAYER_DEFS: LayerDef[] = [
-  { id: "osm",       label: "Public Trails",    source: "OSM-UK",  color: "#22c55e", defaultOn: true },
-  { id: "tet",       label: "Trans Euro Trail",  source: "TET-UK",  color: "#D97706", defaultOn: true },
-  { id: "trf",       label: "TRF Routes",        source: "TRF",     color: "#2563EB", defaultOn: true },
-  { id: "my_trails", label: "My Trails",                            color: "#7C3AED", defaultOn: true },
-  { id: "my_groups", label: "My Groups",                            color: "#EA580C", defaultOn: true },
+  { id: "osm",       label: "Public Trails",    source: "OSM-UK",  color: "#00C853", defaultOn: true },
+  { id: "tet",       label: "Trans Euro Trail",  source: "TET-UK",  color: "#F5A623", defaultOn: true },
+  { id: "trf",       label: "TRF Routes",        source: "TRF",     color: "#2979FF", defaultOn: true },
+  { id: "my_trails", label: "My Trails",                            color: "#CE93D8", defaultOn: true },
+  { id: "my_groups", label: "My Groups",                            color: "#FF6D00", defaultOn: true },
 ];
 
 function defaultLayerState(): Record<LayerId, boolean> {
@@ -200,8 +200,8 @@ function LayerPanel({
             <Switch
               value={layers[layer.id]}
               onValueChange={() => onToggle(layer.id)}
-              trackColor={{ false: "#ccc", true: layer.color }}
-              thumbColor="#fff"
+              trackColor={{ false: "#333", true: layer.color }}
+              thumbColor={layers[layer.id] ? "#fff" : "#666"}
               style={layerStyles.switch}
             />
           </View>
@@ -213,11 +213,15 @@ function LayerPanel({
         onPress={toggle}
         activeOpacity={0.8}
       >
-        <Feather name="layers" size={18} color={expanded ? "#fff" : colors.light.primary} />
+        <Feather name="layers" size={22} color={expanded ? "#0D0D0D" : AMBER} />
       </TouchableOpacity>
     </View>
   );
 }
+
+const AMBER = "#F5A623";
+const LAYER_BG = "#1A1A1A";
+const LAYER_BORDER = "#2A2A2A";
 
 const layerStyles = StyleSheet.create({
   container: {
@@ -227,39 +231,50 @@ const layerStyles = StyleSheet.create({
     alignItems: "flex-start",
   },
   panel: {
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
-    borderWidth: 1,
-    borderRadius: 12,
-    marginBottom: 8,
+    backgroundColor: LAYER_BG,
+    borderColor: AMBER + "55",
+    borderWidth: 1.5,
+    borderRadius: 14,
+    marginBottom: 10,
     overflow: "hidden",
-    paddingHorizontal: 12,
-    paddingTop: 4,
-    width: 220,
+    paddingHorizontal: 14,
+    paddingTop: 8,
+    paddingBottom: 4,
+    width: 240,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    elevation: 10,
   },
   row: {
     flexDirection: "row",
     alignItems: "center",
-    height: 46,
+    height: 50,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.light.border,
+    borderBottomColor: LAYER_BORDER,
   },
-  swatch: { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
-  label: { flex: 1, color: colors.light.foreground, fontSize: 13 },
-  switch: { transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] },
+  swatch: { width: 12, height: 12, borderRadius: 6, marginRight: 10 },
+  label: { flex: 1, color: "#FFFFFF", fontSize: 14, fontWeight: "600" },
+  switch: { transform: [{ scaleX: 0.9 }, { scaleY: 0.9 }] },
   btn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
-    borderWidth: 1,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: LAYER_BG,
+    borderColor: AMBER + "55",
+    borderWidth: 1.5,
     alignItems: "center",
     justifyContent: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 6,
   },
   btnActive: {
-    backgroundColor: colors.light.primary,
-    borderColor: colors.light.primary,
+    backgroundColor: AMBER,
+    borderColor: AMBER,
   },
 });
 
@@ -938,9 +953,9 @@ function extractCoords(
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.light.background },
+  container: { flex: 1, backgroundColor: "#0D0D0D" },
 
-  // Search
+  // Search — premium pill
   searchRow: {
     position: "absolute",
     top: 12,
@@ -950,43 +965,54 @@ const styles = StyleSheet.create({
   searchBar: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    gap: 10,
+    backgroundColor: "#1A1A1A",
+    borderColor: "#F5A623" + "55",
+    borderWidth: 1.5,
+    paddingHorizontal: 16,
+    height: 56,
     borderRadius: 999,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 8,
   },
   searchInput: {
     flex: 1,
-    color: colors.light.foreground,
-    fontSize: 14,
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "600",
     paddingVertical: 0,
   },
   searchHits: {
-    marginTop: 6,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
+    marginTop: 8,
+    backgroundColor: "#1A1A1A",
+    borderColor: "#2A2A2A",
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 14,
     overflow: "hidden",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    elevation: 10,
   },
   searchHit: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    gap: 10,
+    minHeight: 72,
+    paddingHorizontal: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.light.border,
+    borderBottomColor: "#2A2A2A",
   },
-  searchHitText: { flex: 1, color: colors.light.foreground, fontSize: 12 },
+  searchHitText: { flex: 1, color: "#FFFFFF", fontSize: 15, fontWeight: "600" },
 
   // Header (status + controls)
   headerCard: {
     position: "absolute",
-    top: 64,
+    top: 82,
     left: 12,
     right: 12,
     flexDirection: "row",
@@ -997,72 +1023,77 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
+    backgroundColor: "#1A1A1A",
+    borderColor: "#2A2A2A",
     borderWidth: 1,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     borderRadius: 999,
   },
   statusText: {
-    color: colors.light.foreground,
-    fontSize: 12,
-    fontWeight: "600",
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "700",
   },
   mapBtn: {
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
+    backgroundColor: "#1A1A1A",
+    borderColor: "#2A2A2A",
     borderWidth: 1,
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
 
-  // Filter rows
+  // Filter rows — vivid, high-contrast, glove-friendly
   filtersContainer: {
     position: "absolute",
-    top: 114,
+    top: 130,
     left: 0,
     right: 0,
-    gap: 4,
+    gap: 6,
   },
   filterRow: {
     flexDirection: "row",
-    gap: 6,
+    gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 2,
   },
   filterChip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    gap: 6,
+    paddingHorizontal: 14,
+    height: 48,
     borderRadius: 999,
-    backgroundColor: colors.light.card,
-    borderWidth: 1,
-    borderColor: colors.light.border,
+    backgroundColor: "#1A1A1A",
+    borderWidth: 1.5,
+    borderColor: "#2A2A2A",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 3,
   },
   filterChipActive: {
-    backgroundColor: colors.light.primary,
-    borderColor: colors.light.primary,
+    borderColor: "#F5A623",
+    backgroundColor: "#1A1A00",
   },
   filterChipText: {
-    color: colors.light.foreground,
-    fontSize: 11,
-    fontWeight: "600",
+    color: "#A0A0A0",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.5,
   },
-  filterChipTextActive: { color: colors.light.primaryForeground },
-  colorDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  lockIcon: {
-    marginRight: 1,
-  },
+  filterChipTextActive: { color: "#FFFFFF" },
+  colorDot: { width: 10, height: 10, borderRadius: 5 },
+  lockIcon: { marginRight: 1 },
 
   // Location permission banner
   permBanner: {
@@ -1070,11 +1101,11 @@ const styles = StyleSheet.create({
     bottom: 12,
     left: 12,
     right: 12,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.destructive,
+    backgroundColor: "#1A1A1A",
+    borderColor: "#D50000",
     borderWidth: 1,
     borderRadius: 12,
-    padding: 10,
+    padding: 14,
   },
-  permBannerText: { color: colors.light.foreground, fontSize: 12 },
+  permBannerText: { color: "#FFFFFF", fontSize: 14, fontWeight: "600" },
 });

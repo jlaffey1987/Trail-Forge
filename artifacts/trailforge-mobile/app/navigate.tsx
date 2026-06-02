@@ -83,15 +83,19 @@ import {
 import { getActiveNavRoute, clearActiveNavRoute } from "@/lib/activeNavRoute";
 import { difficultyColor, gradeShortLabel, TRAIL_ORANGE } from "@/lib/trailColors";
 
-// Navigation-specific colour constants (map overlays, not part of the main theme).
-const NAV_WHITE = "#ffffff";
-const NAV_ARRIVAL_GREEN = "#27AE60";
-const NAV_ROAD_BLUE = "#4A90D9";
-const NAV_COMPLETED_TRAIL = "#666666";
-const NAV_COMPLETED_ROAD = "#aaaaaa";
-const NAV_OVERLAY_DARK = "rgba(0,0,0,0.78)";
-const NAV_OVERLAY_MID = "rgba(0,0,0,0.72)";
-const NAV_OVERLAY_CONTROL = "rgba(0,0,0,0.55)";
+// Navigation-specific colour constants
+const NAV_WHITE = "#FFFFFF";
+const NAV_AMBER = "#F5A623";
+const NAV_ARRIVAL_GREEN = "#00C853";
+const NAV_ROAD_BLUE = "#FFFFFF";          // road sections: white dashed
+const NAV_COMPLETED_TRAIL = "#444444";
+const NAV_COMPLETED_ROAD = "#666666";
+const NAV_CARD = "#1A1A1A";
+const NAV_BG = "#0D0D0D";
+const NAV_RED = "#D50000";
+const NAV_OVERLAY_DARK = "rgba(13,13,13,0.96)";
+const NAV_OVERLAY_MID = "rgba(26,26,26,0.96)";
+const NAV_OVERLAY_CONTROL = "rgba(26,26,26,0.85)";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -371,7 +375,7 @@ export default function NavigateScreen() {
   if (!navRoute) {
     return (
       <View style={styles.loadingScreen}>
-        <ActivityIndicator color={colors.light.primary} size="large" />
+        <ActivityIndicator color={NAV_AMBER} size="large" />
         <Text style={styles.loadingText}>Building route…</Text>
       </View>
     );
@@ -396,7 +400,7 @@ export default function NavigateScreen() {
               : completed
               ? NAV_COMPLETED_ROAD
               : NAV_ROAD_BLUE,
-          width: sec.kind === "trail" ? 5 : 3,
+          width: sec.kind === "trail" ? 7 : 2,
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -418,18 +422,19 @@ export default function NavigateScreen() {
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle="light-content" backgroundColor={NAV_BG} />
 
-      {/* ── Map ──────────────────────────────────────────────────────── */}
+      {/* ── Map (full screen behind everything) ──────────────────────── */}
       <MapView
         ref={mapRef}
-        style={styles.map}
+        style={StyleSheet.absoluteFillObject}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}
         toolbarEnabled={false}
         rotateEnabled={false}
+        userInterfaceStyle="dark"
         initialCamera={{
           center: navRoute.from,
           heading: 0,
@@ -438,7 +443,7 @@ export default function NavigateScreen() {
           altitude: NAV_ALTITUDE,
         }}
       >
-        {/* Route polylines */}
+        {/* Route polylines — roads as dashed white, trails as vivid grade colour */}
         {polylines.map((p) => (
           <Polyline
             key={p.key}
@@ -447,28 +452,24 @@ export default function NavigateScreen() {
             strokeWidth={p.width}
             lineCap="round"
             lineJoin="round"
+            lineDashPattern={p.width <= 2 ? [6, 8] : undefined}
           />
         ))}
 
-        {/* Upcoming trail section highlight */}
+        {/* Upcoming trail section highlight in overview mode */}
         {overviewMode &&
           upcomingTrailSections.map((s) => (
             <Polyline
               key={`highlight-${s.id}`}
               coordinates={s.path}
               strokeColor={difficultyColor(s.grade != null ? String(s.grade) : null)}
-              strokeWidth={7}
+              strokeWidth={8}
               lineDashPattern={[0]}
             />
           ))}
 
         {/* Start marker */}
-        <Marker
-          coordinate={navRoute.from}
-          title="Start"
-          anchor={{ x: 0.5, y: 0.5 }}
-          flat
-        >
+        <Marker coordinate={navRoute.from} title="Start" anchor={{ x: 0.5, y: 0.5 }} flat>
           <View style={styles.startMarker}>
             <Feather name="flag" size={14} color={NAV_WHITE} />
           </View>
@@ -477,25 +478,21 @@ export default function NavigateScreen() {
         {/* Destination marker */}
         <Marker coordinate={navRoute.to} title="Destination" anchor={{ x: 0.5, y: 1 }}>
           <View style={styles.destMarker}>
-            <Feather name="map-pin" size={20} color={colors.light.destructive} />
+            <Feather name="map-pin" size={24} color={NAV_RED} />
           </View>
         </Marker>
 
-        {/* User position marker — custom heading arrow */}
-        {userPos ? (
+        {/* User position marker — pulsing amber arrow */}
+        {userPos && (
           <Marker coordinate={userPos} anchor={{ x: 0.5, y: 0.5 }} flat>
-            <View
-              style={[
-                styles.userArrow,
-                { transform: [{ rotate: `${heading}deg` }] },
-              ]}
-            >
-              <View style={styles.userArrowInner} />
+            <View style={[styles.userArrow, { transform: [{ rotate: `${heading}deg` }] }]}>
+              <View style={styles.userArrowTri} />
+              <View style={styles.userArrowDot} />
             </View>
           </Marker>
-        ) : null}
+        )}
 
-        {/* Trail section entry markers (overview mode) */}
+        {/* Trail entry dots in overview mode */}
         {overviewMode &&
           navRoute.sections
             .filter((s) => s.kind === "trail" && s.path.length > 0)
@@ -506,61 +503,69 @@ export default function NavigateScreen() {
                 title={`${s.name}${s.grade ? ` — Grade ${s.grade}` : ""}`}
                 anchor={{ x: 0.5, y: 0.5 }}
               >
-                <View
-                  style={[
-                    styles.trailEntryDot,
-                    { backgroundColor: difficultyColor(s.grade != null ? String(s.grade) : null) },
-                  ]}
-                />
+                <View style={[styles.trailEntryDot, { backgroundColor: difficultyColor(s.grade != null ? String(s.grade) : null) }]} />
               </Marker>
             ))}
       </MapView>
 
-      {/* ── Status overlay (recalculating / arrived) ─────────────────── */}
-      {statusMsg ? (
-        <View style={styles.statusBanner} pointerEvents="none">
-          <Text style={styles.statusBannerText}>{statusMsg}</Text>
-        </View>
-      ) : null}
-
-      {/* ── Control strip ────────────────────────────────────────────── */}
-      <View style={styles.controlStrip}>
-        <Pressable onPress={exitNavigation} style={styles.controlBtn} hitSlop={8}>
-          <Feather name="x" size={22} color={NAV_WHITE} />
-        </Pressable>
-        <View style={{ flex: 1 }} />
-        <Pressable
-          onPress={() => setMuted((m) => !m)}
-          style={[styles.controlBtn, muted && styles.controlBtnActive]}
-          hitSlop={8}
-        >
-          <Feather name={muted ? "volume-x" : "volume-2"} size={20} color={NAV_WHITE} />
-        </Pressable>
-        <Pressable
-          onPress={handleOverviewToggle}
-          style={[styles.controlBtn, overviewMode && styles.controlBtnActive]}
-          hitSlop={8}
-        >
-          <Feather name={overviewMode ? "navigation" : "maximize-2"} size={20} color={NAV_WHITE} />
-        </Pressable>
-      </View>
-
-      {/* ── Instruction banner ───────────────────────────────────────── */}
-      {currentInstruction ? (
+      {/* ── Instruction banner (TOP — 35% of screen) ─────────────────── */}
+      {currentInstruction && (
         <InstructionBanner
           instruction={currentInstruction}
           distanceM={distToInstruction}
+          currentSection={navRoute.sections[progress?.currentSectionIdx ?? 0]}
         />
-      ) : null}
+      )}
 
-      {/* ── Bottom info bar ──────────────────────────────────────────── */}
-      {progress ? (
-        <BottomBar
-          distanceRemainingM={progress.distanceRemainingM}
-          etaMin={progress.etaMin}
-          speedKmh={progress.speedKmh}
-        />
-      ) : null}
+      {/* ── Status overlay (recalculating / arrived) ─────────────────── */}
+      {statusMsg && (
+        <View style={styles.statusBanner} pointerEvents="none">
+          <ActivityIndicator color={NAV_AMBER} size="small" style={{ marginRight: 10 }} />
+          <Text style={styles.statusBannerText}>{statusMsg}</Text>
+        </View>
+      )}
+
+      {/* ── Overview mode toggle (floating, mid-right) ───────────────── */}
+      <Pressable
+        onPress={handleOverviewToggle}
+        style={[styles.overviewBtn, overviewMode && styles.overviewBtnActive]}
+      >
+        <Feather name={overviewMode ? "navigation" : "maximize-2"} size={20} color={overviewMode ? NAV_BG : NAV_WHITE} />
+      </Pressable>
+
+      {/* ── Bottom section: stats + control buttons ──────────────────── */}
+      <View style={styles.bottomSection}>
+        {/* Stats bar */}
+        {progress && (
+          <View style={styles.statsBar}>
+            <BottomStat value={`${Math.round(progress.speedKmh)}`} label="km/h" />
+            <View style={styles.statDivider} />
+            <BottomStat
+              value={progress.distanceRemainingM >= 1000
+                ? `${(progress.distanceRemainingM / 1000).toFixed(1)}`
+                : `${Math.round(progress.distanceRemainingM)}`}
+              label={progress.distanceRemainingM >= 1000 ? "km left" : "m left"}
+            />
+            <View style={styles.statDivider} />
+            <BottomStat value={formatArrivalTime(progress.etaMin)} label="ETA" />
+          </View>
+        )}
+
+        {/* Control buttons */}
+        <View style={styles.controlRow}>
+          <Pressable onPress={exitNavigation} style={[styles.ctrlBtn, styles.ctrlBtnExit]}>
+            <Feather name="x-circle" size={22} color={NAV_WHITE} />
+            <Text style={styles.ctrlBtnText}>EXIT NAVIGATION</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setMuted((m) => !m)}
+            style={[styles.ctrlBtn, styles.ctrlBtnMute, muted && styles.ctrlBtnMuteActive]}
+          >
+            <Feather name={muted ? "volume-x" : "volume-2"} size={22} color={muted ? NAV_AMBER : NAV_WHITE} />
+            <Text style={[styles.ctrlBtnText, muted && { color: NAV_AMBER }]}>{muted ? "UNMUTE" : "MUTE"}</Text>
+          </Pressable>
+        </View>
+      </View>
     </View>
   );
 }
@@ -569,90 +574,95 @@ export default function NavigateScreen() {
 // Sub-components
 // ---------------------------------------------------------------------------
 
+// ── Instruction Banner ─────────────────────────────────────────────────────
+
 function InstructionBanner({
   instruction,
   distanceM,
+  currentSection,
 }: {
   instruction: NavInstruction;
   distanceM: number;
+  currentSection?: { kind: string; grade?: number | null; name?: string };
 }) {
   const isTrailEntry = instruction.icon === "enter-trail";
-  const isTrailExit = instruction.icon === "exit-trail";
-  const isArrival = instruction.icon === "arrive";
+  const isTrailExit  = instruction.icon === "exit-trail";
+  const isArrival    = instruction.icon === "arrive";
+  const isOnTrail    = currentSection?.kind === "trail";
 
-  const bannerColor = isArrival
+  // Amber left border accent colour changes per state
+  const accentColor = isArrival
     ? NAV_ARRIVAL_GREEN
-    : isTrailEntry
-    ? TRAIL_ORANGE
-    : isTrailExit
-    ? NAV_ROAD_BLUE
-    : colors.light.primary;
+    : isTrailEntry || isOnTrail
+    ? difficultyColor(currentSection?.grade != null ? String(currentSection.grade) : null)
+    : NAV_AMBER;
 
   return (
-    <View style={[styles.instructionBanner, { backgroundColor: bannerColor }]}>
-      <View style={styles.instructionIconWrap}>
-        <InstructionArrow icon={instruction.icon} />
-      </View>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.instructionText} numberOfLines={2}>
-          {instruction.shortText}
-          {instruction.grade != null && isTrailEntry
-            ? `  —  Grade ${instruction.grade} ${gradeShortLabel(instruction.grade)}`
-            : ""}
-        </Text>
-        {distanceM > 30 ? (
-          <Text style={styles.instructionDistance}>{formatDistance(distanceM)}</Text>
-        ) : null}
-        {instruction.trailName && isTrailEntry ? (
-          <Text style={styles.instructionSub} numberOfLines={1}>
-            {instruction.trailName}
+    <View style={[styles.instructionBanner, { borderLeftColor: accentColor }]}>
+      {/* State badge */}
+      {isTrailEntry && (
+        <View style={[styles.stateBadge, { backgroundColor: accentColor + "22", borderColor: accentColor }]}>
+          <Text style={[styles.stateBadgeText, { color: accentColor }]}>
+            🟠 ENTERING TRAIL
+            {instruction.grade != null ? `  ·  GRADE ${instruction.grade}` : ""}
           </Text>
-        ) : null}
+        </View>
+      )}
+      {isTrailExit && (
+        <View style={[styles.stateBadge, { backgroundColor: "#2A2A2A", borderColor: "#555" }]}>
+          <Text style={[styles.stateBadgeText, { color: NAV_WHITE }]}>⬛ RETURNING TO ROAD</Text>
+        </View>
+      )}
+      {isArrival && (
+        <View style={[styles.stateBadge, { backgroundColor: NAV_ARRIVAL_GREEN + "22", borderColor: NAV_ARRIVAL_GREEN }]}>
+          <Text style={[styles.stateBadgeText, { color: NAV_ARRIVAL_GREEN }]}>✅ YOU HAVE ARRIVED</Text>
+        </View>
+      )}
+      {isOnTrail && !isTrailEntry && !isTrailExit && !isArrival && (
+        <View style={[styles.stateBadge, { backgroundColor: accentColor + "22", borderColor: accentColor }]}>
+          <Text style={[styles.stateBadgeText, { color: accentColor }]}>
+            🟢 ON TRAIL
+            {currentSection?.grade != null ? `  ·  GRADE ${currentSection.grade}` : ""}
+          </Text>
+        </View>
+      )}
+
+      {/* Main instruction row */}
+      <View style={styles.instructionRow}>
+        <View style={styles.instructionIconWrap}>
+          <InstructionArrow icon={instruction.icon} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.instructionText} numberOfLines={2}>
+            {instruction.shortText}
+          </Text>
+          {distanceM > 30 && (
+            <Text style={styles.instructionDist}>In {formatDistance(distanceM)}</Text>
+          )}
+          {instruction.trailName && (
+            <Text style={styles.instructionSub} numberOfLines={1}>{instruction.trailName}</Text>
+          )}
+        </View>
       </View>
     </View>
   );
 }
 
 function InstructionArrow({ icon }: { icon: InstructionIcon }) {
-  const iconMap: Record<InstructionIcon, string> = {
-    straight: "arrow-up",
-    "turn-left": "corner-up-left",
-    "turn-right": "corner-up-right",
-    "u-turn": "rotate-ccw",
+  const iconMap: Record<InstructionIcon, keyof typeof Feather.glyphMap> = {
+    straight:      "arrow-up",
+    "turn-left":   "corner-up-left",
+    "turn-right":  "corner-up-right",
+    "u-turn":      "rotate-ccw",
     "enter-trail": "trending-up",
-    "exit-trail": "trending-down",
-    arrive: "flag",
-    start: "navigation",
+    "exit-trail":  "trending-down",
+    arrive:        "flag",
+    start:         "navigation",
   };
-  return <Feather name={iconMap[icon] as keyof typeof Feather.glyphMap} size={36} color={NAV_WHITE} />;
+  return <Feather name={iconMap[icon]} size={64} color={NAV_WHITE} />;
 }
 
-function BottomBar({
-  distanceRemainingM,
-  etaMin,
-  speedKmh,
-}: {
-  distanceRemainingM: number;
-  etaMin: number;
-  speedKmh: number;
-}) {
-  const distLabel =
-    distanceRemainingM >= 1000
-      ? `${(distanceRemainingM / 1000).toFixed(1)} km`
-      : `${Math.round(distanceRemainingM)} m`;
-
-  return (
-    <View style={styles.bottomBar}>
-      <BottomStat value={distLabel} label="Remaining" />
-      <View style={styles.bottomDivider} />
-      <BottomStat value={formatEta(etaMin)} label="ETA" />
-      <View style={styles.bottomDivider} />
-      <BottomStat value={`${Math.round(speedKmh)}`} label="km/h" />
-      <View style={styles.bottomDivider} />
-      <BottomStat value={formatArrivalTime(etaMin)} label="Arrives" />
-    </View>
-  );
-}
+// ── Bottom stat cell ───────────────────────────────────────────────────────
 
 function BottomStat({ value, label }: { value: string; label: string }) {
   return (
@@ -681,178 +691,207 @@ function speak(text: string, muted: boolean): void {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Styles — premium dark navigation
+// ─────────────────────────────────────────────────────────────────────────────
 
-const CONTROL_HEIGHT = 52;
-const BANNER_HEIGHT = 90;
-const BOTTOM_HEIGHT = 72;
+const BOTTOM_STATS_H = 80;
+const CONTROL_ROW_H  = 72;
+const SAFE_TOP       = Platform.OS === "ios" ? 52 : 28;
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.light.background },
+  screen: { flex: 1, backgroundColor: NAV_BG },
 
   loadingScreen: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.light.background,
+    backgroundColor: NAV_BG,
     gap: 16,
   },
-  loadingText: { color: colors.light.foreground, fontSize: 15 },
+  loadingText: { color: NAV_WHITE, fontSize: 16, fontWeight: "600" },
 
-  map: { ...StyleSheet.absoluteFillObject },
-
-  // Control strip (sits on top of the map at the very top)
-  controlStrip: {
-    position: "absolute",
-    top: Platform.OS === "ios" ? 52 : 28,
-    left: 0,
-    right: 0,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    gap: 8,
-    height: CONTROL_HEIGHT,
-  },
-  controlBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: NAV_OVERLAY_CONTROL,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  controlBtnActive: { backgroundColor: "rgba(240,168,50,0.85)" },
-
-  // Instruction banner (below control strip)
+  // ── Instruction banner — sits at top, ~35% of screen ─────────────────────
   instructionBanner: {
     position: "absolute",
-    top: (Platform.OS === "ios" ? 52 : 28) + CONTROL_HEIGHT + 8,
-    left: 14,
-    right: 14,
-    minHeight: BANNER_HEIGHT,
-    borderRadius: 16,
-    flexDirection: "row",
-    alignItems: "center",
+    top: SAFE_TOP,
+    left: 0,
+    right: 0,
+    backgroundColor: NAV_CARD,
+    borderLeftWidth: 6,
+    borderLeftColor: NAV_AMBER,
     paddingHorizontal: 16,
     paddingVertical: 14,
-    gap: 14,
-    // Subtle shadow so it reads over the map
-    shadowColor: colors.light.background,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 8,
+    gap: 10,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
+    elevation: 16,
   },
+  stateBadge: {
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    alignSelf: "flex-start",
+  },
+  stateBadgeText: {
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  instructionRow: { flexDirection: "row", alignItems: "center", gap: 16 },
   instructionIconWrap: {
-    width: 48,
-    height: 48,
+    width: 80,
+    height: 80,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 12,
   },
   instructionText: {
     color: NAV_WHITE,
-    fontSize: 17,
-    fontWeight: "800",
-    lineHeight: 22,
+    fontSize: 28,
+    fontWeight: "900",
+    lineHeight: 34,
+    letterSpacing: -0.5,
   },
-  instructionDistance: {
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 13,
-    marginTop: 3,
-    fontWeight: "600",
+  instructionDist: {
+    color: NAV_AMBER,
+    fontSize: 20,
+    fontWeight: "700",
+    marginTop: 6,
   },
   instructionSub: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 12,
-    marginTop: 2,
+    color: "#A0A0A0",
+    fontSize: 14,
+    marginTop: 4,
   },
 
-  // Status overlay (recalculating / arrived)
+  // ── Status banner (recalculating) ─────────────────────────────────────────
   statusBanner: {
     position: "absolute",
     alignSelf: "center",
-    top: "45%",
-    backgroundColor: NAV_OVERLAY_MID,
+    top: "42%",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: NAV_AMBER,
     paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 12,
+    paddingVertical: 14,
+    borderRadius: 14,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    elevation: 12,
   },
-  statusBannerText: { color: NAV_WHITE, fontSize: 17, fontWeight: "700" },
+  statusBannerText: { color: NAV_BG, fontSize: 16, fontWeight: "800" },
 
-  // Bottom info bar
-  bottomBar: {
+  // ── Overview toggle (floating right) ─────────────────────────────────────
+  overviewBtn: {
+    position: "absolute",
+    right: 16,
+    top: "50%",
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: NAV_OVERLAY_CONTROL,
+    borderColor: "#333",
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  overviewBtnActive: { backgroundColor: NAV_AMBER },
+
+  // ── Bottom section ────────────────────────────────────────────────────────
+  bottomSection: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
-    height: BOTTOM_HEIGHT + (Platform.OS === "ios" ? 20 : 0),
-    paddingBottom: Platform.OS === "ios" ? 20 : 0,
     backgroundColor: NAV_OVERLAY_DARK,
+    borderTopWidth: 1,
+    borderTopColor: "#2A2A2A",
+  },
+  statsBar: {
     flexDirection: "row",
     alignItems: "center",
+    height: BOTTOM_STATS_H,
     paddingHorizontal: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#2A2A2A",
   },
-  bottomDivider: {
-    width: 1,
-    height: 36,
-    backgroundColor: "rgba(255,255,255,0.20)",
-  },
-  bottomStat: {
-    flex: 1,
-    alignItems: "center",
-    paddingVertical: 10,
-  },
-  bottomStatValue: {
-    color: NAV_WHITE,
-    fontSize: 18,
-    fontWeight: "800",
-  },
-  bottomStatLabel: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 10,
-    marginTop: 2,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
+  statDivider: { width: 1, height: 40, backgroundColor: "#2A2A2A" },
+  bottomStat: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 8 },
+  bottomStatValue: { color: NAV_WHITE, fontSize: 24, fontWeight: "900" },
+  bottomStatLabel: { color: "#A0A0A0", fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.8, marginTop: 2 },
 
-  // User position arrow marker
-  userArrow: {
-    width: 28,
-    height: 28,
+  // ── Control buttons ───────────────────────────────────────────────────────
+  controlRow: {
+    flexDirection: "row",
+    height: CONTROL_ROW_H + (Platform.OS === "ios" ? 24 : 0),
+    paddingBottom: Platform.OS === "ios" ? 24 : 0,
+  },
+  ctrlBtn: {
+    flex: 1,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 10,
   },
-  userArrowInner: {
+  ctrlBtnExit: { backgroundColor: NAV_RED + "CC" },
+  ctrlBtnMute: { backgroundColor: "#2A2A2A" },
+  ctrlBtnMuteActive: { backgroundColor: "#1A1A00" },
+  ctrlBtnText: { fontSize: 13, fontWeight: "800", color: NAV_WHITE, letterSpacing: 0.8 },
+
+  // ── User position marker ──────────────────────────────────────────────────
+  userArrow: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "flex-start",
+  },
+  userArrowTri: {
     width: 0,
     height: 0,
-    borderLeftWidth: 9,
-    borderRightWidth: 9,
-    borderBottomWidth: 22,
+    borderLeftWidth: 10,
+    borderRightWidth: 10,
+    borderBottomWidth: 26,
     borderLeftColor: "transparent",
     borderRightColor: "transparent",
-    borderBottomColor: colors.light.primary,
+    borderBottomColor: NAV_AMBER,
+  },
+  userArrowDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: NAV_AMBER,
+    marginTop: -4,
   },
 
-  // Start / destination markers
+  // ── Map markers ───────────────────────────────────────────────────────────
   startMarker: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: NAV_ARRIVAL_GREEN,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 2,
+    borderColor: NAV_WHITE,
   },
-  destMarker: {
-    alignItems: "center",
-  },
-
-  // Trail entry dots (overview mode)
+  destMarker: { alignItems: "center" },
   trailEntryDot: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
     borderWidth: 2,
     borderColor: NAV_WHITE,
   },

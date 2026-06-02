@@ -19,10 +19,12 @@ import {
 
 import colors from "@/constants/colors";
 import { ONBOARDING_KEY } from "@/lib/storageKeys";
+import { useProfile } from "@/components/ProfileContext";
 
 export function UserMenu() {
   const { user } = useUser();
   const { signOut } = useAuth();
+  const { profile } = useProfile();
   const [open, setOpen] = useState(false);
 
   if (!user) return null;
@@ -84,6 +86,16 @@ export function UserMenu() {
                 );
               }}
             />
+            {profile.isLinesman && (
+              <MenuItem
+                icon="tool"
+                label="Linesman Tools"
+                onPress={() => {
+                  setOpen(false);
+                  router.push("/linesman" as unknown as Parameters<typeof router.push>[0]);
+                }}
+              />
+            )}
             <View style={styles.divider} />
             <MenuItem
               icon="log-out"

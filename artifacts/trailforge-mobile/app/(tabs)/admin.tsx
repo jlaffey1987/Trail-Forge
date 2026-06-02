@@ -17,6 +17,7 @@ import {
   FlatList,
   Modal,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -35,14 +36,19 @@ import {
   rejectDiscoveredTrail,
   revokeAdmin,
   searchDirectoryUsers,
+  adminListLinesfolk,
+  adminGrantLinesman,
+  adminGetLinesmanEdits,
+  adminUndoLinesmanEdit,
   type AdminActivityEntry,
   type AdminUser,
   type DirectoryUser,
   type DiscoveredTrail,
+  type LinesmanEdit,
 } from "@/lib/api";
 
 type StatusFilter = "pending" | "approved" | "rejected";
-type AdminTab = "queue" | "activity" | "users";
+type AdminTab = "queue" | "activity" | "users" | "linesfolk";
 
 export default function AdminScreen() {
   const me = useQuery({ queryKey: ["admin-whoami"], queryFn: adminWhoami });
@@ -108,7 +114,7 @@ export default function AdminScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.tabs}>
-        {(["queue", "activity", "users"] as AdminTab[]).map((t) => (
+        {(["queue", "activity", "users", "linesfolk"] as AdminTab[]).map((t) => (
           <TouchableOpacity
             key={t}
             onPress={() => setTab(t)}
@@ -117,7 +123,7 @@ export default function AdminScreen() {
             <Text
               style={[styles.tabText, tab === t && styles.tabTextActive]}
             >
-              {t === "queue" ? "Queue" : t === "activity" ? "Activity" : "Users"}
+              {t === "queue" ? "Queue" : t === "activity" ? "Activity" : t === "users" ? "Users" : "Linesfolk"}
             </Text>
           </TouchableOpacity>
         ))}
@@ -181,8 +187,10 @@ export default function AdminScreen() {
         </>
       ) : tab === "activity" ? (
         <AdminActivityPanel />
-      ) : (
+      ) : tab === "users" ? (
         <AdminUsersPanel />
+      ) : (
+        <AdminLinesfolkPanel />
       )}
 
       <RejectModal
@@ -667,6 +675,161 @@ function RejectModal({
         </View>
       </View>
     </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Linesfolk admin panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AdminLinesfolkPanel() {
+  const qc = useQueryClient();
+  const [expandedUser, setExpandedUser] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const linesfolkQ = useQuery({
+    queryKey: ["admin-linesfolk"],
+    queryFn: adminListLinesfolk,
+  });
+  const editsQ = useQuery({
+    queryKey: ["admin-linesfolk-edits", expandedUser],
+    queryFn: () => adminGetLinesmanEdits(expandedUser!),
+    enabled: !!expandedUser,
+  });
+
+  const grantMut = useMutation({
+    mutationFn: ({ userId, access }: { userId: string; access: boolean }) =>
+      adminGrantLinesman(userId, access),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-linesfolk"] });
+    },
+    onError: (err) => Alert.alert("Error", err instanceof Error ? err.message : "Failed"),
+  });
+
+  const undoMut = useMutation({
+    mutationFn: adminUndoLinesmanEdit,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-linesfolk-edits", expandedUser] });
+      Alert.alert("Undone", "Edit reversed.");
+    },
+    onError: (err) => Alert.alert("Cannot undo", err instanceof Error ? err.message : "Error"),
+  });
+
+  const items = linesfolkQ.data ?? [];
+
+  const EDIT_LABELS: Record<string, string> = {
+    update_metadata: "Edited", replace_gpx: "Route replaced", flag: "Flagged",
+    unflag: "Unflagged", delete: "Deleted", restore: "Restored", add: "Added",
+  };
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 80 }}>
+      <View style={{ marginBottom: 16, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <Text style={styles.sectionTitle}>Linesfolk ({items.length})</Text>
+        <TouchableOpacity
+          onPress={() => setPickerOpen(true)}
+          style={[styles.btn, { marginTop: 0 }]}
+        >
+          <Feather name="user-plus" size={14} color={colors.light.primaryForeground} />
+          <Text style={[styles.btnText, { marginLeft: 6 }]}>Grant access</Text>
+        </TouchableOpacity>
+      </View>
+
+      {linesfolkQ.isLoading ? (
+        <ActivityIndicator color={colors.light.primary} />
+      ) : items.length === 0 ? (
+        <Text style={styles.empty}>No linesfolk yet. Grant access to trusted trail maintainers.</Text>
+      ) : (
+        items.map(u => (
+          <View key={u.id} style={[styles.card, { borderLeftWidth: 3, borderLeftColor: colors.light.primary }]}>
+            <TouchableOpacity onPress={() => setExpandedUser(prev => prev === u.id ? null : u.id)}>
+              <Text style={styles.cardTitle}>{u.display_name ?? u.email ?? u.id}</Text>
+              {u.email ? <Text style={styles.cardMeta}>{u.email}</Text> : null}
+              {u.linesman_group_id ? (
+                <Text style={styles.cardMeta}>Group: {u.linesman_group_id}</Text>
+              ) : (
+                <Text style={[styles.cardMeta, { fontStyle: "italic" }]}>No group assigned</Text>
+              )}
+            </TouchableOpacity>
+
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+              <TouchableOpacity
+                onPress={() => setExpandedUser(prev => prev === u.id ? null : u.id)}
+                style={[styles.actionBtn, styles.rejectBtn]}
+              >
+                <Feather name="clock" size={14} color={colors.light.foreground} />
+                <Text style={styles.actionTextDark}>
+                  {expandedUser === u.id ? "Hide history" : "View history"}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => Alert.alert(
+                  "Revoke linesman access?",
+                  `Remove linesman access from ${u.display_name ?? u.id}?`,
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    { text: "Revoke", style: "destructive", onPress: () => grantMut.mutate({ userId: u.id, access: false }) },
+                  ],
+                )}
+                disabled={grantMut.isPending}
+                style={[styles.actionBtn, styles.rejectBtn]}
+              >
+                <Feather name="user-x" size={14} color={colors.light.foreground} />
+                <Text style={styles.actionTextDark}>Revoke</Text>
+              </TouchableOpacity>
+            </View>
+
+            {expandedUser === u.id && (
+              <View style={{ marginTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.light.border, paddingTop: 10 }}>
+                <Text style={[styles.sectionTitle, { fontSize: 13, marginBottom: 8 }]}>Edit History</Text>
+                {editsQ.isLoading ? (
+                  <ActivityIndicator color={colors.light.primary} />
+                ) : (editsQ.data ?? []).length === 0 ? (
+                  <Text style={styles.empty}>No edits yet.</Text>
+                ) : (
+                  (editsQ.data ?? []).map((edit: LinesmanEdit) => {
+                    const ageMs = Date.now() - new Date(edit.created_at).getTime();
+                    const canUndo = ageMs < 86400_000;
+                    return (
+                      <View key={edit.id} style={{ flexDirection: "row", alignItems: "center", marginBottom: 8, gap: 8 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.cardTitle}>{EDIT_LABELS[edit.edit_type] ?? edit.edit_type}</Text>
+                          <Text style={styles.cardMeta} numberOfLines={1}>{edit.trail_name ?? edit.trail_id ?? "?"}</Text>
+                          <Text style={styles.cardMeta}>{new Date(edit.created_at).toLocaleString()}</Text>
+                        </View>
+                        {canUndo && (
+                          <TouchableOpacity
+                            onPress={() => Alert.alert(
+                              "Undo edit?",
+                              "This will restore the trail to its previous state.",
+                              [
+                                { text: "Cancel", style: "cancel" },
+                                { text: "Undo", style: "destructive", onPress: () => undoMut.mutate(edit.id) },
+                              ],
+                            )}
+                            style={[styles.actionBtn, styles.rejectBtn, { flex: 0 }]}
+                          >
+                            <Feather name="corner-up-left" size={12} color={colors.light.foreground} />
+                            <Text style={styles.actionTextDark}>Undo</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            )}
+          </View>
+        ))
+      )}
+
+      <UserPickerModal
+        visible={pickerOpen}
+        onDismiss={() => setPickerOpen(false)}
+        onPick={(user) => { grantMut.mutate({ userId: user.user_id, access: true }); setPickerOpen(false); }}
+        busy={grantMut.isPending}
+      />
+    </ScrollView>
   );
 }
 
