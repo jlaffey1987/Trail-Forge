@@ -78,17 +78,37 @@ const queryClient = new QueryClient({
  * at module scope because Clerk's hooks must be called inside the React
  * tree. Mounted inside `<ClerkProvider>` so `useAuth` is available.
  */
+/**
+ * Returns the Clerk session token, retrying with back-off when it's null.
+ *
+ * `getToken()` can briefly return null right after Clerk loads from
+ * SecureStore (the session object exists but the JWT hasn't been decoded
+ * yet). Without retrying, the first API call fires with no Bearer header
+ * and the server responds with 401.
+ */
+async function getTokenWithRetry(
+  getToken: () => Promise<string | null>,
+): Promise<string | null> {
+  const DELAYS = [0, 150, 400, 800]; // ms between attempts
+  for (const delay of DELAYS) {
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+    try {
+      const t = await getToken();
+      if (t) return t;
+    } catch {
+      // continue to next attempt
+    }
+  }
+  return null;
+}
+
 function ApiAuthBridge({ children }: { children: React.ReactNode }) {
   const { getToken, isLoaded, isSignedIn } = useAuth();
 
   useEffect(() => {
-    const fn = async () => {
-      try {
-        return await getToken();
-      } catch {
-        return null;
-      }
-    };
+    // Wrap in a retry-aware closure so transient null returns during Clerk's
+    // initialization window don't send an un-authenticated request.
+    const fn = () => getTokenWithRetry(getToken);
     setAuthTokenGetter(fn);
     setSharedBearerGetter(fn);
     return () => {
@@ -104,10 +124,10 @@ function ApiAuthBridge({ children }: { children: React.ReactNode }) {
         `[ApiAuthBridge] isLoaded=${isLoaded} isSignedIn=${isSignedIn} API=${API_BASE_URL || "(none)"}`,
       );
       if (isSignedIn) {
-        getToken()
+        getTokenWithRetry(getToken)
           .then((t) =>
             console.log(
-              `[ApiAuthBridge] token present=${Boolean(t)} prefix=${t?.slice(0, 12) ?? "null"}`,
+              `[ApiAuthBridge] token present=${Boolean(t)} prefix=${t?.slice(0, 20) ?? "null"}`,
             ),
           )
           .catch((e) => console.warn("[ApiAuthBridge] getToken error:", e));
@@ -156,7 +176,8 @@ function RootLayoutNav() {
       <Stack.Screen name="activity" options={{ title: "Activity" }} />
       <Stack.Screen name="group/[groupId]" options={{ title: "Group" }} />
       <Stack.Screen name="linesman" options={{ headerShown: false, animation: "slide_from_right" }} />
-        <Stack.Screen name="intro" options={{ headerShown: false, animation: "fade" }} />
+      <Stack.Screen name="intro"    options={{ headerShown: false, animation: "fade" }} />
+      <Stack.Screen name="rate"     options={{ title: "Rate Trail", presentation: "modal" }} />
     </Stack>
   );
 }

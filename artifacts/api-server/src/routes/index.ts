@@ -14,6 +14,7 @@ import adminRouter from "./admin";
 import conditionsRouter from "./conditions";
 import leaderboardRouter from "./leaderboard";
 import linesmanRouter from "./linesman";
+import ratingsRouter from "./ratings";
 
 const router: IRouter = Router();
 
@@ -32,5 +33,6 @@ router.use(adminRouter);
 router.use(conditionsRouter);
 router.use(leaderboardRouter);
 router.use(linesmanRouter);
+router.use(ratingsRouter);
 
 export default router;

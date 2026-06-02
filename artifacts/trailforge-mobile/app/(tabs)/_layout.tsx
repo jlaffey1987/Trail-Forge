@@ -1,9 +1,10 @@
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import { useSyncMe } from "@workspace/api-client-react";
+import { useAuth } from "@clerk/clerk-expo";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Tabs, router } from "expo-router";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 
 import { AuthGate } from "@/components/AuthGate";
@@ -25,14 +26,54 @@ import { ONBOARDING_KEY, INTRO_SEEN_KEY } from "@/lib/storageKeys";
  * Mounted inside the auth gate so we know the bearer token is available.
  */
 function PostLoginBootstrap() {
+  const { getToken } = useAuth();
   const sync = useSyncMe();
   const { setProfile } = useProfile();
   const [syncError, setSyncError] = useState<string | null>(null);
+  const syncAttemptRef = useRef(0);
+
+  // Attempt the /me/sync POST. If we get a 401, wait for a fresh token
+  // and retry up to MAX_ATTEMPTS times (handles Clerk initialization lag).
+  const doSync = React.useCallback(
+    (attempt = 0) => {
+      const MAX_ATTEMPTS = 3;
+      sync.mutate(undefined, {
+        onSuccess(data) {
+          setProfile({
+            isPremium:         data.is_premium ?? false,
+            preferredBikeType: (data.preferred_bike_type as BikeType | undefined) ?? "all",
+            isLinesman:        !!((data as unknown as Record<string, unknown>)["linesman_access"]),
+            linesmanGroupId:   ((data as unknown as Record<string, unknown>)["linesman_group_id"] as string | null) ?? null,
+          });
+        },
+        onError(err) {
+          const msg   = err instanceof Error ? err.message : String(err);
+          const is401 = msg.includes("401") || msg.toLowerCase().includes("unauthorized");
+
+          if (is401 && attempt < MAX_ATTEMPTS) {
+            // Token wasn't ready yet — wait, then retry
+            const delay = 500 * (attempt + 1);
+            console.warn(`[PostLoginBootstrap] sync 401, retry ${attempt + 1}/${MAX_ATTEMPTS} in ${delay}ms`);
+            setTimeout(() => {
+              // Kick a fresh getToken() call so the Bearer getter refreshes
+              void getToken().then(() => doSync(attempt + 1));
+            }, delay);
+            return;
+          }
+
+          console.warn("[PostLoginBootstrap] /me/sync failed:", msg);
+          setSyncError(msg);
+        },
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sync, setProfile, getToken],
+  );
 
   useEffect(() => {
+    syncAttemptRef.current = 0;
+
     // Redirect to onboarding on first launch after sign-up.
-    // The check is fast (AsyncStorage is synchronous-backed on device) so
-    // the flash before the redirect is imperceptible in practice.
     void (async () => {
       const [introDone, obDone] = await Promise.all([
         AsyncStorage.getItem(INTRO_SEEN_KEY),
@@ -48,21 +89,10 @@ function PostLoginBootstrap() {
       }
     })();
 
-    sync.mutate(undefined, {
-      onSuccess(data) {
-        setProfile({
-          isPremium:        data.is_premium ?? false,
-          preferredBikeType: (data.preferred_bike_type as BikeType | undefined) ?? "all",
-          isLinesman:        !!((data as unknown as Record<string, unknown>)["linesman_access"]),
-          linesmanGroupId:   ((data as unknown as Record<string, unknown>)["linesman_group_id"] as string | null) ?? null,
-        });
-      },
-      onError(err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn("[PostLoginBootstrap] /me/sync failed:", msg);
-        setSyncError(msg);
-      },
-    });
+    // Pre-warm the token before firing the first sync, giving Clerk time to
+    // fully initialise the session from SecureStore.
+    void getToken().then(() => doSync(0));
+
     void registerForPushAndSubscribe();
     void rehydrateRecording();
     // We deliberately want this to run exactly once per mount.

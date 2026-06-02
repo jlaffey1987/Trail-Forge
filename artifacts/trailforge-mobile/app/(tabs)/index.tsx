@@ -1,1247 +1,1068 @@
 /**
- * Planner tab — set an A and B point, fetch suggested trails along the
- * corridor, and persist the result as a named saved route.
+ * Route Planner — 4-step wizard
+ *
+ * Step 1: Where + What kind of ride (2 questions only)
+ * Step 2: Route result on map — summary + adjustments
+ * Step 3: Section editor (tap a trail section)
+ * Step 4: Save / Offline / Export / Go
  */
+
 import { Feather } from "@expo/vector-icons";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import {
-  useCreateMySavedRoute,
-  useListMySavedRoutes,
-} from "@workspace/api-client-react";
-import { router, useLocalSearchParams } from "expo-router";
-import React, { useEffect, useMemo, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Location from "expo-location";
+import { router } from "expo-router";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Dimensions,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
-// expo-file-system 55 split into a new `Paths`/`File` API and a legacy
-// module. The legacy `documentDirectory`/`writeAsStringAsync` shape is
-// still the simplest way to write a one-shot text file before sharing,
-// so we import from the legacy entry deliberately.
-import * as FileSystem from "expo-file-system/legacy";
-import * as Sharing from "expo-sharing";
-
+import { SafeAreaView } from "react-native-safe-area-context";
 import MapView, {
   Marker,
+  Polyline,
   PROVIDER_DEFAULT,
   PROVIDER_GOOGLE,
-  Polyline,
-  Region,
 } from "react-native-maps";
 
-import colors from "@/constants/colors";
+import colors, { gradeColour } from "@/constants/colors";
 import {
-  buildGpx,
   getPlannerSuggestions,
   searchTrailsByBbox,
+  buildGpx,
+  askAi,
   type MapTrail,
   type PlannerSuggestion,
 } from "@/lib/api";
-import { difficultyColor, gradeFromDifficulty } from "@/lib/trailColors";
-import { useProfile, type BikeType } from "@/components/ProfileContext";
-import { geocode, type NominatimResult } from "@/lib/nominatim";
+import { exportGpxFile, trailsToGpxInput, type GpxDevice } from "@/lib/gpxExport";
+import {
+  geocode,
+  reverseGeocode,
+  shortLabel,
+  distKm,
+  formatDistKm,
+  type NominatimResult,
+} from "@/lib/nominatim";
 import { setActiveNavRoute } from "@/lib/activeNavRoute";
+import { useProfile } from "@/components/ProfileContext";
+import {
+  usePlannerStore,
+  plannerActions,
+  styleToParams,
+  type RideStyle,
+  type PlannerStep,
+} from "@/store/routePlannerStore";
+import { difficultyColor } from "@/lib/trailColors";
 
-interface Endpoint {
-  label: string;
-  lat: number;
-  lon: number;
-}
+const { width: SW, height: SH } = Dimensions.get("window");
+const AMBER = colors.light.primary;
+const BG    = colors.light.background;
+const CARD  = colors.light.card;
 
-interface SavedRoutePreload {
-  id: string;
-  name: string;
-  trail_ids?: string[] | null;
-  trailIds?: string[] | null;
-  waypoints?: Array<{
-    id?: string;
-    lat: number;
-    lon: number;
-    label?: string | null;
-  }> | null;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Root component
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function PlannerTab() {
-  // When the Trails tab navigates here with `?routeId=…`, hydrate the
-  // form from that saved route so the user can pick up where they left
-  // off. We use the existing list-mine query (no per-id GET in the
-  // spec) and grab the matching record once it loads.
-  const { routeId } = useLocalSearchParams<{ routeId?: string }>();
-  const savedRoutes = useListMySavedRoutes({
-    query: {
-      queryKey: ["list-my-saved-routes-for-preload"],
-      enabled: !!routeId,
-    },
-  });
-
-  const [from, setFrom] = useState<Endpoint | null>(null);
-  const [to, setTo] = useState<Endpoint | null>(null);
-  // Intermediate stops (fuel / campsite / custom). Mirrors the web
-  // planner's waypoints model — backend accepts up to PLANNER_MAX_WAYPOINTS
-  // entries with `kind: "fuel"|"campsite"|"custom"`.
-  const [waypoints, setWaypoints] = useState<
-    Array<{
-      id: string;
-      lat: number;
-      lng: number;
-      name: string;
-      kind: "fuel" | "campsite" | "custom";
-    }>
-  >([]);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [routeName, setRouteName] = useState("");
-  const [hydratedFor, setHydratedFor] = useState<string | null>(null);
-
-  // Filters applied before calling getPlannerSuggestions.
-  // Seeded from the user's profile but can be overridden here.
+  const state = usePlannerStore();
   const { profile } = useProfile();
-  type GradeFilter = "all" | "easy" | "intermediate" | "hard" | "extreme";
-  const [gradeFilter, setGradeFilter] = useState<GradeFilter>("all");
-  const [bikeFilter, setBikeFilter] = useState<BikeType>(
-    profile.preferredBikeType ?? "all",
-  );
 
-  /** Max numeric grade allowed by the current bike/grade filter combo. */
-  function maxGrade(): number | null {
-    if (bikeFilter === "adventure") return 6;
-    if (bikeFilter === "trail") return 9;
-    if (gradeFilter === "easy") return 3;
-    if (gradeFilter === "intermediate") return 6;
-    if (gradeFilter === "hard") return 9;
-    if (gradeFilter === "extreme") return 10;
-    return null; // "all" → no cap
+  // If coming back from navigate, reset to step 1
+  useEffect(() => {
+    if (state.step === 4) plannerActions.setStep(1);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  switch (state.step) {
+    case 1: return <Step1StyleSelector profile={profile} />;
+    case 2: return <Step2RouteResult />;
+    case 3: return <Step2RouteResult showSectionEditor />;
+    case 4: return <Step4SaveAndGo />;
+    default: return <Step1StyleSelector profile={profile} />;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 1 — Two questions
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile>["profile"] }) {
+  const state = usePlannerStore();
+  const [gpsLoading, setGpsLoading] = useState(!state.from);
+  const [nlMode, setNlMode] = useState(false);
+  const [nlText, setNlText] = useState(state.naturalLanguageInput);
+  const [nlLoading, setNlLoading] = useState(false);
+  const [fromSearch, setFromSearch] = useState(false);
+  const [fromQuery, setFromQuery] = useState("");
+  const [fromResults, setFromResults] = useState<NominatimResult[]>([]);
+  const [fromSearching, setFromSearching] = useState(false);
+  const [gpsPos, setGpsPos] = useState<{ lat: number; lon: number } | null>(null);
+
+  // Auto-GPS on mount
+  useEffect(() => {
+    if (state.from) { setGpsLoading(false); return; }
+    void (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== "granted") { setGpsLoading(false); return; }
+        const pos = await Location.getLastKnownPositionAsync()
+          ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        const { latitude: lat, longitude: lon } = pos.coords;
+        setGpsPos({ lat, lon });
+        const rev = await reverseGeocode(lat, lon);
+        const address = rev?.display_name
+          ? `Near ${shortLabel(rev.display_name)}`
+          : `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+        plannerActions.setFrom({ lat, lon, address });
+      } catch { /* ignore */ }
+      finally { setGpsLoading(false); }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced FROM search
+  useEffect(() => {
+    if (!fromSearch || !fromQuery) { setFromResults([]); return; }
+    setFromSearching(true);
+    const h = setTimeout(async () => {
+      const r = await geocode(fromQuery, gpsPos ?? undefined);
+      setFromResults(r);
+      setFromSearching(false);
+    }, 300);
+    return () => clearTimeout(h);
+  }, [fromQuery, fromSearch, gpsPos]);
+
+  async function useGpsFallback() {
+    setGpsLoading(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") { Alert.alert("Location needed", "Enable location in Settings."); return; }
+      const pos = await Location.getLastKnownPositionAsync()
+        ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const { latitude: lat, longitude: lon } = pos.coords;
+      setGpsPos({ lat, lon });
+      const rev = await reverseGeocode(lat, lon);
+      const address = rev?.display_name ? `Near ${shortLabel(rev.display_name)}` : `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      plannerActions.setFrom({ lat, lon, address });
+    } catch { Alert.alert("GPS unavailable"); }
+    finally { setGpsLoading(false); }
   }
 
-  useEffect(() => {
-    if (!routeId || hydratedFor === routeId) return;
-    const list =
-      (savedRoutes.data as { routes?: SavedRoutePreload[] } | undefined)
-        ?.routes ?? [];
-    const match = list.find((r) => r.id === routeId);
-    if (!match) return;
-    const ids = match.trail_ids ?? match.trailIds ?? [];
-    const wps = match.waypoints ?? [];
-    const fromWp = wps[0];
-    const toWp = wps[wps.length - 1];
-    setRouteName(match.name);
-    setSelected(ids);
-    if (fromWp) {
-      setFrom({
-        label: fromWp.label ?? "Start",
-        lat: fromWp.lat,
-        lon: fromWp.lon,
-      });
-    }
-    if (toWp && wps.length > 1) {
-      setTo({
-        label: toWp.label ?? "End",
-        lat: toWp.lat,
-        lon: toWp.lon,
-      });
-    }
-    // Restore intermediate stops between from/to (skipping the first and
-    // last entries which represent the endpoints themselves).
-    if (wps.length > 2) {
-      const stops = wps.slice(1, -1).map((w, idx) => ({
-        id: w.id ?? `wp-${idx}`,
-        lat: w.lat,
-        lng: w.lon,
-        name: w.label ?? "Stop",
-        kind: "custom" as const,
-      }));
-      setWaypoints(stops);
-    }
-    setHydratedFor(routeId);
-  }, [routeId, savedRoutes.data, hydratedFor]);
+  async function handleNlSubmit() {
+    if (!nlText.trim() || !state.from) return;
+    setNlLoading(true);
+    plannerActions.setNaturalLanguage(nlText);
+    try {
+      const resp = await askAi(
+        [{ role: "user", content: `Parse this ride request and return JSON only with keys: rideStyle ("easy"|"moderate"|"challenge"), corridorKm (number). Request: "${nlText}"` }],
+        {},
+      );
+      try {
+        const parsed = JSON.parse(resp.reply.match(/\{[\s\S]*\}/)?.[0] ?? "{}") as { rideStyle?: string; corridorKm?: number };
+        const style = (["easy","moderate","challenge"].includes(parsed.rideStyle ?? "") ? parsed.rideStyle : "moderate") as RideStyle;
+        plannerActions.setRideStyle(style);
+      } catch { plannerActions.setRideStyle("moderate"); }
+    } catch { plannerActions.setRideStyle("moderate"); }
+    setNlLoading(false);
+    await doCalculate(state.from, state.rideStyle ?? "moderate");
+  }
 
-  const suggestionsMut = useMutation({
-    mutationFn: getPlannerSuggestions,
-  });
-  const createRoute = useCreateMySavedRoute();
-
-  const allSuggestions = suggestionsMut.data?.suggestions ?? [];
-
-  // Filter suggestions by difficulty grade / bike type client-side.
-  const cap = maxGrade();
-  const suggestions: PlannerSuggestion[] = cap == null
-    ? allSuggestions
-    : allSuggestions.filter((s) => {
-        const grade = gradeFromDifficulty(s.difficulty ?? null);
-        return grade == null || grade <= cap;
-      });
-
-  // Pull the polylines for whatever trails the user has ticked so the
-  // corridor preview can render them on the inline map. We deliberately
-  // re-use the same bbox/id-filter trail search the export-GPX flow does.
-  const selectedKey = selected.slice().sort().join(",");
-  const previewTrailsQ = useQuery({
-    queryKey: ["planner-preview-trails", selectedKey],
-    queryFn: () =>
-      selected.length === 0
-        ? Promise.resolve({ trails: [] as MapTrail[] })
-        : searchTrailsByBbox({ ids: selectedKey, limit: 200 }),
-    enabled: selected.length > 0,
-    staleTime: 30_000,
-  });
-  const previewTrails: MapTrail[] = previewTrailsQ.data?.trails ?? [];
-
-  // Route summary: total distance of selected trails + estimated ride time.
-  const totalTrailKm = previewTrails
-    .filter((t) => selected.includes(t.id))
-    .reduce((sum, t) => sum + (t.distance_km ?? 0), 0);
-  // ~20 km/h average off-road riding speed for time estimate.
-  const estimatedTimeMin = Math.round((totalTrailKm / 20) * 60);
-
-  // Refetch whenever both endpoints are set.
-  useEffect(() => {
-    if (from && to) {
-      suggestionsMut.mutate({
+  async function doCalculate(from: typeof state.from, style: RideStyle) {
+    if (!from) return;
+    const params = styleToParams(style);
+    plannerActions.setCalculating(true);
+    plannerActions.setStep(2);
+    try {
+      const res = await getPlannerSuggestions({
         fromLat: from.lat,
         fromLon: from.lon,
-        toLat: to.lat,
-        toLon: to.lon,
+        toLat:   from.lat, // loop
+        toLon:   from.lon,
+        corridorKm: params.corridorKm,
       });
+      const ids = res.suggestions.map(s => s.trailId).join(",");
+      const details = ids
+        ? await searchTrailsByBbox({ ids, limit: 50 })
+        : { trails: [] };
+      plannerActions.setSuggestions(res.suggestions, details.trails);
+    } catch (e) {
+      Alert.alert("Route error", e instanceof Error ? e.message : "Could not find trails");
+      plannerActions.setCalculating(false);
+      plannerActions.setStep(1);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [from?.lat, from?.lon, to?.lat, to?.lon]);
+  }
 
-  function toggle(id: string) {
-    setSelected((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+  function handleStylePick(style: RideStyle) {
+    plannerActions.setRideStyle(style);
+    if (state.from) void doCalculate(state.from, style);
+  }
+
+  const canGo = !!state.from && !!state.rideStyle;
+  const bikeLabel = profile.preferredBikeType === "all" ? "All bikes"
+    : profile.preferredBikeType.charAt(0).toUpperCase() + profile.preferredBikeType.slice(1);
+
+  return (
+    <SafeAreaView style={s1.safe}>
+      <ScrollView contentContainerStyle={s1.scroll} keyboardShouldPersistTaps="handled">
+        {/* Header */}
+        <Text style={s1.header}>PLAN YOUR RIDE</Text>
+        <View style={s1.headerAccent} />
+
+        {/* Q1: Where are you starting? */}
+        <Text style={s1.qLabel}>WHERE ARE YOU STARTING?</Text>
+
+        {fromSearch ? (
+          <View style={s1.searchBox}>
+            <Feather name="search" size={16} color={AMBER} style={{ marginLeft: 14 }} />
+            <TextInput
+              value={fromQuery}
+              onChangeText={setFromQuery}
+              placeholder="Search start location…"
+              placeholderTextColor={colors.light.mutedForeground}
+              style={s1.searchInput}
+              autoFocus
+            />
+            {fromSearching
+              ? <ActivityIndicator size="small" color={AMBER} style={{ marginRight: 12 }} />
+              : <Pressable onPress={() => { setFromSearch(false); setFromQuery(""); setFromResults([]); }} style={{ marginRight: 12 }}>
+                  <Feather name="x" size={16} color={colors.light.mutedForeground} />
+                </Pressable>
+            }
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={[s1.locPill, gpsLoading && { opacity: 0.7 }]}
+            onPress={() => setFromSearch(true)}
+            activeOpacity={0.8}
+          >
+            <Feather name="navigation" size={16} color={AMBER} />
+            {gpsLoading
+              ? <><ActivityIndicator size="small" color={AMBER} style={{ marginLeft: 8 }} /><Text style={s1.locHint}> Getting your location…</Text></>
+              : state.from
+                ? <Text style={s1.locText} numberOfLines={1}>{state.from.address}</Text>
+                : <TouchableOpacity onPress={useGpsFallback} style={s1.gpsFallBtn}>
+                    <Text style={s1.gpsFallText}>📍 Use Current Location</Text>
+                  </TouchableOpacity>
+            }
+            {state.from && <Feather name="edit-2" size={13} color={colors.light.mutedForeground} style={{ marginLeft: "auto" }} />}
+          </TouchableOpacity>
+        )}
+
+        {/* Search results dropdown */}
+        {fromResults.length > 0 && (
+          <View style={s1.dropdown}>
+            {fromResults.map(r => (
+              <TouchableOpacity
+                key={r.place_id}
+                style={s1.dropItem}
+                onPress={() => {
+                  plannerActions.setFrom({ lat: parseFloat(r.lat), lon: parseFloat(r.lon), address: shortLabel(r.display_name) });
+                  setFromSearch(false);
+                  setFromQuery("");
+                  setFromResults([]);
+                }}
+              >
+                <Feather name="map-pin" size={14} color={AMBER} style={{ marginRight: 10 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s1.dropName} numberOfLines={1}>{shortLabel(r.display_name)}</Text>
+                  {gpsPos && <Text style={s1.dropDist}>{formatDistKm(distKm(gpsPos.lat, gpsPos.lon, parseFloat(r.lat), parseFloat(r.lon)))}</Text>}
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        {/* Q2: What kind of ride? */}
+        <Text style={[s1.qLabel, { marginTop: 28 }]}>WHAT KIND OF RIDE?</Text>
+
+        {!nlMode ? (
+          <>
+            {RIDE_STYLES.map(rs => (
+              <TouchableOpacity
+                key={rs.id}
+                style={[s1.styleCard, state.rideStyle === rs.id && s1.styleCardActive]}
+                onPress={() => handleStylePick(rs.id)}
+                activeOpacity={0.85}
+              >
+                <Text style={s1.styleEmoji}>{rs.emoji}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={s1.styleName}>{rs.name}</Text>
+                  <Text style={s1.styleDesc}>{rs.desc}</Text>
+                  <Text style={s1.styleGrade}>{rs.gradeRange}</Text>
+                </View>
+                {state.rideStyle === rs.id && (
+                  <View style={s1.checkCircle}>
+                    <Feather name="check" size={16} color="#000" />
+                  </View>
+                )}
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity onPress={() => setNlMode(true)} style={s1.nlLink}>
+              <Feather name="message-square" size={14} color={AMBER} />
+              <Text style={s1.nlLinkText}>Describe your ideal ride instead →</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <View style={s1.nlBox}>
+            <TextInput
+              value={nlText}
+              onChangeText={setNlText}
+              placeholder="e.g. half day loop, not too hard, great scenery…"
+              placeholderTextColor={colors.light.mutedForeground}
+              style={s1.nlInput}
+              multiline
+              maxLength={200}
+              autoFocus
+            />
+            <View style={{ flexDirection: "row", gap: 10 }}>
+              <TouchableOpacity onPress={() => setNlMode(false)} style={s1.nlCancel}>
+                <Text style={s1.nlCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => void handleNlSubmit()}
+                style={[s1.nlSubmit, (!nlText.trim() || !state.from) && { opacity: 0.4 }]}
+                disabled={!nlText.trim() || !state.from || nlLoading}
+              >
+                {nlLoading
+                  ? <ActivityIndicator color="#000" />
+                  : <Text style={s1.nlSubmitText}>🤖 Interpret & Find</Text>
+                }
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* Bike type note */}
+        <Text style={s1.bikeNote}>Using your {bikeLabel} profile — change in Settings</Text>
+
+        {/* Generate button (only if style already chosen via NL or re-calculate) */}
+        {canGo && !nlMode && (
+          <TouchableOpacity
+            style={s1.generateBtn}
+            onPress={() => state.from && state.rideStyle && void doCalculate(state.from, state.rideStyle)}
+          >
+            <Text style={s1.generateText}>🗺️  FIND MY RIDE</Text>
+          </TouchableOpacity>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const RIDE_STYLES: { id: RideStyle; emoji: string; name: string; desc: string; gradeRange: string }[] = [
+  { id: "easy",     emoji: "🌅", name: "EASY RIDE",    desc: "Relaxed trails, scenic routes",          gradeRange: "Grade 1-4" },
+  { id: "moderate", emoji: "☀️",  name: "GOOD DAY OUT", desc: "Mixed terrain, some challenge",          gradeRange: "Grade 3-6" },
+  { id: "challenge",emoji: "⚡", name: "CHALLENGE ME",  desc: "Technical trails, serious riding",       gradeRange: "Grade 5-8" },
+];
+
+const s1 = StyleSheet.create({
+  safe:          { flex: 1, backgroundColor: BG },
+  scroll:        { padding: 20, paddingBottom: 100 },
+  header:        { fontSize: 28, fontWeight: "900", color: "#fff", letterSpacing: -1 },
+  headerAccent:  { width: 48, height: 3, backgroundColor: AMBER, borderRadius: 2, marginTop: 6, marginBottom: 28 },
+  qLabel:        { color: colors.light.mutedForeground, fontSize: 11, fontWeight: "800", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 10 },
+
+  locPill: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: CARD, borderRadius: 14, borderWidth: 1.5,
+    borderColor: AMBER + "66", minHeight: 58, paddingHorizontal: 16,
+  },
+  locText:    { flex: 1, color: "#fff", fontSize: 16, fontWeight: "600" },
+  locHint:    { color: colors.light.mutedForeground, fontSize: 14 },
+  gpsFallBtn: { flex: 1 },
+  gpsFallText:{ color: AMBER, fontSize: 15, fontWeight: "700" },
+
+  searchBox: {
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: CARD, borderRadius: 14, borderWidth: 1.5,
+    borderColor: AMBER, height: 58,
+  },
+  searchInput: { flex: 1, color: "#fff", fontSize: 15, paddingHorizontal: 10 },
+  dropdown: {
+    backgroundColor: CARD, borderRadius: 12, borderWidth: 1,
+    borderColor: colors.light.border, marginTop: 4, overflow: "hidden",
+  },
+  dropItem: { flexDirection: "row", alignItems: "center", padding: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.light.border },
+  dropName: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  dropDist: { color: AMBER, fontSize: 11, marginTop: 1 },
+
+  styleCard: {
+    flexDirection: "row", alignItems: "center", gap: 16,
+    backgroundColor: CARD, borderRadius: 16, borderWidth: 2,
+    borderColor: colors.light.border, minHeight: 100, padding: 18,
+    marginBottom: 12,
+  },
+  styleCardActive: { borderColor: AMBER, backgroundColor: AMBER + "18" },
+  styleEmoji: { fontSize: 36 },
+  styleName:  { color: "#fff", fontSize: 20, fontWeight: "800", letterSpacing: -0.5 },
+  styleDesc:  { color: colors.light.mutedForeground, fontSize: 13, marginTop: 2 },
+  styleGrade: { color: AMBER, fontSize: 13, fontWeight: "700", marginTop: 4 },
+  checkCircle:{ width: 28, height: 28, borderRadius: 14, backgroundColor: AMBER, alignItems: "center", justifyContent: "center" },
+
+  nlLink:      { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4, marginBottom: 8 },
+  nlLinkText:  { color: AMBER, fontSize: 13, fontWeight: "600" },
+  nlBox:       { backgroundColor: CARD, borderRadius: 14, padding: 16, gap: 12, marginBottom: 12 },
+  nlInput:     { color: "#fff", fontSize: 15, minHeight: 80, textAlignVertical: "top" },
+  nlCancel:    { flex: 1, height: 52, borderRadius: 10, borderWidth: 1, borderColor: colors.light.border, alignItems: "center", justifyContent: "center" },
+  nlCancelText:{ color: colors.light.mutedForeground, fontSize: 15 },
+  nlSubmit:    { flex: 2, height: 52, borderRadius: 10, backgroundColor: AMBER, alignItems: "center", justifyContent: "center" },
+  nlSubmitText:{ color: "#000", fontSize: 15, fontWeight: "800" },
+
+  bikeNote:    { color: colors.light.mutedForeground, fontSize: 12, textAlign: "center", marginTop: 8, marginBottom: 20 },
+  generateBtn: { backgroundColor: AMBER, borderRadius: 16, height: 72, alignItems: "center", justifyContent: "center", marginTop: 8 },
+  generateText:{ color: "#000", fontSize: 18, fontWeight: "900", letterSpacing: 0.5 },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 2 + STEP 3 — Route result + section editor
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: boolean }) {
+  const state = usePlannerStore();
+  const mapRef = useRef<MapView>(null);
+  const sheetAnim = useRef(new Animated.Value(0)).current;
+  const [adjusting, setAdjusting] = useState<string | null>(null);
+  const [showQuality, setShowQuality] = useState(false);
+
+  // Visible trails = suggestions minus skipped
+  const skippedSet = useMemo(() => new Set(state.skippedIds), [state.skippedIds]);
+  const visibleTrails = useMemo(
+    () => state.trailDetails.filter(t => !skippedSet.has(t.id)),
+    [state.trailDetails, skippedSet],
+  );
+  const skippedTrails = useMemo(
+    () => state.trailDetails.filter(t => skippedSet.has(t.id)),
+    [state.trailDetails, skippedSet],
+  );
+
+  // Selected section
+  const selectedTrail = useMemo(
+    () => state.trailDetails.find(t => t.id === state.selectedSectionId) ?? null,
+    [state.trailDetails, state.selectedSectionId],
+  );
+
+  // Bottom sheet animation
+  useEffect(() => {
+    Animated.spring(sheetAnim, {
+      toValue: 1,
+      useNativeDriver: true,
+      tension: 60,
+      friction: 10,
+    }).start();
+  }, []);
+
+  // Route stats
+  const { totalKm, minGrade, maxGrade, avgStars } = useMemo(() => {
+    let km = 0, mn = 10, mx = 0, starSum = 0, starCount = 0;
+    for (const t of visibleTrails) {
+      km += t.distance_km ?? 0;
+      const g = parseInt(String(t.difficulty ?? "5"), 10);
+      if (!isNaN(g)) { mn = Math.min(mn, g); mx = Math.max(mx, g); }
+      const avg = (t as unknown as { avg_stars?: number }).avg_stars;
+      if (avg) { starSum += avg; starCount++; }
+    }
+    return {
+      totalKm: km,
+      minGrade: mn === 10 ? 5 : mn,
+      maxGrade: mx,
+      avgStars: starCount > 0 ? Math.round(starSum / starCount * 10) / 10 : null,
+    };
+  }, [visibleTrails]);
+
+  const estimatedMin = Math.round((totalKm / 20) * 60);
+
+  // Initial map region
+  const region = useMemo(() => {
+    if (!state.from) return undefined;
+    return {
+      latitude: state.from.lat,
+      longitude: state.from.lon,
+      latitudeDelta: 0.5,
+      longitudeDelta: 0.5,
+    };
+  }, [state.from]);
+
+  async function handleAdjust(mode: "more_trails" | "less_trails" | "harder" | "easier") {
+    if (!state.from) return;
+    setAdjusting(mode);
+    plannerActions.setAdjustmentMode(mode);
+
+    const base = styleToParams(state.rideStyle ?? "moderate");
+    const corridorKm = mode === "more_trails" ? base.corridorKm * 1.4
+      : mode === "less_trails" ? base.corridorKm * 0.6
+      : base.corridorKm;
+
+    try {
+      const res = await getPlannerSuggestions({
+        fromLat: state.from.lat, fromLon: state.from.lon,
+        toLat: state.from.lat,   toLon: state.from.lon,
+        corridorKm,
+      });
+      const filteredSuggestions = res.suggestions.filter(s => {
+        const g = parseInt(String(s.difficulty ?? "5"), 10);
+        if (mode === "harder")  return g >= (base.maxGrade - 2);
+        if (mode === "easier")  return g <= (base.maxGrade - 1);
+        return true;
+      });
+      const ids = filteredSuggestions.map(s => s.trailId).join(",");
+      const details = ids ? await searchTrailsByBbox({ ids, limit: 50 }) : { trails: [] };
+      plannerActions.setSuggestions(filteredSuggestions, details.trails);
+    } catch (e) {
+      Alert.alert("Adjust failed", e instanceof Error ? e.message : "Try again");
+    } finally {
+      setAdjusting(null);
+      plannerActions.setAdjustmentMode(null);
+    }
+  }
+
+  if (state.isCalculating) {
+    return (
+      <View style={{ flex: 1, backgroundColor: BG, alignItems: "center", justifyContent: "center", gap: 20 }}>
+        <ActivityIndicator size="large" color={AMBER} />
+        <Text style={{ color: "#fff", fontSize: 20, fontWeight: "700" }}>Finding your perfect ride…</Text>
+        <Text style={{ color: colors.light.mutedForeground, fontSize: 14 }}>Searching {styleToParams(state.rideStyle ?? "moderate").corridorKm}km around your location</Text>
+      </View>
     );
   }
 
-  const [exporting, setExporting] = useState(false);
+  return (
+    <View style={{ flex: 1, backgroundColor: BG }}>
+      {/* Back */}
+      <TouchableOpacity
+        style={s2.backBtn}
+        onPress={() => { plannerActions.selectSection(null); plannerActions.setStep(1); }}
+      >
+        <Feather name="arrow-left" size={22} color="#fff" />
+      </TouchableOpacity>
 
-  async function onExportGpx() {
-    if (!from || !to) {
-      Alert.alert("Set endpoints first", "Pick a From and To before exporting.");
-      return;
-    }
-    setExporting(true);
-    try {
-      // Build a GPX with the From waypoint, every selected trail's polyline,
-      // and the To waypoint. We hit the bbox/id-filter trail search to grab
-      // the paths for the trails the user has ticked.
-      const points: Array<{ lat: number; lon: number }> = [
-        { lat: from.lat, lon: from.lon },
-      ];
-      if (selected.length > 0) {
-        const res = await searchTrailsByBbox({
-          ids: selected.join(","),
-          limit: 200,
-        });
-        for (const t of res.trails) {
-          if (!Array.isArray(t.path)) continue;
-          for (const p of t.path) {
-            if (Array.isArray(p) && p.length >= 2) {
-              const [lon, lat] = p as [unknown, unknown];
-              if (typeof lat === "number" && typeof lon === "number") {
-                points.push({ lat, lon });
-              }
-            }
-          }
-        }
-      }
-      // Insert any intermediate stops the user added (fuel/campsite/custom)
-      // before the final To endpoint so they show up as GPX waypoints.
-      for (const wp of waypoints) {
-        points.push({ lat: wp.lat, lon: wp.lng });
-      }
-      points.push({ lat: to.lat, lon: to.lon });
-      const gpx = buildGpx(routeName.trim() || "TrailForge route", points);
-      // Write the GPX to the cache dir as a real .gpx file, then hand off to
-      // the OS share-sheet via expo-sharing so the user can save / send it
-      // as an attachment instead of a raw text blob.
-      const safeName = (routeName.trim() || "TrailForge-route").replace(
-        /[^a-zA-Z0-9_-]+/g,
-        "_",
-      );
-      const baseDir =
-        FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
-      if (!baseDir) {
-        throw new Error("No writable directory available on this device.");
-      }
-      const fileUri = `${baseDir}${safeName}.gpx`;
-      await FileSystem.writeAsStringAsync(fileUri, gpx, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri, {
-          mimeType: "application/gpx+xml",
-          dialogTitle: `${routeName.trim() || "Route"}.gpx`,
-          UTI: "com.topografix.gpx",
-        });
-      } else {
-        Alert.alert(
-          "Saved",
-          `GPX written to ${fileUri}. Sharing not available on this device.`,
-        );
-      }
-    } catch (err) {
-      Alert.alert(
-        "Export failed",
-        err instanceof Error ? err.message : "Unknown error",
-      );
-    } finally {
-      setExporting(false);
-    }
-  }
+      {/* Map */}
+      <MapView
+        ref={mapRef}
+        style={{ flex: 1 }}
+        provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
+        initialRegion={region}
+        showsUserLocation
+        showsCompass={false}
+      >
+        {/* Visible trail polylines */}
+        {visibleTrails.map(t => {
+          const pts = polylineFromPath(t.path);
+          if (!pts.length) return null;
+          const grade = parseInt(String(t.difficulty ?? "5"), 10);
+          const isRoad = t.terrain === "road";
+          const isSelected = t.id === state.selectedSectionId;
+          return (
+            <Polyline
+              key={t.id}
+              coordinates={pts}
+              strokeColor={isSelected ? AMBER : (isRoad ? "#888" : gradeColour(grade))}
+              strokeWidth={isSelected ? 8 : (isRoad ? 2 : 6)}
+              lineDashPattern={isRoad ? [8, 6] : undefined}
+              tappable
+              onPress={() => {
+                plannerActions.selectSection(t.id);
+                plannerActions.setStep(3);
+              }}
+            />
+          );
+        })}
+        {/* Skipped (grey dashed) */}
+        {skippedTrails.map(t => {
+          const pts = polylineFromPath(t.path);
+          if (!pts.length) return null;
+          return (
+            <Polyline
+              key={t.id + "-skipped"}
+              coordinates={pts}
+              strokeColor="#555"
+              strokeWidth={3}
+              lineDashPattern={[4, 8]}
+              tappable
+              onPress={() => { plannerActions.selectSection(t.id); plannerActions.setStep(3); }}
+            />
+          );
+        })}
+        {/* Start pin */}
+        {state.from && (
+          <Marker coordinate={{ latitude: state.from.lat, longitude: state.from.lon }} pinColor={colors.light.success} />
+        )}
+      </MapView>
 
-  async function onSave() {
-    if (!from || !to || !routeName.trim()) {
-      Alert.alert("Missing info", "Set both endpoints and give the route a name.");
-      return;
-    }
-    try {
-      // SaveRouteRequest only carries `name + trailIds + waypoints` per the
-      // spec — the A/B endpoints are encoded as the first/last waypoints
-      // so the route round-trips cleanly. The geocoded labels stay local
-      // (matches the web's "LOCAL-ONLY" planner endpoints rule).
-      await createRoute.mutateAsync({
-        data: {
-          name: routeName.trim(),
-          trailIds: selected,
-          // Persist start + intermediate stops + end as the waypoint array.
-          // The Phase-A schema only carries lat/lon/label — `kind` lives
-          // in the planner_state row; we keep it locally for the map
-          // marker badges.
-          waypoints: [
-            { id: "from", lat: from.lat, lon: from.lon, label: from.label },
-            ...waypoints.map((w) => ({
-              id: w.id,
-              lat: w.lat,
-              lon: w.lng,
-              label: w.name,
-            })),
-            { id: "to", lat: to.lat, lon: to.lon, label: to.label },
-          ],
-        },
-      });
-      Alert.alert("Saved", `Route "${routeName.trim()}" saved.`);
-      setRouteName("");
-      setSelected([]);
-      setWaypoints([]);
-    } catch (err) {
-      Alert.alert(
-        "Save failed",
-        err instanceof Error ? err.message : "Unknown error",
-      );
-    }
-  }
+      {/* Section editor sheet */}
+      {(state.step === 3 && selectedTrail) && (
+        <SectionEditorSheet
+          trail={selectedTrail}
+          isSkipped={skippedSet.has(selectedTrail.id)}
+          onClose={() => { plannerActions.selectSection(null); plannerActions.setStep(2); }}
+        />
+      )}
+
+      {/* Summary + controls */}
+      {state.step === 2 && (
+        <Animated.View
+          style={[s2.summarySheet, {
+            transform: [{ translateY: sheetAnim.interpolate({ inputRange: [0, 1], outputRange: [200, 0] }) }],
+          }]}
+        >
+          {/* Summary bar */}
+          <View style={s2.summaryBar}>
+            <SumStat value={`${totalKm.toFixed(1)}km`} label="Distance" />
+            <View style={s2.divider} />
+            <SumStat value={estimatedMin >= 60 ? `${Math.floor(estimatedMin/60)}h${estimatedMin%60}m` : `${estimatedMin}m`} label="Time" />
+            <View style={s2.divider} />
+            <SumStat value={`${minGrade}-${maxGrade}`} label="Grades" />
+            <View style={s2.divider} />
+            <SumStat value={avgStars ? `★${avgStars}` : "—"} label="Rating" amber />
+          </View>
+
+          {/* Adjustment toolbar */}
+          <View style={s2.adjRow}>
+            {ADJUSTMENTS.map(a => (
+              <TouchableOpacity
+                key={a.mode}
+                style={s2.adjBtn}
+                onPress={() => void handleAdjust(a.mode)}
+                disabled={adjusting !== null}
+              >
+                {adjusting === a.mode
+                  ? <ActivityIndicator size="small" color={AMBER} />
+                  : <Text style={s2.adjIcon}>{a.icon}</Text>
+                }
+                <Text style={s2.adjLabel}>{a.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* Edit link */}
+          <View style={s2.bottomLinks}>
+            <TouchableOpacity onPress={() => { plannerActions.selectSection(null); plannerActions.setStep(3); }}>
+              <Text style={s2.link}>Edit sections →</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => plannerActions.setStep(4)} style={s2.goBtn}>
+              <Text style={s2.goBtnText}>SAVE & GO ›</Text>
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
+      )}
+    </View>
+  );
+}
+
+function SumStat({ value, label, amber }: { value: string; label: string; amber?: boolean }) {
+  return (
+    <View style={{ alignItems: "center", flex: 1 }}>
+      <Text style={{ color: amber ? AMBER : "#fff", fontSize: 20, fontWeight: "800" }}>{value}</Text>
+      <Text style={{ color: colors.light.mutedForeground, fontSize: 11 }}>{label}</Text>
+    </View>
+  );
+}
+
+function SectionEditorSheet({
+  trail, isSkipped, onClose,
+}: { trail: MapTrail; isSkipped: boolean; onClose: () => void }) {
+  const grade = parseInt(String(trail.difficulty ?? "5"), 10);
+  const avgStars = (trail as unknown as { avg_stars?: number }).avg_stars;
+  const slideAnim = useRef(new Animated.Value(300)).current;
+
+  useEffect(() => {
+    Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, tension: 60, friction: 10 }).start();
+  }, []);
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
-      keyboardShouldPersistTaps="handled"
-    >
-      <Text style={styles.h1}>Plan a ride</Text>
-      <Text style={styles.sub}>
-        Pick a start and end. We'll suggest singletrack along the way.
-      </Text>
+    <Animated.View style={[s2.sectionSheet, { transform: [{ translateY: slideAnim }] }]}>
+      {/* Handle */}
+      <View style={{ width: 40, height: 4, backgroundColor: AMBER, borderRadius: 2, alignSelf: "center", marginBottom: 16 }} />
 
-      <EndpointPicker
-        label="From"
-        value={from}
-        onChange={setFrom}
-        placeholder="Search a starting point…"
-      />
-      <EndpointPicker
-        label="To"
-        value={to}
-        onChange={setTo}
-        placeholder="Search a destination…"
-      />
-
-      {/* ── Filters ─────────────────────────────────────────────────── */}
-      <View style={styles.filterSection}>
-        <Text style={styles.sectionLabel}>Max difficulty</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <View style={styles.filterRow}>
-            {(["all","easy","intermediate","hard","extreme"] as GradeFilter[]).map((f) => (
-              <TouchableOpacity
-                key={f}
-                onPress={() => setGradeFilter(f)}
-                style={[styles.filterChip, gradeFilter === f && styles.filterChipActive]}
-              >
-                <Text style={[styles.filterChipText, gradeFilter === f && styles.filterChipTextActive]}>
-                  {f === "all" ? "All grades" : f === "easy" ? "Easy 1-3" : f === "intermediate" ? "Inter 4-6" : f === "hard" ? "Hard 7-9" : "Extreme 10"}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </ScrollView>
-        <Text style={[styles.sectionLabel, { marginTop: 8 }]}>Bike type</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <View style={styles.filterRow}>
-            {(["all","adventure","trail","enduro"] as BikeType[]).map((b) => (
-              <TouchableOpacity
-                key={b}
-                onPress={() => setBikeFilter(b)}
-                style={[styles.filterChip, bikeFilter === b && styles.filterChipActive]}
-              >
-                <Text style={[styles.filterChipText, bikeFilter === b && styles.filterChipTextActive]}>
-                  {b === "all" ? "All bikes" : b.charAt(0).toUpperCase() + b.slice(1)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </ScrollView>
-      </View>
-
-      {from && to ? (
-        <>
-          <View style={styles.previewBlock}>
-            <Text style={styles.sectionLabel}>Corridor preview</Text>
-            <CorridorMap
-              from={from}
-              to={to}
-              trails={previewTrails}
-              waypoints={waypoints}
-            />
-          </View>
-          {selected.length > 0 ? (
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryTitle}>Route summary</Text>
-              <View style={styles.summaryRow}>
-                <SummaryStat label="Trail distance" value={`${totalTrailKm.toFixed(1)} km`} />
-                <SummaryStat label="Trails selected" value={String(selected.length)} />
-                <SummaryStat label="Est. ride time" value={estimatedTimeMin >= 60 ? `${Math.floor(estimatedTimeMin/60)}h ${estimatedTimeMin%60}m` : `${estimatedTimeMin}m`} />
-              </View>
-            </View>
-          ) : null}
-          <WaypointsSection
-            waypoints={waypoints}
-            onAdd={(wp) => setWaypoints((prev) => [...prev, wp])}
-            onRemove={(id) =>
-              setWaypoints((prev) => prev.filter((w) => w.id !== id))
-            }
-          />
-        </>
-      ) : null}
-
-      <View style={styles.suggestionsHeader}>
-        <Text style={styles.sectionTitle}>Suggested trails</Text>
-        {suggestionsMut.isPending ? (
-          <ActivityIndicator color={colors.light.primary} />
-        ) : (
-          <Text style={styles.sectionMeta}>
-            {suggestions.length} match{suggestions.length === 1 ? "" : "es"}
-          </Text>
+      {/* Trail info */}
+      <Text style={s2.sectionName}>{trail.name}</Text>
+      <View style={{ flexDirection: "row", gap: 10, marginBottom: 20 }}>
+        <View style={[s2.gradePill, { backgroundColor: gradeColour(grade) }]}>
+          <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>Grade {isNaN(grade) ? "?" : grade}</Text>
+        </View>
+        {trail.distance_km && (
+          <View style={s2.statPill}><Text style={s2.statPillText}>{trail.distance_km.toFixed(1)}km</Text></View>
+        )}
+        {avgStars && (
+          <View style={s2.statPill}><Text style={[s2.statPillText, { color: AMBER }]}>★ {avgStars}</Text></View>
         )}
       </View>
 
-      {!from || !to ? (
-        <EmptyState
-          icon="navigation"
-          title="Set two endpoints"
-          body="Type a city or address into both From and To to see suggestions."
-        />
-      ) : suggestions.length === 0 && !suggestionsMut.isPending ? (
-        <EmptyState
-          icon="map"
-          title="No trails along this corridor yet"
-          body="Try widening your route or check back as the catalog grows."
-        />
+      {/* Actions */}
+      {isSkipped ? (
+        <TouchableOpacity
+          style={[s2.sectionBtn, { backgroundColor: colors.light.success }]}
+          onPress={() => { plannerActions.restoreSection(trail.id); onClose(); }}
+        >
+          <Feather name="plus" size={22} color="#fff" />
+          <Text style={s2.sectionBtnText}>ADD BACK TO ROUTE</Text>
+        </TouchableOpacity>
       ) : (
-        suggestions.map((s) => (
-          <SuggestionRow
-            key={s.trailId}
-            suggestion={s}
-            selected={selected.includes(s.trailId)}
-            onToggle={() => toggle(s.trailId)}
-          />
-        ))
+        <>
+          <TouchableOpacity
+            style={[s2.sectionBtn, { backgroundColor: colors.light.success }]}
+            onPress={onClose}
+          >
+            <Feather name="check" size={22} color="#fff" />
+            <Text style={s2.sectionBtnText}>KEEP THIS SECTION</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[s2.sectionBtn, { backgroundColor: colors.light.destructive, marginTop: 12 }]}
+            onPress={() => { plannerActions.skipSection(trail.id); onClose(); }}
+          >
+            <Feather name="x" size={22} color="#fff" />
+            <Text style={s2.sectionBtnText}>SKIP THIS SECTION</Text>
+          </TouchableOpacity>
+        </>
       )}
 
-      {from && to ? (
-        <>
-          {/* Navigate button — prominent CTA above name/save row */}
-          <TouchableOpacity
-            style={styles.navigateBtn}
-            onPress={() => {
-              // Build NavTrailInput array from currently selected + loaded preview trails.
-              const selectedTrails = previewTrails
-                .filter((t) => selected.includes(t.id))
-                .map((t) => ({
-                  id: t.id,
-                  name: t.name,
-                  difficulty: t.difficulty ?? null,
-                  distance_km: t.distance_km ?? null,
-                  path: t.path,
-                }));
-              setActiveNavRoute({
-                from: { latitude: from.lat, longitude: from.lon, label: from.label },
-                to: { latitude: to.lat, longitude: to.lon, label: to.label },
-                trails: selectedTrails,
-              });
-              // /navigate is not yet in the generated expo-router type map — use
-              // a double cast until `npx expo start` regenerates .expo/types/router.d.ts
-              router.push({ pathname: "/navigate" } as unknown as Parameters<typeof router.push>[0]);
-            }}
-          >
-            <Feather name="navigation" size={20} color={colors.light.primaryForeground} />
-            <Text style={styles.navigateBtnText}>
-              Navigate{selected.length > 0 ? ` (${selected.length} trail${selected.length === 1 ? "" : "s"})` : ""}
-            </Text>
-          </TouchableOpacity>
-
-          <View style={styles.saveRow}>
-            <TextInput
-              value={routeName}
-              onChangeText={setRouteName}
-              placeholder="Name this route"
-              placeholderTextColor={colors.light.mutedForeground}
-              style={styles.routeNameInput}
-            />
-            <TouchableOpacity
-              onPress={onSave}
-              disabled={createRoute.isPending}
-              style={[
-                styles.saveBtn,
-                createRoute.isPending && { opacity: 0.6 },
-              ]}
-            >
-              {createRoute.isPending ? (
-                <ActivityIndicator color={colors.light.primaryForeground} />
-              ) : (
-                <Text style={styles.saveBtnText}>Save</Text>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={onExportGpx}
-              disabled={exporting}
-              style={[styles.gpxBtn, exporting && { opacity: 0.6 }]}
-            >
-              {exporting ? (
-                <ActivityIndicator color={colors.light.foreground} />
-              ) : (
-                <>
-                  <Feather
-                    name="download"
-                    size={16}
-                    color={colors.light.foreground}
-                  />
-                  <Text style={styles.gpxBtnText}>GPX</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        </>
-      ) : null}
-    </ScrollView>
+      <TouchableOpacity onPress={onClose} style={{ alignSelf: "center", marginTop: 16 }}>
+        <Text style={{ color: colors.light.mutedForeground, fontSize: 14 }}>Cancel</Text>
+      </TouchableOpacity>
+    </Animated.View>
   );
 }
 
-function CorridorMap({
-  from,
-  to,
-  trails,
-  waypoints,
-}: {
-  from: Endpoint;
-  to: Endpoint;
-  trails: MapTrail[];
-  waypoints: Array<{
-    id: string;
-    lat: number;
-    lng: number;
-    name: string;
-    kind: "fuel" | "campsite" | "custom";
-  }>;
-}) {
-  // Frame the bbox around both endpoints with a small padding ratio so
-  // the markers sit comfortably inside the visible region.
-  const region = useMemo<Region>(() => {
-    const lat = (from.lat + to.lat) / 2;
-    const lon = (from.lon + to.lon) / 2;
-    const latDelta = Math.max(0.05, Math.abs(from.lat - to.lat) * 1.6);
-    const lonDelta = Math.max(0.05, Math.abs(from.lon - to.lon) * 1.6);
-    return { latitude: lat, longitude: lon, latitudeDelta: latDelta, longitudeDelta: lonDelta };
-  }, [from, to]);
+const ADJUSTMENTS = [
+  { mode: "more_trails" as const, icon: "🏍️", label: "More trails" },
+  { mode: "less_trails" as const, icon: "🛣️",  label: "Less trails" },
+  { mode: "harder"      as const, icon: "⬆️",  label: "Harder" },
+  { mode: "easier"      as const, icon: "⬇️",  label: "Easier" },
+];
 
-  const polylines = useMemo(() => {
-    const out: Array<{
-      key: string;
-      coords: Array<{ latitude: number; longitude: number }>;
-      color: string;
-    }> = [];
-    for (const t of trails) {
-      if (!Array.isArray(t.path)) continue;
-      const coords: Array<{ latitude: number; longitude: number }> = [];
-      for (const p of t.path) {
-        if (Array.isArray(p) && p.length >= 2) {
-          const [lon, lat] = p as [unknown, unknown];
-          if (typeof lat === "number" && typeof lon === "number") {
-            coords.push({ latitude: lat, longitude: lon });
-          }
-        }
-      }
-      if (coords.length >= 2) {
-        out.push({
-          key: t.id,
-          coords,
-          color: difficultyColor(t.difficulty),
-        });
+function polylineFromPath(path: unknown): Array<{ latitude: number; longitude: number }> {
+  if (!Array.isArray(path)) return [];
+  const pts: Array<{ latitude: number; longitude: number }> = [];
+  for (const p of path) {
+    if (Array.isArray(p) && p.length >= 2) {
+      const [lon, lat] = p as [unknown, unknown];
+      if (typeof lon === "number" && typeof lat === "number") {
+        pts.push({ latitude: lat, longitude: lon });
       }
     }
-    return out;
-  }, [trails]);
-
-  return (
-    <View style={styles.mapWrap}>
-      <MapView
-        style={styles.map}
-        provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
-        initialRegion={region}
-        region={region}
-        showsUserLocation={false}
-        toolbarEnabled={false}
-      >
-        <Marker
-          coordinate={{ latitude: from.lat, longitude: from.lon }}
-          title="From"
-          pinColor="green"
-        />
-        <Marker
-          coordinate={{ latitude: to.lat, longitude: to.lon }}
-          title="To"
-          pinColor="red"
-        />
-        {waypoints.map((w) => (
-          <Marker
-            key={w.id}
-            coordinate={{ latitude: w.lat, longitude: w.lng }}
-            title={w.name}
-            description={w.kind}
-            pinColor={
-              w.kind === "fuel"
-                ? "orange"
-                : w.kind === "campsite"
-                  ? "purple"
-                  : "blue"
-            }
-          />
-        ))}
-        {polylines.map((p) => (
-          <Polyline
-            key={p.key}
-            coordinates={p.coords}
-            strokeColor={p.color}
-            strokeWidth={3}
-          />
-        ))}
-      </MapView>
-    </View>
-  );
+  }
+  return pts;
 }
 
-function EndpointPicker({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: Endpoint | null;
-  onChange: (next: Endpoint | null) => void;
-  placeholder: string;
-}) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<NominatimResult[]>([]);
-  const [loading, setLoading] = useState(false);
+const s2 = StyleSheet.create({
+  backBtn: {
+    position: "absolute", top: 52, left: 16, zIndex: 50,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: CARD + "E0", alignItems: "center", justifyContent: "center",
+  },
+  summarySheet: {
+    backgroundColor: CARD, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 20, paddingHorizontal: 16, paddingBottom: 28,
+    shadowColor: "#000", shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.4, shadowRadius: 12, elevation: 20,
+  },
+  summaryBar: {
+    flexDirection: "row", alignItems: "center",
+    paddingVertical: 6, marginBottom: 16,
+  },
+  divider: { width: 1, height: 32, backgroundColor: colors.light.border },
+  adjRow:  { flexDirection: "row", gap: 8, marginBottom: 14 },
+  adjBtn:  {
+    flex: 1, alignItems: "center", justifyContent: "center",
+    backgroundColor: colors.light.cardElevated, borderRadius: 12,
+    height: 64, gap: 4,
+  },
+  adjIcon:   { fontSize: 22 },
+  adjLabel:  { color: colors.light.mutedForeground, fontSize: 11, fontWeight: "600" },
+  bottomLinks: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  link:        { color: AMBER, fontSize: 14, fontWeight: "600" },
+  goBtn:       { backgroundColor: AMBER, borderRadius: 12, paddingHorizontal: 20, paddingVertical: 12 },
+  goBtnText:   { color: "#000", fontWeight: "900", fontSize: 15 },
 
-  useEffect(() => {
-    if (!query || value) return;
-    setLoading(true);
-    const handle = setTimeout(async () => {
-      const r = await geocode(query);
-      setResults(r);
-      setLoading(false);
-    }, 350);
-    return () => clearTimeout(handle);
-  }, [query, value]);
+  sectionSheet: {
+    position: "absolute", bottom: 0, left: 0, right: 0,
+    backgroundColor: CARD, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: 24, paddingBottom: 40,
+    shadowColor: "#000", shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.5, shadowRadius: 16, elevation: 30,
+  },
+  sectionName: { color: "#fff", fontSize: 22, fontWeight: "800", marginBottom: 12 },
+  gradePill:   { borderRadius: 8, paddingHorizontal: 12, paddingVertical: 5 },
+  statPill:    { backgroundColor: colors.light.cardElevated, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 5 },
+  statPillText:{ color: "#fff", fontWeight: "700", fontSize: 13 },
+  sectionBtn:  {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    height: 72, borderRadius: 14, gap: 12,
+  },
+  sectionBtnText: { color: "#fff", fontSize: 18, fontWeight: "900" },
+});
 
-  if (value) {
-    return (
-      <View style={styles.endpointBlock}>
-        <Text style={styles.endpointLabel}>{label}</Text>
-        <View style={styles.endpointPill}>
-          <Text style={styles.endpointPillText} numberOfLines={2}>
-            {value.label}
-          </Text>
-          <Pressable
-            onPress={() => {
-              onChange(null);
-              setQuery("");
-            }}
-            hitSlop={8}
-          >
-            <Feather name="x" size={16} color={colors.light.mutedForeground} />
-          </Pressable>
-        </View>
-      </View>
-    );
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 4 — Save and Go
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Step4SaveAndGo() {
+  const state = usePlannerStore();
+  const [routeName, setRouteName] = useState(() => {
+    if (state.savedRouteName) return state.savedRouteName;
+    if (state.from) {
+      const total = state.trailDetails.reduce((s, t) => s + (t.distance_km ?? 0), 0);
+      return `${state.from.address.split(",")[0].trim()} Loop — ${Math.round(total)}km`;
+    }
+    return "My Route";
+  });
+  const [privacy, setPrivacy] = useState<"private" | "groups" | "public">("private");
+  const [deviceModal, setDeviceModal] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [saving, setSaving] = useState(false);
+
+  const visibleTrails = state.trailDetails.filter(t => !state.skippedIds.includes(t.id));
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      // Use existing saved route API
+      const { useCreateMySavedRoute } = await import("@workspace/api-client-react");
+      // Direct API call since we're not in a component that has the hook
+      const { apiJson } = await import("@/lib/api");
+      await apiJson("/api/me/saved-routes", {
+        method: "POST",
+        body: JSON.stringify({
+          name: routeName,
+          trailIds: visibleTrails.map(t => t.id),
+          waypoints: state.from
+            ? [{ id: "from", lat: state.from.lat, lon: state.from.lon, label: state.from.address }]
+            : [],
+        }),
+      });
+      plannerActions.setSavedRouteName(routeName);
+      Alert.alert("Saved! ✓", `"${routeName}" saved to your routes.`);
+    } catch (e) {
+      Alert.alert("Save failed", e instanceof Error ? e.message : "Unknown error");
+    } finally { setSaving(false); }
   }
 
+  async function handleExportGpx(device: GpxDevice) {
+    setDeviceModal(false);
+    setExporting(true);
+    try {
+      const gpxInput = trailsToGpxInput(routeName, visibleTrails);
+      await exportGpxFile(gpxInput, device);
+    } catch (e) {
+      Alert.alert("Export failed", e instanceof Error ? e.message : "Unknown error");
+    } finally { setExporting(false); }
+  }
+
+  async function handleOfflineDownload() {
+    if (!state.from) return;
+    setDownloading(true);
+    try {
+      const { cacheTiles } = await import("@/lib/offlineStore");
+      const { apiJson } = await import("@/lib/api");
+      const ids = visibleTrails.map(t => t.id).join(",");
+      if (ids) await apiJson(`/api/trails/search?ids=${ids}&limit=50`);
+      // Download tile cache around route bbox
+      const lats = visibleTrails.flatMap(t => {
+        const r = t as unknown as { bbox_min_lat?: number; bbox_max_lat?: number };
+        return [r.bbox_min_lat ?? state.from!.lat, r.bbox_max_lat ?? state.from!.lat];
+      });
+      const lons = visibleTrails.flatMap(t => {
+        const r = t as unknown as { bbox_min_lng?: number; bbox_max_lng?: number };
+        return [r.bbox_min_lng ?? state.from!.lon, r.bbox_max_lng ?? state.from!.lon];
+      });
+      const bbox = {
+        minLat: Math.min(...lats) - 0.05,
+        maxLat: Math.max(...lats) + 0.05,
+        minLon: Math.min(...lons) - 0.05,
+        maxLon: Math.max(...lons) + 0.05,
+      };
+      await cacheTiles(bbox, p => {
+        const pct = p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : 0;
+        setDownloadProgress(pct);
+      });
+      Alert.alert("Downloaded ✓", "Route ready for offline use.");
+    } catch (e) {
+      Alert.alert("Download failed", e instanceof Error ? e.message : "Unknown error");
+    } finally { setDownloading(false); setDownloadProgress(0); }
+  }
+
+  function handleGo() {
+    if (!state.from) return;
+    setActiveNavRoute({
+      trails: visibleTrails.map(t => ({
+        id: t.id,
+        name: t.name,
+        difficulty: String(t.difficulty ?? "5"),
+        distance_km: t.distance_km ?? null,
+        path: t.path,
+      })),
+      from: { latitude: state.from.lat, longitude: state.from.lon, label: state.from.address },
+      to: state.to
+        ? { latitude: state.to.lat, longitude: state.to.lon, label: state.to.address }
+        : { latitude: state.from.lat, longitude: state.from.lon, label: state.from.address },
+    });
+    router.push("/navigate");
+  }
+
+  const totalKm = visibleTrails.reduce((s, t) => s + (t.distance_km ?? 0), 0);
+
   return (
-    <View style={styles.endpointBlock}>
-      <Text style={styles.endpointLabel}>{label}</Text>
-      <TextInput
-        value={query}
-        onChangeText={setQuery}
-        placeholder={placeholder}
-        placeholderTextColor={colors.light.mutedForeground}
-        style={styles.input}
-      />
-      {loading ? (
-        <ActivityIndicator
-          color={colors.light.primary}
-          style={{ marginTop: 6 }}
+    <SafeAreaView style={{ flex: 1, backgroundColor: BG }}>
+      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 100 }}>
+        {/* Back */}
+        <TouchableOpacity onPress={() => plannerActions.setStep(2)} style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 24 }}>
+          <Feather name="arrow-left" size={20} color={AMBER} />
+          <Text style={{ color: AMBER, fontSize: 15, fontWeight: "600" }}>Back to route</Text>
+        </TouchableOpacity>
+
+        <Text style={{ color: "#fff", fontSize: 26, fontWeight: "900", letterSpacing: -1, marginBottom: 6 }}>SAVE & GO</Text>
+        <View style={{ width: 48, height: 3, backgroundColor: AMBER, borderRadius: 2, marginBottom: 28 }} />
+
+        {/* Route name */}
+        <Text style={s4.label}>ROUTE NAME</Text>
+        <TextInput
+          value={routeName}
+          onChangeText={v => { setRouteName(v); plannerActions.setSavedRouteName(v); }}
+          style={s4.nameInput}
+          placeholderTextColor={colors.light.mutedForeground}
         />
-      ) : null}
-      {results.length > 0 ? (
-        <View style={styles.resultsList}>
-          {results.map((r) => (
+
+        {/* Stats */}
+        <View style={s4.statsRow}>
+          <View style={s4.statCard}><Text style={s4.statValue}>{totalKm.toFixed(1)}</Text><Text style={s4.statLabel}>km</Text></View>
+          <View style={s4.statCard}><Text style={s4.statValue}>{visibleTrails.length}</Text><Text style={s4.statLabel}>sections</Text></View>
+          <View style={s4.statCard}><Text style={s4.statValue}>{state.skippedIds.length}</Text><Text style={s4.statLabel}>skipped</Text></View>
+        </View>
+
+        {/* Privacy */}
+        <Text style={[s4.label, { marginTop: 20 }]}>VISIBILITY</Text>
+        <View style={s4.privacyRow}>
+          {PRIVACY_OPTS.map(p => (
             <TouchableOpacity
-              key={r.place_id}
-              onPress={() => {
-                onChange({
-                  label: r.display_name,
-                  lat: parseFloat(r.lat),
-                  lon: parseFloat(r.lon),
-                });
-                setResults([]);
-                setQuery("");
-              }}
-              style={styles.resultRow}
+              key={p.id}
+              onPress={() => setPrivacy(p.id)}
+              style={[s4.privChip, privacy === p.id && s4.privChipActive]}
             >
-              <Feather name="map-pin" size={14} color={colors.light.primary} />
-              <Text style={styles.resultText} numberOfLines={2}>
-                {r.display_name}
-              </Text>
+              <Text style={s4.privIcon}>{p.icon}</Text>
+              <Text style={[s4.privLabel, privacy === p.id && { color: "#000" }]}>{p.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
-      ) : null}
-    </View>
-  );
-}
 
-/**
- * Lets the rider add intermediate stops (fuel / campsite / custom) to a
- * planned route between A and B. Stops are geocoded via Nominatim and
- * categorised by `kind` so the corridor map can pin them in distinct
- * colours. The list ordering matches the order the rider will traverse
- * them.
- */
-function WaypointsSection({
-  waypoints,
-  onAdd,
-  onRemove,
-}: {
-  waypoints: Array<{
-    id: string;
-    lat: number;
-    lng: number;
-    name: string;
-    kind: "fuel" | "campsite" | "custom";
-  }>;
-  onAdd: (wp: {
-    id: string;
-    lat: number;
-    lng: number;
-    name: string;
-    kind: "fuel" | "campsite" | "custom";
-  }) => void;
-  onRemove: (id: string) => void;
-}) {
-  const [adding, setAdding] = useState(false);
-  const [kind, setKind] = useState<"fuel" | "campsite" | "custom">("custom");
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<NominatimResult[]>([]);
-  const [loading, setLoading] = useState(false);
+        {/* Action buttons */}
+        <TouchableOpacity style={s4.goBtn} onPress={handleGo}>
+          <Feather name="navigation" size={22} color="#000" />
+          <Text style={s4.goBtnText}>🧭  START NAVIGATING</Text>
+        </TouchableOpacity>
 
-  useEffect(() => {
-    if (!adding || !query) return;
-    setLoading(true);
-    const handle = setTimeout(() => {
-      geocode(query)
-        .then(setResults)
-        .catch(() => setResults([]))
-        .finally(() => setLoading(false));
-    }, 350);
-    return () => clearTimeout(handle);
-  }, [adding, query]);
-
-  return (
-    <View style={styles.waypointsBlock}>
-      <View style={styles.waypointsHeader}>
-        <Text style={styles.sectionLabel}>
-          Stops along the way ({waypoints.length})
-        </Text>
-        {!adding ? (
-          <TouchableOpacity
-            onPress={() => setAdding(true)}
-            style={styles.addStopBtn}
-          >
-            <Feather name="plus" size={14} color={colors.light.primary} />
-            <Text style={styles.addStopBtnText}>Add stop</Text>
-          </TouchableOpacity>
-        ) : null}
-      </View>
-      {waypoints.map((w, i) => (
-        <View key={w.id} style={styles.waypointRow}>
-          <View style={styles.waypointKindDot}>
-            <Feather
-              name={
-                w.kind === "fuel"
-                  ? "droplet"
-                  : w.kind === "campsite"
-                    ? "moon"
-                    : "map-pin"
-              }
-              size={14}
-              color={colors.light.primary}
-            />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.waypointName} numberOfLines={1}>
-              {i + 1}. {w.name}
-            </Text>
-            <Text style={styles.waypointMeta}>{w.kind}</Text>
-          </View>
-          <Pressable onPress={() => onRemove(w.id)} hitSlop={8}>
-            <Feather name="x" size={16} color={colors.light.mutedForeground} />
-          </Pressable>
-        </View>
-      ))}
-      {adding ? (
-        <View style={styles.addStopForm}>
-          <View style={styles.kindRow}>
-            {(["custom", "fuel", "campsite"] as const).map((k) => (
-              <TouchableOpacity
-                key={k}
-                onPress={() => setKind(k)}
-                style={[
-                  styles.kindChip,
-                  kind === k && styles.kindChipActive,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.kindChipText,
-                    kind === k && styles.kindChipTextActive,
-                  ]}
-                >
-                  {k}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TextInput
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search a place…"
-            placeholderTextColor={colors.light.mutedForeground}
-            style={styles.input}
+        <View style={s4.actionsRow}>
+          <ActionCard icon="💾" label="Save" loading={saving} onPress={() => void handleSave()} />
+          <ActionCard
+            icon="📥"
+            label="Offline"
+            loading={downloading}
+            progress={downloadProgress}
+            onPress={() => void handleOfflineDownload()}
           />
-          {loading ? (
-            <ActivityIndicator
-              color={colors.light.primary}
-              style={{ marginTop: 6 }}
-            />
-          ) : null}
-          {results.length > 0 ? (
-            <View style={styles.resultsList}>
-              {results.slice(0, 5).map((r) => (
-                <TouchableOpacity
-                  key={r.place_id}
-                  onPress={() => {
-                    onAdd({
-                      id: `wp-${Date.now()}`,
-                      lat: parseFloat(r.lat),
-                      lng: parseFloat(r.lon),
-                      name: r.display_name.split(",")[0] ?? "Stop",
-                      kind,
-                    });
-                    setAdding(false);
-                    setQuery("");
-                    setResults([]);
-                  }}
-                  style={styles.resultRow}
-                >
-                  <Feather
-                    name="map-pin"
-                    size={14}
-                    color={colors.light.primary}
-                  />
-                  <Text style={styles.resultText} numberOfLines={2}>
-                    {r.display_name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ) : null}
-          <TouchableOpacity
-            onPress={() => {
-              setAdding(false);
-              setQuery("");
-              setResults([]);
-            }}
-            style={styles.cancelStopBtn}
-          >
-            <Text style={styles.cancelStopBtnText}>Cancel</Text>
-          </TouchableOpacity>
+          <ActionCard icon="📤" label="Export" loading={exporting} onPress={() => setDeviceModal(true)} />
         </View>
-      ) : null}
-    </View>
+
+        {/* New route */}
+        <TouchableOpacity
+          style={{ alignSelf: "center", marginTop: 24 }}
+          onPress={() => { plannerActions.reset(); plannerActions.setStep(1); }}
+        >
+          <Text style={{ color: colors.light.mutedForeground, fontSize: 14 }}>+ Plan a new route</Text>
+        </TouchableOpacity>
+      </ScrollView>
+
+      {/* Device selector modal */}
+      <Modal visible={deviceModal} transparent animationType="slide" onRequestClose={() => setDeviceModal(false)}>
+        <TouchableOpacity style={{ flex: 1, backgroundColor: "#000A" }} onPress={() => setDeviceModal(false)} />
+        <View style={s4.deviceSheet}>
+          <Text style={s4.deviceTitle}>EXPORT TO DEVICE</Text>
+          {GPX_DEVICES.map(d => (
+            <TouchableOpacity key={d.id} style={s4.deviceRow} onPress={() => void handleExportGpx(d.id)}>
+              <Text style={s4.deviceIcon}>{d.icon}</Text>
+              <View>
+                <Text style={s4.deviceName}>{d.label}</Text>
+                <Text style={s4.deviceDesc}>{d.desc}</Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </Modal>
+    </SafeAreaView>
   );
 }
 
-function SuggestionRow({
-  suggestion,
-  selected,
-  onToggle,
-}: {
-  suggestion: PlannerSuggestion;
-  selected: boolean;
-  onToggle: () => void;
+const PRIVACY_OPTS = [
+  { id: "private" as const, icon: "🔒", label: "Just me" },
+  { id: "groups"  as const, icon: "👥", label: "My groups" },
+  { id: "public"  as const, icon: "🌍", label: "Community" },
+];
+
+const GPX_DEVICES = [
+  { id: "garminEdge"   as GpxDevice, icon: "🟣", label: "Garmin Edge",    desc: "Full elevation + course points" },
+  { id: "garminInreach"as GpxDevice, icon: "🛰️",  label: "Garmin inReach", desc: "Simplified, max 500 pts/track" },
+  { id: "wahoo"        as GpxDevice, icon: "🔵", label: "Wahoo",          desc: "Named segments, compatible" },
+  { id: "generic"      as GpxDevice, icon: "📄", label: "Generic GPX",    desc: "Standard GPX 1.1, all data" },
+];
+
+function ActionCard({ icon, label, loading, progress, onPress }: {
+  icon: string; label: string; loading?: boolean;
+  progress?: number; onPress: () => void;
 }) {
   return (
-    <TouchableOpacity
-      onPress={onToggle}
-      style={[styles.suggestion, selected && styles.suggestionSelected]}
-    >
-      <Feather
-        name={selected ? "check-circle" : "circle"}
-        size={20}
-        color={selected ? colors.light.primary : colors.light.mutedForeground}
-      />
-      <View style={{ flex: 1 }}>
-        <Text style={styles.suggestionName} numberOfLines={1}>
-          {suggestion.name}
-        </Text>
-        <Text style={styles.suggestionMeta}>
-          {suggestion.distance_km != null
-            ? `${suggestion.distance_km.toFixed(1)} km`
-            : "—"}
-          {"  •  "}
-          {suggestion.difficulty ?? "Unknown"}
-          {"  •  "}+{Math.round(suggestion.detourMeters)} m detour
-        </Text>
-      </View>
+    <TouchableOpacity style={s4.actionCard} onPress={onPress} disabled={loading}>
+      {loading
+        ? progress != null && progress > 0
+          ? <Text style={s4.actionProgress}>{Math.round(progress)}%</Text>
+          : <ActivityIndicator color={AMBER} />
+        : <Text style={s4.actionIcon}>{icon}</Text>
+      }
+      <Text style={s4.actionLabel}>{label}</Text>
     </TouchableOpacity>
   );
 }
 
-function SummaryStat({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.summaryStat}>
-      <Text style={styles.summaryStatValue}>{value}</Text>
-      <Text style={styles.summaryStatLabel}>{label}</Text>
-    </View>
-  );
-}
-
-function EmptyState({
-  icon,
-  title,
-  body,
-}: {
-  icon: keyof typeof Feather.glyphMap;
-  title: string;
-  body: string;
-}) {
-  return (
-    <View style={styles.empty}>
-      <Feather name={icon} size={28} color={colors.light.mutedForeground} />
-      <Text style={styles.emptyTitle}>{title}</Text>
-      <Text style={styles.emptyBody}>{body}</Text>
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.light.background },
-  h1: { color: colors.light.foreground, fontSize: 22, fontWeight: "800" },
-  sub: { color: colors.light.mutedForeground, marginTop: 4, marginBottom: 18 },
-  endpointBlock: { marginBottom: 14 },
-  endpointLabel: {
-    color: colors.light.mutedForeground,
-    fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginBottom: 6,
-  },
-  endpointPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.primary,
-    borderWidth: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-  },
-  endpointPillText: { color: colors.light.foreground, flex: 1, fontSize: 13 },
-  input: {
-    backgroundColor: colors.light.input,
-    color: colors.light.foreground,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    fontSize: 14,
-  },
-  resultsList: {
-    marginTop: 6,
-    backgroundColor: colors.light.card,
-    borderRadius: 10,
-    borderColor: colors.light.border,
-    borderWidth: 1,
-  },
-  resultRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.light.border,
-  },
-  resultText: { color: colors.light.foreground, flex: 1, fontSize: 13 },
-  suggestionsHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginTop: 10,
-    marginBottom: 8,
-  },
-  sectionTitle: { color: colors.light.foreground, fontWeight: "700" },
-  sectionMeta: { color: colors.light.mutedForeground, fontSize: 12 },
-  suggestion: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
-  },
-  suggestionSelected: { borderColor: colors.light.primary },
-  suggestionName: { color: colors.light.foreground, fontWeight: "600" },
-  suggestionMeta: {
-    color: colors.light.mutedForeground,
-    fontSize: 12,
-    marginTop: 2,
-  },
-  saveRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginTop: 14,
-  },
-  routeNameInput: {
-    flex: 1,
-    backgroundColor: colors.light.input,
-    color: colors.light.foreground,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    fontSize: 14,
-  },
-  navigateBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    backgroundColor: "#2D7D46",  // deep green — distinct from primary orange
-    paddingVertical: 16,
-    borderRadius: 14,
-    marginTop: 10,
-    marginBottom: 4,
-  },
-  navigateBtnText: {
-    color: "#fff",
-    fontWeight: "800",
-    fontSize: 16,
-  },
-  saveBtn: {
-    backgroundColor: colors.light.primary,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 10,
-  },
-  saveBtnText: { color: colors.light.primaryForeground, fontWeight: "700" },
-  gpxBtn: {
-    backgroundColor: colors.light.muted,
-    borderWidth: 1,
-    borderColor: colors.light.border,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderRadius: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  gpxBtnText: {
-    color: colors.light.foreground,
-    fontWeight: "700",
-    fontSize: 13,
-  },
-  empty: {
-    alignItems: "center",
-    paddingVertical: 32,
-    paddingHorizontal: 16,
-    gap: 6,
-  },
-  emptyTitle: {
-    color: colors.light.foreground,
-    fontWeight: "700",
-    marginTop: 6,
-  },
-  emptyBody: {
-    color: colors.light.mutedForeground,
-    fontSize: 12,
-    textAlign: "center",
-  },
-  previewBlock: { marginTop: 12, marginBottom: 6 },
-  waypointsBlock: { marginTop: 4, marginBottom: 8 },
-  waypointsHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 6,
-  },
-  addStopBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    borderWidth: 1,
-    borderColor: colors.light.primary,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  addStopBtnText: {
-    color: colors.light.primary,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  waypointRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.border,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 6,
-  },
-  waypointKindDot: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.light.muted,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  waypointName: {
-    color: colors.light.foreground,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  waypointMeta: {
-    color: colors.light.mutedForeground,
-    fontSize: 11,
-    marginTop: 1,
-  },
-  addStopForm: {
-    backgroundColor: colors.light.muted,
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 4,
-  },
-  kindRow: { flexDirection: "row", gap: 6, marginBottom: 8 },
-  kindChip: {
-    borderWidth: 1,
-    borderColor: colors.light.border,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    backgroundColor: colors.light.card,
-  },
-  kindChipActive: {
-    backgroundColor: colors.light.primary,
-    borderColor: colors.light.primary,
-  },
-  kindChipText: { color: colors.light.foreground, fontSize: 12 },
-  kindChipTextActive: { color: colors.light.primaryForeground },
-  cancelStopBtn: { alignSelf: "flex-end", marginTop: 8 },
-  cancelStopBtnText: { color: colors.light.mutedForeground, fontSize: 12 },
-  filterSection: { marginBottom: 12 },
-  filterRow: { flexDirection: "row", gap: 6, paddingBottom: 4 },
-  filterChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: colors.light.card,
-    borderWidth: 1,
-    borderColor: colors.light.border,
-  },
-  filterChipActive: {
-    backgroundColor: colors.light.primary,
-    borderColor: colors.light.primary,
-  },
-  filterChipText: { color: colors.light.foreground, fontSize: 11, fontWeight: "600" },
-  filterChipTextActive: { color: colors.light.primaryForeground },
-  summaryCard: {
-    backgroundColor: colors.light.card,
-    borderColor: colors.light.primary,
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 10,
-  },
-  summaryTitle: {
-    color: colors.light.primary,
-    fontWeight: "700",
-    fontSize: 12,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginBottom: 10,
-  },
-  summaryRow: { flexDirection: "row", gap: 8 },
-  summaryStat: { flex: 1, alignItems: "center" },
-  summaryStatValue: { color: colors.light.foreground, fontSize: 18, fontWeight: "800" },
-  summaryStatLabel: { color: colors.light.mutedForeground, fontSize: 10, marginTop: 2 },
-  sectionLabel: {
-    color: colors.light.mutedForeground,
-    fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginBottom: 6,
-  },
-  mapWrap: {
-    height: 200,
-    borderRadius: 12,
-    overflow: "hidden",
-    borderColor: colors.light.border,
-    borderWidth: 1,
-  },
-  map: { flex: 1 },
+const s4 = StyleSheet.create({
+  label:     { color: colors.light.mutedForeground, fontSize: 11, fontWeight: "800", letterSpacing: 1.5, textTransform: "uppercase", marginBottom: 8 },
+  nameInput: { backgroundColor: CARD, borderRadius: 12, borderWidth: 1.5, borderColor: AMBER + "55", color: "#fff", fontSize: 18, fontWeight: "700", padding: 16, marginBottom: 16 },
+  statsRow:  { flexDirection: "row", gap: 10 },
+  statCard:  { flex: 1, backgroundColor: CARD, borderRadius: 12, padding: 14, alignItems: "center" },
+  statValue: { color: AMBER, fontSize: 22, fontWeight: "800" },
+  statLabel: { color: colors.light.mutedForeground, fontSize: 11, marginTop: 2 },
+  privacyRow:{ flexDirection: "row", gap: 8, marginBottom: 24 },
+  privChip:  { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: CARD, borderRadius: 12, borderWidth: 1.5, borderColor: colors.light.border, height: 52 },
+  privChipActive: { backgroundColor: AMBER, borderColor: AMBER },
+  privIcon:  { fontSize: 16 },
+  privLabel: { color: "#fff", fontSize: 13, fontWeight: "700" },
+  goBtn:     { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 12, backgroundColor: AMBER, borderRadius: 16, height: 76, marginBottom: 16 },
+  goBtnText: { color: "#000", fontSize: 20, fontWeight: "900", letterSpacing: 0.5 },
+  actionsRow:{ flexDirection: "row", gap: 10 },
+  actionCard:{ flex: 1, backgroundColor: CARD, borderRadius: 12, height: 72, alignItems: "center", justifyContent: "center", gap: 4, borderWidth: 1, borderColor: colors.light.border },
+  actionIcon:{ fontSize: 22 },
+  actionLabel:{ color: colors.light.mutedForeground, fontSize: 11, fontWeight: "700" },
+  actionProgress: { color: AMBER, fontSize: 16, fontWeight: "800" },
+  deviceSheet: { backgroundColor: CARD, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40 },
+  deviceTitle: { color: "#fff", fontSize: 16, fontWeight: "900", letterSpacing: 1, marginBottom: 20 },
+  deviceRow:   { flexDirection: "row", alignItems: "center", gap: 16, minHeight: 64, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.light.border },
+  deviceIcon:  { fontSize: 28, width: 40 },
+  deviceName:  { color: "#fff", fontSize: 16, fontWeight: "700" },
+  deviceDesc:  { color: colors.light.mutedForeground, fontSize: 12 },
 });

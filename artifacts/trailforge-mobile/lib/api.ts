@@ -1140,6 +1140,70 @@ export async function fetchLeaderboard(
 }
 
 // ---------------------------------------------------------------------------
+// Trail ratings
+// ---------------------------------------------------------------------------
+
+export interface TrailRating {
+  id: string;
+  trail_id: string;
+  user_id: string;
+  overall_stars: number;
+  scenery_stars: number | null;
+  surface_stars: number | null;
+  accuracy_stars: number | null;
+  fun_stars: number | null;
+  review_text: string | null;
+  season: "spring" | "summer" | "autumn" | "winter" | null;
+  ridden_at: string | null;
+  created_at: string;
+  rider_difficulty: number;
+  display_name?: string | null;
+  avatar_url?: string | null;
+}
+
+export interface SubmitRatingInput {
+  rider_difficulty: number;
+  overall_stars: number;
+  scenery_stars?: number | null;
+  surface_stars?: number | null;
+  accuracy_stars?: number | null;
+  fun_stars?: number | null;
+  review_text?: string | null;
+  ridden_at?: string | null;
+  season?: "spring" | "summer" | "autumn" | "winter" | null;
+}
+
+export function listTrailRatings(trailId: string): Promise<{ ratings: TrailRating[] }> {
+  return apiJson<{ ratings: TrailRating[] }>(
+    `/api/trails/${encodeURIComponent(trailId)}/ratings`,
+    { allowAnonymous: true },
+  );
+}
+
+export function getMyTrailRating(trailId: string): Promise<{ rating: TrailRating | null }> {
+  return apiJson<{ rating: TrailRating | null }>(
+    `/api/trails/${encodeURIComponent(trailId)}/ratings/me`,
+  );
+}
+
+export function submitTrailRating(
+  trailId: string,
+  input: SubmitRatingInput,
+): Promise<{ rating: TrailRating }> {
+  return apiJson<{ rating: TrailRating }>(
+    `/api/trails/${encodeURIComponent(trailId)}/ratings`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function deleteMyTrailRating(trailId: string): Promise<{ ok: boolean }> {
+  return apiJson<{ ok: boolean }>(
+    `/api/trails/${encodeURIComponent(trailId)}/ratings/me`,
+    { method: "DELETE" },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Linesman
 // ---------------------------------------------------------------------------
 

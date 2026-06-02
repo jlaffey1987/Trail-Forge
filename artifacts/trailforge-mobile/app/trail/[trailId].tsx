@@ -26,10 +26,12 @@ import {
   listTrailAmendments,
   listTrailNotes,
   listTrailShares,
+  listTrailRatings,
   searchTrailsByBbox,
   shareTrailToGroups,
   type Group,
   type TrailNote,
+  type TrailRating,
 } from "@/lib/api";
 import {
   cacheTiles,
@@ -79,6 +81,11 @@ export default function TrailDetailScreen() {
   const amendmentsQ = useQuery({
     queryKey: ["trail-amendments", id],
     queryFn: () => listTrailAmendments(id),
+    enabled: id.length > 0,
+  });
+  const ratingsQ = useQuery({
+    queryKey: ["trail-ratings", id],
+    queryFn: () => listTrailRatings(id),
     enabled: id.length > 0,
   });
 
@@ -377,6 +384,16 @@ export default function TrailDetailScreen() {
         )}
       </View>
 
+      {/* ── Ratings ─────────────────────────────────────────────── */}
+      <TrailRatingsSection
+        trailId={id}
+        trailName={trail.name}
+        ratings={ratingsQ.data?.ratings ?? []}
+        avgStars={(trail as unknown as { avg_stars?: number }).avg_stars ?? null}
+        ratingCount={(trail as unknown as { rating_count?: number }).rating_count ?? 0}
+        qualityFlagged={(trail as unknown as { quality_flagged?: boolean }).quality_flagged ?? false}
+      />
+
       <ShareToGroupsModal
         visible={shareOpen}
         onDismiss={() => setShareOpen(false)}
@@ -389,6 +406,96 @@ export default function TrailDetailScreen() {
     </ScrollView>
   );
 }
+
+// ── Trail Ratings Section ──────────────────────────────────────────────────────
+
+function StarDisplay({ value, size = 18 }: { value: number; size?: number }) {
+  return (
+    <View style={{ flexDirection: "row", gap: 2 }}>
+      {[1,2,3,4,5].map(n => (
+        <Text key={n} style={{ fontSize: size, color: n <= Math.round(value) ? colors.light.primary : "#333" }}>★</Text>
+      ))}
+    </View>
+  );
+}
+
+function TrailRatingsSection({
+  trailId, trailName, ratings, avgStars, ratingCount, qualityFlagged,
+}: {
+  trailId: string; trailName: string;
+  ratings: TrailRating[]; avgStars: number | null;
+  ratingCount: number; qualityFlagged: boolean;
+}) {
+  return (
+    <View style={trStyles.container}>
+      {/* Header */}
+      <View style={trStyles.header}>
+        <Text style={trStyles.title}>COMMUNITY RATINGS</Text>
+        <TouchableOpacity
+          onPress={() => router.push({ pathname: "/rate", params: { trailId, trailName } } as Parameters<typeof router.push>[0])}
+          style={trStyles.rateBtn}
+        >
+          <Feather name="star" size={14} color="#000" />
+          <Text style={trStyles.rateBtnText}>Rate</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Quality warning */}
+      {qualityFlagged && (
+        <View style={trStyles.warning}>
+          <Feather name="alert-triangle" size={14} color={colors.light.warning} />
+          <Text style={trStyles.warningText}>⚠️ Low ratings from qualified riders — check conditions before riding</Text>
+        </View>
+      )}
+
+      {/* Summary */}
+      {avgStars != null ? (
+        <View style={trStyles.summary}>
+          <View style={{ flexDirection: "row", alignItems: "baseline", gap: 10 }}>
+            <Text style={trStyles.avgBig}>{avgStars.toFixed(1)}</Text>
+            <StarDisplay value={avgStars} size={22} />
+          </View>
+          <Text style={trStyles.ratingCount}>Based on {ratingCount} rider{ratingCount !== 1 ? "s" : ""}</Text>
+        </View>
+      ) : (
+        <Text style={{ color: colors.light.mutedForeground, fontSize: 13, marginBottom: 16 }}>
+          No ratings yet — be the first!
+        </Text>
+      )}
+
+      {/* Recent reviews */}
+      {ratings.slice(0, 5).map(r => (
+        <View key={r.id} style={trStyles.review}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <StarDisplay value={r.overall_stars} size={14} />
+            <Text style={{ color: colors.light.mutedForeground, fontSize: 11 }}>
+              {r.display_name ?? "Anonymous"}
+              {r.season ? ` · ${r.season}` : ""}
+            </Text>
+          </View>
+          {r.review_text ? (
+            <Text style={trStyles.reviewText}>{r.review_text}</Text>
+          ) : null}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const trStyles = StyleSheet.create({
+  container: { marginTop: 24 },
+  header:    { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+  title:     { color: colors.light.mutedForeground, fontSize: 11, fontWeight: "800", letterSpacing: 1.5 },
+  rateBtn:   { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.light.primary, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 7 },
+  rateBtnText: { color: "#000", fontWeight: "800", fontSize: 13 },
+  warning:   { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.light.warning + "22", borderRadius: 10, padding: 12, marginBottom: 14 },
+  warningText: { flex: 1, color: colors.light.warning, fontSize: 12 },
+  summary:   { marginBottom: 16 },
+  avgBig:    { color: colors.light.primary, fontSize: 40, fontWeight: "900" },
+  ratingCount: { color: colors.light.mutedForeground, fontSize: 13, marginTop: 4 },
+  review:    { backgroundColor: colors.light.card, borderRadius: 10, padding: 14, marginBottom: 8 },
+  reviewText:{ color: colors.light.mutedForeground, fontSize: 13, marginTop: 4 },
+});
 
 function ShareToGroupsModal({
   visible,

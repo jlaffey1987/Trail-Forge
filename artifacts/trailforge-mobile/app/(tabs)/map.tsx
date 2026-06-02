@@ -10,6 +10,7 @@
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import * as Location from "expo-location";
+import { router } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -912,6 +913,23 @@ export default function MapTab() {
         onClose={() => setSelected(null)}
         onMarkRiddenChange={() => void completionsQ.refetch()}
       />
+
+      {/* ── Plan a Ride floating button ──────────────────────────────────── */}
+      <TouchableOpacity
+        style={{
+          position: "absolute", bottom: 100, alignSelf: "center",
+          flexDirection: "row", alignItems: "center", gap: 8,
+          backgroundColor: colors.light.primary, borderRadius: 28,
+          paddingHorizontal: 24, height: 52,
+          shadowColor: "#000", shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.4, shadowRadius: 10, elevation: 12,
+        }}
+        onPress={() => router.push("/(tabs)/index" as Parameters<typeof router.push>[0])}
+        activeOpacity={0.85}
+      >
+        <Text style={{ fontSize: 16 }}>🗺️</Text>
+        <Text style={{ color: "#000", fontWeight: "900", fontSize: 15, letterSpacing: 0.5 }}>PLAN A RIDE</Text>
+      </TouchableOpacity>
 
       {/* ── Filters button + bottom sheet ───────────────────────────────── */}
       <FiltersSheet
