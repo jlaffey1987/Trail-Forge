@@ -70,11 +70,17 @@ logger.info(
 // Pass keys explicitly.
 // authorizedParties: [] → disable azp validation so React Native / Expo Go
 // tokens (which carry azp="expo://…" or no azp) are accepted.
+//
+// CLERK_JWT_KEY (optional): PEM public key from Clerk Dashboard →
+//   JWT Templates → Default → Signing key.
+// When set, tokens are verified locally without any network call to Clerk,
+// which fixes 401s caused by the server being unable to reach api.clerk.com.
 app.use(
   clerkMiddleware({
-    secretKey:          CLERK_SECRET_KEY,
-    publishableKey:     CLERK_PUBLISHABLE_KEY,
-    authorizedParties:  [],   // allow any origin (mobile apps have no web origin)
+    secretKey:         CLERK_SECRET_KEY,
+    publishableKey:    CLERK_PUBLISHABLE_KEY,
+    authorizedParties: [],
+    ...(process.env.CLERK_JWT_KEY ? { jwtKey: process.env.CLERK_JWT_KEY } : {}),
   }),
 );
 

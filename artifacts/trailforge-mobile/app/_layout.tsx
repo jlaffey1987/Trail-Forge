@@ -95,13 +95,17 @@ const queryClient = new QueryClient({
  * and the server responds with 401.
  */
 async function getTokenWithRetry(
-  getToken: () => Promise<string | null>,
+  // useAuth().getToken — the ONLY correct source for Clerk session tokens
+  // on mobile.  Do NOT use session.getToken() or clerk.session?.getToken().
+  getToken: (opts?: { template?: string }) => Promise<string | null>,
 ): Promise<string | null> {
   const DELAYS = [0, 150, 400, 800]; // ms between attempts
   for (const delay of DELAYS) {
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
     try {
-      const t = await getToken();
+      // template: undefined → returns the raw Clerk session JWT (RS256).
+      // This is the correct format for @clerk/express clerkClient.verifyToken().
+      const t = await getToken({ template: undefined });
       if (t) return t;
     } catch {
       // continue to next attempt
