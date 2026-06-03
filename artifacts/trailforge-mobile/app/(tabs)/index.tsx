@@ -23,6 +23,7 @@ import {
   Alert,
   Animated,
   Dimensions,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -106,6 +107,7 @@ export default function PlannerTab() {
 function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile>["profile"] }) {
   const state = usePlannerStore();
   const [gpsLoading, setGpsLoading] = useState(!state.from);
+  const [gpsDenied, setGpsDenied] = useState(false);
   const [nlMode, setNlMode] = useState(false);
   const [nlText, setNlText] = useState(state.naturalLanguageInput);
   const [nlLoading, setNlLoading] = useState(false);
@@ -114,6 +116,12 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
   const [fromResults, setFromResults] = useState<NominatimResult[]>([]);
   const [fromSearching, setFromSearching] = useState(false);
   const [gpsPos, setGpsPos] = useState<{ lat: number; lon: number } | null>(null);
+  // TO destination state
+  const [toQuery, setToQuery] = useState(state.to?.address ?? "");
+  const [toResults, setToResults] = useState<NominatimResult[]>([]);
+  const [toSearching, setToSearching] = useState(false);
+  const [toFocused, setToFocused] = useState(false);
+  const isLoop = state.to === null;
 
   // Auto-GPS on mount
   useEffect(() => {
@@ -121,11 +129,16 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
     void (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== "granted") { setGpsLoading(false); return; }
+        if (status !== "granted") {
+          setGpsDenied(true);
+          setGpsLoading(false);
+          return;
+        }
         const pos = await Location.getLastKnownPositionAsync()
           ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         const { latitude: lat, longitude: lon } = pos.coords;
         setGpsPos({ lat, lon });
+        setGpsDenied(false);
         const rev = await reverseGeocode(lat, lon);
         const address = rev?.display_name
           ? `Near ${shortLabel(rev.display_name)}`
@@ -149,19 +162,35 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
     return () => clearTimeout(h);
   }, [fromQuery, fromSearch, gpsPos]);
 
+  // Debounced TO search
+  useEffect(() => {
+    if (!toFocused || !toQuery.trim()) { setToResults([]); return; }
+    setToSearching(true);
+    const h = setTimeout(async () => {
+      const r = await geocode(toQuery, gpsPos ?? undefined);
+      setToResults(r);
+      setToSearching(false);
+    }, 300);
+    return () => clearTimeout(h);
+  }, [toQuery, toFocused, gpsPos]);
+
   async function useGpsFallback() {
     setGpsLoading(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") { Alert.alert("Location needed", "Enable location in Settings."); return; }
+      if (status !== "granted") {
+        setGpsDenied(true);
+        return;
+      }
       const pos = await Location.getLastKnownPositionAsync()
         ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       const { latitude: lat, longitude: lon } = pos.coords;
       setGpsPos({ lat, lon });
+      setGpsDenied(false);
       const rev = await reverseGeocode(lat, lon);
       const address = rev?.display_name ? `Near ${shortLabel(rev.display_name)}` : `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
       plannerActions.setFrom({ lat, lon, address });
-    } catch { Alert.alert("GPS unavailable"); }
+    } catch { Alert.alert("GPS unavailable", "Could not get your position."); }
     finally { setGpsLoading(false); }
   }
 
@@ -187,14 +216,15 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
   async function doCalculate(from: typeof state.from, style: RideStyle) {
     if (!from) return;
     const params = styleToParams(style);
+    const dest = state.to ?? from; // null to = loop back to start
     plannerActions.setCalculating(true);
     plannerActions.setStep(2);
     try {
       const res = await getPlannerSuggestions({
         fromLat: from.lat,
         fromLon: from.lon,
-        toLat:   from.lat, // loop
-        toLon:   from.lon,
+        toLat:   dest.lat,
+        toLon:   dest.lon,
         corridorKm: params.corridorKm,
       });
       const ids = res.suggestions.map(s => s.trailId).join(",");
@@ -252,16 +282,31 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
             onPress={() => setFromSearch(true)}
             activeOpacity={0.8}
           >
-            <Feather name="navigation" size={16} color={AMBER} />
+            <Feather name="navigation" size={16} color={gpsDenied ? colors.light.mutedForeground : AMBER} />
             {gpsLoading
-              ? <><ActivityIndicator size="small" color={AMBER} style={{ marginLeft: 8 }} /><Text style={s1.locHint}> Getting your location…</Text></>
+              ? <>
+                  <ActivityIndicator size="small" color={AMBER} style={{ marginLeft: 8 }} />
+                  <Text style={s1.locHint}> Getting your location…</Text>
+                </>
+              : gpsDenied
+                ? <>
+                    <Text style={[s1.locHint, { color: colors.light.mutedForeground, flex: 1 }]}>📍 Location access needed</Text>
+                    <TouchableOpacity
+                      onPress={() => void Linking.openSettings()}
+                      style={s1.openSettingsBtn}
+                    >
+                      <Text style={s1.openSettingsText}>Enable in Settings</Text>
+                    </TouchableOpacity>
+                  </>
               : state.from
                 ? <Text style={s1.locText} numberOfLines={1}>{state.from.address}</Text>
-                : <TouchableOpacity onPress={useGpsFallback} style={s1.gpsFallBtn}>
+                : <TouchableOpacity onPress={() => void useGpsFallback()} style={s1.gpsFallBtn}>
                     <Text style={s1.gpsFallText}>📍 Use Current Location</Text>
                   </TouchableOpacity>
             }
-            {state.from && <Feather name="edit-2" size={13} color={colors.light.mutedForeground} style={{ marginLeft: "auto" }} />}
+            {state.from && !gpsLoading && !gpsDenied && (
+              <Feather name="edit-2" size={13} color={colors.light.mutedForeground} style={{ marginLeft: "auto" }} />
+            )}
           </TouchableOpacity>
         )}
 
@@ -277,6 +322,71 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
                   setFromSearch(false);
                   setFromQuery("");
                   setFromResults([]);
+                }}
+              >
+                <Feather name="map-pin" size={14} color={AMBER} style={{ marginRight: 10 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s1.dropName} numberOfLines={1}>{shortLabel(r.display_name)}</Text>
+                  {gpsPos && <Text style={s1.dropDist}>{formatDistKm(distKm(gpsPos.lat, gpsPos.lon, parseFloat(r.lat), parseFloat(r.lon)))}</Text>}
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        {/* Q1b: Destination (TO) */}
+        <Text style={[s1.qLabel, { marginTop: 24 }]}>WHERE TO?</Text>
+
+        {/* Loop option */}
+        <TouchableOpacity
+          style={[s1.loopPill, isLoop && s1.loopPillActive]}
+          onPress={() => { plannerActions.setTo(null); setToQuery(""); setToFocused(false); setToResults([]); }}
+          activeOpacity={0.8}
+        >
+          <Text style={s1.loopIcon}>🔄</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={[s1.loopText, isLoop && { color: "#000" }]}>Anywhere — create a loop</Text>
+            <Text style={[s1.loopSub, isLoop && { color: "#000" }]}>Find trails near your start and loop back</Text>
+          </View>
+          {isLoop && <Feather name="check" size={16} color="#000" />}
+        </TouchableOpacity>
+
+        {/* Or search a specific destination */}
+        <View style={s1.searchBox}>
+          <Feather name="map-pin" size={16} color={state.to ? AMBER : colors.light.mutedForeground} style={{ marginLeft: 14 }} />
+          <TextInput
+            value={toQuery}
+            onChangeText={t => { setToQuery(t); if (!t) plannerActions.setTo(null); }}
+            onFocus={() => setToFocused(true)}
+            onBlur={() => setTimeout(() => setToFocused(false), 200)}
+            placeholder="Or search a destination…"
+            placeholderTextColor={colors.light.mutedForeground}
+            style={s1.searchInput}
+            returnKeyType="search"
+          />
+          {toSearching
+            ? <ActivityIndicator size="small" color={AMBER} style={{ marginRight: 12 }} />
+            : toQuery
+              ? <Pressable onPress={() => { setToQuery(""); plannerActions.setTo(null); setToResults([]); }} style={{ marginRight: 12 }}>
+                  <Feather name="x" size={16} color={colors.light.mutedForeground} />
+                </Pressable>
+              : null
+          }
+        </View>
+
+        {/* TO search results */}
+        {toResults.length > 0 && toFocused && (
+          <View style={s1.dropdown}>
+            {toResults.map(r => (
+              <TouchableOpacity
+                key={r.place_id}
+                style={s1.dropItem}
+                onPress={() => {
+                  const addr = shortLabel(r.display_name);
+                  plannerActions.setTo({ lat: parseFloat(r.lat), lon: parseFloat(r.lon), address: addr });
+                  setToQuery(addr);
+                  setToFocused(false);
+                  setToResults([]);
                 }}
               >
                 <Feather name="map-pin" size={14} color={AMBER} style={{ marginRight: 10 }} />
@@ -389,6 +499,18 @@ const s1 = StyleSheet.create({
   locHint:    { color: colors.light.mutedForeground, fontSize: 14 },
   gpsFallBtn: { flex: 1 },
   gpsFallText:{ color: AMBER, fontSize: 15, fontWeight: "700" },
+  openSettingsBtn: { backgroundColor: AMBER, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  openSettingsText: { color: "#000", fontSize: 12, fontWeight: "800" },
+
+  loopPill: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: CARD, borderRadius: 14, borderWidth: 1.5,
+    borderColor: colors.light.border, padding: 14, marginBottom: 10,
+  },
+  loopPillActive: { backgroundColor: AMBER, borderColor: AMBER },
+  loopIcon: { fontSize: 22 },
+  loopText: { color: "#fff", fontSize: 15, fontWeight: "700" },
+  loopSub:  { color: colors.light.mutedForeground, fontSize: 12, marginTop: 1 },
 
   searchBox: {
     flexDirection: "row", alignItems: "center",

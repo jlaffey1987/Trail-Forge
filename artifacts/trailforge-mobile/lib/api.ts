@@ -83,12 +83,21 @@ export async function apiFetch(
     const token = await _bearerGetter();
     if (token) {
       headers.set("authorization", `Bearer ${token}`);
+      if (__DEV__) {
+        console.log(`[apiFetch] ${opts.method ?? "GET"} ${url} token="${token.slice(0, 20)}…"`);
+      }
     } else if (!opts.allowAnonymous) {
-      // No token — fail fast so the UI can prompt for sign-in.
+      if (__DEV__) console.warn(`[apiFetch] No token for ${url} — throwing`);
       throw new Error("Not signed in");
     }
+  } else if (!headers.has("authorization") && !opts.allowAnonymous && __DEV__) {
+    console.warn(`[apiFetch] No bearer getter set for ${url} — request will be unauthenticated`);
   }
-  return fetch(url, { ...opts, headers });
+  const res = await fetch(url, { ...opts, headers });
+  if (__DEV__ && !res.ok) {
+    console.warn(`[apiFetch] ${res.status} ${res.statusText} ← ${url}`);
+  }
+  return res;
 }
 
 export async function apiJson<T>(

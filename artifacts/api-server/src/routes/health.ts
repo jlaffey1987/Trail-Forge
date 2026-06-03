@@ -41,4 +41,18 @@ router.get("/auth-check", (req, res) => {
   });
 });
 
+/**
+ * Auth test — requires a valid Bearer token.
+ * Returns the authenticated userId so the mobile app can confirm
+ * the full auth round-trip is working.
+ */
+router.get("/auth-test", (req, res) => {
+  const auth = getAuth(req);
+  if (!auth.userId) {
+    res.status(401).json({ error: "Not authenticated", hint: "No valid Bearer token received" });
+    return;
+  }
+  res.json({ status: "authenticated", userId: auth.userId });
+});
+
 export default router;

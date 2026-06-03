@@ -22,7 +22,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { BrandedLoader } from "@/components/BrandedLoader";
 import colors from "@/constants/colors";
 import { tokenCache } from "@/lib/clerkTokenCache";
-import { setSharedBearerGetter } from "@/lib/api";
+import { setSharedBearerGetter, apiBaseUrl } from "@/lib/api";
 import { subscribeToNotificationTaps } from "@/lib/notificationRouting";
 import { runStartupChecks } from "@/lib/startupChecks";
 
@@ -33,13 +33,20 @@ import { runStartupChecks } from "@/lib/startupChecks";
 // development, EXPO_PUBLIC_DOMAIN is the Replit dev domain; in production
 // EAS builds, it is the published `.replit.app` domain.
 // ---------------------------------------------------------------------------
-const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_BASE_URL?.trim() ||
-  (process.env.EXPO_PUBLIC_DOMAIN
-    ? `https://${process.env.EXPO_PUBLIC_DOMAIN}`
-    : "");
+// Derive the base URL using the same logic as lib/api.ts so the generated
+// React Query hooks and the direct apiFetch helpers always point to the
+// same server — avoids the split where env var points to stale IP in dev.
+let API_BASE_URL = "";
+try {
+  API_BASE_URL = apiBaseUrl();
+} catch {
+  API_BASE_URL =
+    process.env.EXPO_PUBLIC_API_BASE_URL?.trim() ||
+    (process.env.EXPO_PUBLIC_DOMAIN ? `https://${process.env.EXPO_PUBLIC_DOMAIN}` : "");
+}
 if (API_BASE_URL) {
   setBaseUrl(API_BASE_URL.replace(/\/+$/, ""));
+  if (__DEV__) console.log("[Layout] API base URL →", API_BASE_URL);
 }
 
 // `app.json` is the canonical place for the Clerk publishable key. We read
@@ -126,11 +133,26 @@ function ApiAuthBridge({ children }: { children: React.ReactNode }) {
       );
       if (isSignedIn) {
         getTokenWithRetry(getToken)
-          .then((t) =>
-            console.log(
-              `[ApiAuthBridge] token present=${Boolean(t)} prefix=${t?.slice(0, 20) ?? "null"}`,
-            ),
-          )
+          .then(async (t) => {
+            console.log(`[ApiAuthBridge] token present=${Boolean(t)} prefix="${t?.slice(0, 20) ?? "null"}"`);
+            if (t) {
+              // Ping /api/auth-test to confirm full round-trip auth
+              try {
+                const r = await fetch(`${API_BASE_URL}/api/auth-test`, {
+                  headers: { Authorization: `Bearer ${t}` },
+                });
+                const body = await r.json() as Record<string, unknown>;
+                if (r.ok) {
+                  console.log(`[ApiAuthBridge] ✅ auth-test OK → userId=${body.userId as string}`);
+                } else {
+                  console.warn(`[ApiAuthBridge] ❌ auth-test ${r.status} →`, JSON.stringify(body));
+                  console.warn(`[ApiAuthBridge] Server URL used: ${API_BASE_URL}`);
+                }
+              } catch (e) {
+                console.warn("[ApiAuthBridge] auth-test fetch error:", e);
+              }
+            }
+          })
           .catch((e) => console.warn("[ApiAuthBridge] getToken error:", e));
       }
     }
