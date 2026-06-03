@@ -48,8 +48,21 @@ router.get("/auth-check", (req, res) => {
  */
 router.get("/auth-test", (req, res) => {
   const auth = getAuth(req);
+  const authHeader = req.headers.authorization;
+  const hasHeader = Boolean(authHeader);
+  const headerPrefix = authHeader ? authHeader.slice(0, 40) + "…" : null;
+
   if (!auth.userId) {
-    res.status(401).json({ error: "Not authenticated", hint: "No valid Bearer token received" });
+    res.status(401).json({
+      error:        "Not authenticated",
+      hasHeader,
+      headerPrefix,
+      hint:         hasHeader
+        ? "Token received but Clerk could not verify it. Check authorizedParties, secretKey, and clock skew."
+        : "No Authorization header received.",
+      clerkPublishableKeyPrefix: process.env.CLERK_PUBLISHABLE_KEY?.slice(0, 30) ?? "MISSING",
+      secretKeyPresent: Boolean(process.env.CLERK_SECRET_KEY),
+    });
     return;
   }
   res.json({ status: "authenticated", userId: auth.userId });

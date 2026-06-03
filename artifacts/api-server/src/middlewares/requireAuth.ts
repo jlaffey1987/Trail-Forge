@@ -14,6 +14,7 @@
 
 import { type Request, type Response, type NextFunction } from "express";
 import { getAuth } from "@clerk/express";
+import { logger } from "../lib/logger";
 
 /** A route handler that receives the authenticated Clerk user id. */
 export interface AuthedHandler {
@@ -28,10 +29,26 @@ export interface AuthedHandler {
 export function requireAuth(handler: AuthedHandler) {
   return async (req: Request, res: Response, next: NextFunction) => {
     const auth = getAuth(req);
+    const hasHeader = Boolean(req.headers.authorization);
+    const headerPrefix = req.headers.authorization
+      ? req.headers.authorization.slice(0, 30) + "…"
+      : "(none)";
+
     if (!auth.userId) {
-      res.status(401).json({ error: "Unauthorized" });
+      logger.warn(
+        { path: req.path, method: req.method, hasHeader, headerPrefix },
+        "[requireAuth] 401 — no userId. Token sent but Clerk did not verify it.",
+      );
+      res.status(401).json({
+        error: "Unauthorized",
+        debug: process.env.NODE_ENV !== "production"
+          ? { hasHeader, headerPrefix, hint: "Token received but Clerk could not verify it" }
+          : undefined,
+      });
       return;
     }
+
+    logger.debug({ path: req.path, userId: auth.userId }, "[requireAuth] ✅ authenticated");
     try {
       await handler(req, res, auth.userId);
     } catch (err) {

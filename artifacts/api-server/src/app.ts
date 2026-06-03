@@ -46,15 +46,48 @@ app.use(cors({ credentials: true, origin: true }));
 app.use(express.json({ limit: "16mb" }));
 app.use(express.urlencoded({ extended: true, limit: "16mb" }));
 
-// Pass keys explicitly so the middleware doesn't rely on env vars being
-// available at module-load time (important when devLocal.mjs injects them
-// just before spawning the process via spawnSync).
+// ---------------------------------------------------------------------------
+// Clerk middleware — Step 1/2 diagnostic logging
+// ---------------------------------------------------------------------------
+const CLERK_PUBLISHABLE_KEY =
+  process.env.CLERK_PUBLISHABLE_KEY ??
+  // Hard-coded fallback so the server works even if the env var is missing
+  // at module-load time (devLocal.mjs sets it before spawning the process,
+  // but esbuild may read it earlier in some build configs).
+  "pk_test_cG9ldGljLWh1c2t5LTMxLmNsZXJrLmFjY291bnRzLmRldiQ";
+
+const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY ?? "";
+
+// Log so we can verify the right values are in effect at startup.
+logger.info(
+  {
+    publishableKeyPrefix: CLERK_PUBLISHABLE_KEY.slice(0, 30),
+    secretKeyPresent: Boolean(CLERK_SECRET_KEY),
+  },
+  "[Clerk] middleware init",
+);
+
+// Pass keys explicitly.
+// authorizedParties: [] → disable azp validation so React Native / Expo Go
+// tokens (which carry azp="expo://…" or no azp) are accepted.
 app.use(
   clerkMiddleware({
-    secretKey: process.env.CLERK_SECRET_KEY,
-    publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+    secretKey:          CLERK_SECRET_KEY,
+    publishableKey:     CLERK_PUBLISHABLE_KEY,
+    authorizedParties:  [],   // allow any origin (mobile apps have no web origin)
   }),
 );
+
+// Dev-mode: log the resolved userId for every API request so we can see
+// exactly which requests are missing auth without adding noise in prod.
+if (process.env.NODE_ENV !== "production") {
+  const { getAuth } = await import("@clerk/express");
+  app.use("/api", (req, _res, next) => {
+    const { userId } = getAuth(req);
+    logger.debug({ method: req.method, path: req.path, userId: userId ?? "(anon)" }, "[Clerk] auth resolved");
+    next();
+  });
+}
 
 app.use("/api", router);
 

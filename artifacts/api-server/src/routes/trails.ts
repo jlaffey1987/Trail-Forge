@@ -206,6 +206,9 @@ const SEARCH_COLUMNS_FULL = SEARCH_COLUMNS_EXTENDED.join(",");
 // optional ?source=TET-UK for the TET routes section.
 // ---------------------------------------------------------------------------
 
+// PUBLIC — no auth required.  Public trails are visible to everyone.
+// Authenticated users additionally see their own private trails and
+// group-shared trails (handled below using getAuth()).
 router.get("/trails/search", async (req: Request, res: Response) => {
   const { bbox: bboxParam, ids: idsParam, source: sourceParam } = req.query;
 
