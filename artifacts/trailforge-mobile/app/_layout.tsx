@@ -184,7 +184,8 @@ function RootLayoutNav() {
       <Stack.Screen name="group/[groupId]" options={{ title: "Group" }} />
       <Stack.Screen name="linesman" options={{ headerShown: false, animation: "slide_from_right" }} />
       <Stack.Screen name="intro"    options={{ headerShown: false, animation: "fade" }} />
-      <Stack.Screen name="rate"     options={{ title: "Rate Trail", presentation: "modal" }} />
+      <Stack.Screen name="rate"         options={{ title: "Rate Trail", presentation: "modal" }} />
+      <Stack.Screen name="nav-settings" options={{ title: "Navigation", presentation: "modal" }} />
     </Stack>
   );
 }

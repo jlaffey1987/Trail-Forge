@@ -96,6 +96,14 @@ export function UserMenu() {
                 }}
               />
             )}
+            <MenuItem
+              icon="navigation"
+              label="Navigation Settings"
+              onPress={() => {
+                setOpen(false);
+                router.push("/nav-settings" as unknown as Parameters<typeof router.push>[0]);
+              }}
+            />
             <View style={styles.divider} />
             <MenuItem
               icon="log-out"

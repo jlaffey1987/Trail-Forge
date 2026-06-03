@@ -1,43 +1,32 @@
 /**
- * Full-screen turn-by-turn navigation screen.
+ * TrailForge Navigation — Road Mode & Trail Mode
  *
- * Layout (portrait):
- * ┌────────────────────────────────────────────────┐
- * │  [×]  TRAILFORGE NAV            [🔇]  [⊕]     │  ← Control strip
- * ├────────────────────────────────────────────────┤
- * │  ┌──────────────────────────────────────────┐  │
- * │  │  [↑] Entering trail: Midland Way         │  │  ← Instruction banner
- * │  │      In 350 m  ·  Grade 4 (Intermediate) │  │
- * │  └──────────────────────────────────────────┘  │
- * │                                                │
- * │              MapView                           │  ← Heading-up map,
- * │         (rotates with compass)                 │    user at bottom-third
- * │                                                │
- * │         [●] User marker                        │
- * │                                                │
- * ├────────────────────────────────────────────────┤
- * │  45.2 km  │  2h 15m  │  38 km/h  │  Arr 16:30 │  ← Bottom info bar
- * └────────────────────────────────────────────────┘
+ * Two distinct visual modes with animated transitions:
  *
- * Features:
- *   - Heading-up map via react-native-maps `camera.heading`
- *   - User at bottom-third via camera center offset (`getNavigationCameraCenter`)
- *   - Live GPS via expo-location
- *   - Compass heading via useHeading hook (expo-location.watchHeadingAsync)
- *   - Voice prompts via expo-speech (mutable)
- *   - Off-route detection + OSRM reroute
- *   - Overview mode toggle
- *   - Route progress (completed sections grey out)
+ * ROAD MODE  — compact top panel (90px), turn instructions, speed-adaptive zoom
+ * TRAIL MODE — same panel height, grade badge, trail name, zoomed-out camera
+ *
+ * Transitions are 600ms smooth and announced via expo-speech.
+ * Low-pass filtered heading for smooth rotation.
+ * Re-centre button appears when rider pans map, auto-snaps after 10s.
+ * Glove-friendly controls (64px minimum), safe area respected throughout.
  */
 
 import { Feather } from "@expo/vector-icons";
 import * as Location from "expo-location";
 import * as Speech from "expo-speech";
 import { router } from "expo-router";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
-  ActivityIndicator,
   Alert,
+  Animated,
+  Dimensions,
   Platform,
   Pressable,
   StatusBar,
@@ -45,6 +34,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MapView, {
   type Camera,
   Marker,
@@ -60,19 +50,18 @@ import {
   computeProgress,
   formatArrivalTime,
   formatDistance,
-  formatEta,
   getNavigationCameraCenter,
   type InstructionIcon,
   type NavInstruction,
   type NavProgress,
   type NavRoute,
+  type NavSection,
 } from "@/lib/navigation";
 import {
   canAttemptReroute,
   fetchRoadRoute,
   initialRerouteState,
   isOffRoute,
-  resetRerouteState,
   shouldAutoReroute,
   updateRerouteStateOnAttempt,
   updateRerouteStateOnFailure,
@@ -81,140 +70,215 @@ import {
   type RerouteState,
 } from "@/lib/navigationReroute";
 import { getActiveNavRoute, clearActiveNavRoute } from "@/lib/activeNavRoute";
-import { difficultyColor, gradeShortLabel, TRAIL_ORANGE } from "@/lib/trailColors";
+import { difficultyColor, gradeToColor } from "@/lib/trailColors";
+import {
+  loadNavPrefs,
+  resolveNightMode,
+  formatSpeed,
+  type NavPrefs,
+  NAV_PREFS_DEFAULT,
+} from "@/lib/navPrefs";
+import { haversineM } from "@/lib/navigationReroute";
 
-// Navigation-specific colour constants
-const NAV_WHITE = "#FFFFFF";
-const NAV_AMBER = "#F5A623";
-const NAV_ARRIVAL_GREEN = "#00C853";
-const NAV_ROAD_BLUE = "#FFFFFF";          // road sections: white dashed
-const NAV_COMPLETED_TRAIL = "#444444";
-const NAV_COMPLETED_ROAD = "#666666";
-const NAV_CARD = "#1A1A1A";
-const NAV_BG = "#0D0D0D";
-const NAV_RED = "#D50000";
-const NAV_OVERLAY_DARK = "rgba(13,13,13,0.96)";
-const NAV_OVERLAY_MID = "rgba(26,26,26,0.96)";
-const NAV_OVERLAY_CONTROL = "rgba(26,26,26,0.85)";
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+const AMBER         = "#F5A623";
+const NAV_WHITE     = "#FFFFFF";
+const NAV_ROAD_BG   = "#1A1A1A";
+const NAV_BG        = "#0D0D0D";
+const NAV_RED       = "#D50000";
+const NAV_GREEN     = "#00C853";
+const MUTED_TEXT    = "#A0A0A0";
 
-const NAV_ZOOM = 16.5;         // Google Maps zoom level for street-level nav
-const NAV_ALTITUDE = 400;      // iOS MapKit altitude (metres)
-const NAV_PITCH = 35;          // Tilt for 3D perspective
-const OVERVIEW_PITCH = 0;
-const VOICE_ANNOUNCE_DISTANCES = [400, 150, 30]; // metres before instruction
-const RECALC_BANNER_MS = 4000;
-const ARRIVED_BANNER_MS = 8000;
+const TOP_PANEL_H   = 90;       // fixed height both modes
+const BOTTOM_BAR_H  = 70;
+const CTRL_H        = 64;
+const RECALC_MS     = 4000;
+const ARRIVED_MS    = 8000;
+const RECENTRE_AUTO_MS = 10000; // auto-snap back to following after 10s
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
+/** Off-route threshold in metres */
+const OFF_ROUTE_M   = 75;
+
+/** Distance from start before showing handoff dialog */
+const HANDOFF_DIST_M = 500;
+
+/** Speed zoom levels (kph) — only applied when autoZoom = true */
+const ZOOM_SLOW_KPH  = 32;  // < 20mph
+const ZOOM_MED_KPH   = 64;  // < 40mph
+const ZOOM_ROAD_SLOW = 17;
+const ZOOM_ROAD_MED  = 16;
+const ZOOM_ROAD_FAST = 15;
+const ZOOM_TRAIL     = 14.5;
+
+const ALTITUDE_ROAD  = 350;
+const ALTITUDE_TRAIL = 550;
+const NAV_PITCH      = 35;
+const NAV_PITCH_OVERVIEW = 0;
+
+const VOICE_THRESHOLDS = [400, 150, 30]; // metres before instruction
+
+/** Low-pass filter alpha — 0 = immediate, 1 = frozen */
+const HEADING_LP_ALPHA = 0.25;
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function NavigateScreen() {
+  const insets   = useSafeAreaInsets();
   const inputRoute = getActiveNavRoute();
 
-  // Route is built once from the input and never mutated (reroutes patch sections).
-  const [navRoute, setNavRoute] = useState<NavRoute | null>(null);
-  const [progress, setProgress] = useState<NavProgress | null>(null);
+  // ── Core nav state (from existing implementation) ─────────────────────────
+  const [navRoute, setNavRoute]         = useState<NavRoute | null>(null);
+  const [progress, setProgress]         = useState<NavProgress | null>(null);
   const [rerouteState, setRerouteState] = useState<RerouteState>(initialRerouteState());
-  const [muted, setMuted] = useState(false);
   const [overviewMode, setOverviewMode] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const [userPos, setUserPos] = useState<NavLatLng | null>(null);
+  const [statusMsg, setStatusMsg]       = useState<string | null>(null);
+  const [userPos, setUserPos]           = useState<NavLatLng | null>(null);
 
-  const mapRef = useRef<MapView>(null);
-  const locationSubRef = useRef<Location.LocationSubscription | null>(null);
-  const announcedAtRef = useRef<Set<number>>(new Set());
-  const rerouteAbortRef = useRef<AbortController | null>(null);
-  const progressRef = useRef<NavProgress | null>(null);
-  const routeRef = useRef<NavRoute | null>(null);
-  const mutedRef = useRef(false);
+  // ── New state ─────────────────────────────────────────────────────────────
+  const [navMode, setNavMode]           = useState<"road" | "trail">("road");
+  const [prefs, setPrefs]               = useState<NavPrefs>(NAV_PREFS_DEFAULT);
+  const [isFollowing, setIsFollowing]   = useState(true);
+  const [muted, setMuted]               = useState(false);
+  const [isNight, setIsNight]           = useState(false);
+  const [showHandoff, setShowHandoff]   = useState(false);
+  const [handoffDistM, setHandoffDistM] = useState(0);
+  const [pulseSectionId, setPulseSectionId] = useState<string | null>(null);
+  const [pulsePhase, setPulsePhase]     = useState<"bright" | "dim">("bright");
 
-  const { heading } = useHeading(true);
-  const headingRef = useRef(heading);
-  headingRef.current = heading;
-  mutedRef.current = muted;
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const mapRef                = useRef<MapView>(null);
+  const locationSubRef        = useRef<Location.LocationSubscription | null>(null);
+  const announcedAtRef        = useRef<Set<number>>(new Set());
+  const rerouteAbortRef       = useRef<AbortController | null>(null);
+  const progressRef           = useRef<NavProgress | null>(null);
+  const routeRef              = useRef<NavRoute | null>(null);
+  const mutedRef              = useRef(false);
+  const navModeRef            = useRef<"road" | "trail">("road");
+  const filteredHeadingRef    = useRef(0);
+  const lastInteractionRef    = useRef(Date.now());
+  const recentreTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pulseTimerRef         = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ---------------------------------------------------------------------------
-  // Build route on mount
-  // ---------------------------------------------------------------------------
+  mutedRef.current    = muted;
+  navModeRef.current  = navMode;
+
+  const { heading: rawHeading } = useHeading(true);
+
+  // Low-pass filtered heading
   useEffect(() => {
-    if (!inputRoute) {
-      // No route loaded — go back.
-      router.back();
-      return;
-    }
+    let diff = rawHeading - filteredHeadingRef.current;
+    if (diff > 180) diff -= 360;
+    if (diff < -180) diff += 360;
+    filteredHeadingRef.current = filteredHeadingRef.current + HEADING_LP_ALPHA * diff;
+  }, [rawHeading]);
+
+  // ── Animations ────────────────────────────────────────────────────────────
+  // 0 = road mode bg, 1 = trail mode bg (drives background color interpolation)
+  const modeTransAnim      = useRef(new Animated.Value(0)).current;
+  // OFFROAD badge X offset: 100 = off screen right, 0 = visible
+  const offRoadSlideAnim   = useRef(new Animated.Value(100)).current;
+  // Re-centre button pulse
+  const recentrePulseAnim  = useRef(new Animated.Value(1)).current;
+  // Target grade colour for trail panel (stored as ref, read during render)
+  const trailGradeColorRef = useRef(AMBER);
+
+  // ── Load preferences ──────────────────────────────────────────────────────
+  useEffect(() => {
+    void loadNavPrefs().then(p => {
+      setPrefs(p);
+      setMuted(!p.voiceEnabled);
+      mutedRef.current = !p.voiceEnabled;
+      setIsNight(resolveNightMode(p.nightMode));
+    });
+  }, []);
+
+  // ── Build route on mount ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!inputRoute) { router.back(); return; }
     const route = buildNavRoute(inputRoute);
     setNavRoute(route);
     routeRef.current = route;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---------------------------------------------------------------------------
-  // GPS tracking
-  // ---------------------------------------------------------------------------
+  // ── Handoff check — run once GPS is ready ─────────────────────────────────
+  useEffect(() => {
+    if (!userPos || !navRoute || showHandoff) return;
+    const distToStart = haversineM(userPos, navRoute.from);
+    if (distToStart > HANDOFF_DIST_M) {
+      setHandoffDistM(Math.round(distToStart));
+      setShowHandoff(true);
+    }
+  }, [userPos, navRoute]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── GPS tracking ──────────────────────────────────────────────────────────
   useEffect(() => {
     void (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") {
-        Alert.alert("Location required", "Navigation needs location permission.");
+        Alert.alert("Location required", "Navigation needs location access.");
         router.back();
         return;
       }
 
       locationSubRef.current = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.BestForNavigation,
-          timeInterval: 1000,
-          distanceInterval: 5,
-        },
+        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 5 },
         (loc) => {
-          const pos: NavLatLng = {
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-          };
-          const speedKmh = Math.max(0, (loc.coords.speed ?? 0) * 3.6);
-
+          const pos: NavLatLng = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+          const speedMs  = Math.max(0, loc.coords.speed ?? 0);
+          const speedKmh = speedMs * 3.6;
           setUserPos(pos);
 
           const route = routeRef.current;
           if (!route) return;
 
-          const prev = progressRef.current;
-          const newProgress = computeProgress(pos, route, prev, speedKmh);
-          progressRef.current = newProgress;
-          setProgress(newProgress);
+          const prev      = progressRef.current;
+          const newProg   = computeProgress(pos, route, prev, speedKmh);
+          progressRef.current = newProg;
+          setProgress(newProg);
 
-          if (newProgress.arrived) {
+          // ── Mode transition detection ─────────────────────────────────────
+          const nowOnTrail = newProg.isOnTrail;
+          const wasOnTrail = navModeRef.current === "trail";
+          if (nowOnTrail !== wasOnTrail) {
+            const currentSec = route.sections[newProg.currentSectionIdx];
+            if (nowOnTrail) {
+              enterTrailMode(currentSec, speedMs);
+            } else {
+              exitTrailMode(route, newProg.currentSectionIdx, speedMs);
+            }
+          }
+
+          // ── Arrival ───────────────────────────────────────────────────────
+          if (newProg.arrived) {
             speak("You have arrived at your destination", mutedRef.current);
-            setStatusMsg("You have arrived!");
-            setTimeout(() => setStatusMsg(null), ARRIVED_BANNER_MS);
+            setStatusMsg("You have arrived! 🎉");
+            setTimeout(() => setStatusMsg(null), ARRIVED_MS);
             return;
           }
 
-          // Voice prompts for upcoming instructions.
-          const instr = route.instructions[newProgress.nextInstructionIdx];
-          if (instr) {
-            const distToInstr = instr.triggerDistanceM - newProgress.distanceTravelledM;
-            for (const threshold of VOICE_ANNOUNCE_DISTANCES) {
-              const key = newProgress.nextInstructionIdx * 10000 + threshold;
-              if (distToInstr <= threshold && !announcedAtRef.current.has(key)) {
-                announcedAtRef.current.add(key);
-                const ttsText =
-                  threshold === VOICE_ANNOUNCE_DISTANCES[0]
+          // ── Voice instructions (road mode only) ───────────────────────────
+          if (!nowOnTrail) {
+            const instr = route.instructions[newProg.nextInstructionIdx];
+            if (instr) {
+              const distToInstr = instr.triggerDistanceM - newProg.distanceTravelledM;
+              for (const threshold of VOICE_THRESHOLDS) {
+                const key = newProg.nextInstructionIdx * 10000 + threshold;
+                if (distToInstr <= threshold && !announcedAtRef.current.has(key)) {
+                  announcedAtRef.current.add(key);
+                  const text = threshold === VOICE_THRESHOLDS[0]
                     ? `In ${Math.round(threshold)} metres, ${instr.shortText}`
-                    : threshold === VOICE_ANNOUNCE_DISTANCES[1]
+                    : threshold === VOICE_THRESHOLDS[1]
                     ? `${instr.shortText} in ${Math.round(threshold)} metres`
                     : instr.text;
-                speak(ttsText, mutedRef.current);
-                break;
+                  speak(text, mutedRef.current);
+                  break;
+                }
               }
             }
           }
 
-          // Off-route check + auto-reroute.
+          // ── Off-route check ───────────────────────────────────────────────
           const offResult = isOffRoute(pos, route.sections);
           if (
             offResult.offRoute &&
@@ -231,29 +295,117 @@ export default function NavigateScreen() {
       locationSubRef.current?.remove();
       locationSubRef.current = null;
       rerouteAbortRef.current?.abort();
+      pulseTimerRef.current && clearTimeout(pulseTimerRef.current);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---------------------------------------------------------------------------
-  // Camera animation
-  // ---------------------------------------------------------------------------
+  // ── Mode transition helpers ───────────────────────────────────────────────
+
+  function enterTrailMode(section: NavSection | undefined, speedMs: number) {
+    const gradeColor = section?.grade != null ? gradeToColor(section.grade) : AMBER;
+    trailGradeColorRef.current = gradeColor;
+    setNavMode("trail");
+    navModeRef.current = "trail";
+
+    // Animate panel background → grade colour
+    Animated.timing(modeTransAnim, {
+      toValue: 1, duration: 600, useNativeDriver: false,
+    }).start();
+    // Slide in OFFROAD badge
+    Animated.timing(offRoadSlideAnim, {
+      toValue: 0, duration: 600, useNativeDriver: true,
+    }).start();
+
+    // Trail pulse on the section polyline
+    if (section) {
+      setPulseSectionId(section.id);
+      startPulseSequence(section.id);
+    }
+
+    // Voice
+    const gradeNum  = section?.grade ?? null;
+    const distKm    = section ? (section.distanceM / 1000).toFixed(1) : null;
+    const name      = section?.name ?? "trail section";
+    const gradeTxt  = gradeNum != null ? `Grade ${gradeNum}.` : "";
+    const distTxt   = distKm  ? `${distKm} kilometres.` : "";
+    speak(`Entering trail section. ${gradeTxt} ${distTxt} ${name}.`, mutedRef.current);
+
+    // Camera zoom out for trail
+    if (mapRef.current && userPos) {
+      const h = filteredHeadingRef.current;
+      const center = getNavigationCameraCenter({ latitude: userPos.latitude, longitude: userPos.longitude }, h, 360);
+      mapRef.current.animateCamera({
+        center, heading: h, pitch: NAV_PITCH, zoom: ZOOM_TRAIL, altitude: ALTITUDE_TRAIL,
+      }, { duration: 600 });
+    }
+  }
+
+  function exitTrailMode(route: NavRoute, currentIdx: number, _speedMs: number) {
+    setNavMode("road");
+    navModeRef.current = "road";
+
+    Animated.timing(modeTransAnim, {
+      toValue: 0, duration: 600, useNativeDriver: false,
+    }).start();
+    Animated.timing(offRoadSlideAnim, {
+      toValue: 100, duration: 600, useNativeDriver: true,
+    }).start();
+    setPulseSectionId(null);
+
+    // Voice: next trail distance
+    const nextTrail = route.sections.slice(currentIdx + 1).find(s => s.kind === "trail");
+    const nextTrailKm = nextTrail
+      ? ` Next trail in ${((nextTrail.cumulativeDistanceM - route.sections[currentIdx].cumulativeDistanceM) / 1000).toFixed(1)} kilometres.`
+      : "";
+    speak(`Trail section complete. Returning to road.${nextTrailKm}`, mutedRef.current);
+  }
+
+  function startPulseSequence(sectionId: string) {
+    pulseTimerRef.current && clearTimeout(pulseTimerRef.current);
+    let phase = 0;
+    const phases: Array<"bright" | "dim"> = ["bright", "dim", "bright", "dim"];
+    function next() {
+      if (phase >= phases.length) { setPulseSectionId(null); return; }
+      setPulsePhase(phases[phase]);
+      phase++;
+      pulseTimerRef.current = setTimeout(next, 200);
+    }
+    setPulseSectionId(sectionId);
+    next();
+  }
+
+  // ── Camera ────────────────────────────────────────────────────────────────
+
   useEffect(() => {
-    if (!userPos || !mapRef.current || overviewMode) return;
+    if (!userPos || !mapRef.current || overviewMode || !isFollowing) return;
 
-    const center = getNavigationCameraCenter(userPos, heading, 280);
-    const camera: Camera = {
-      center,
-      heading,
-      pitch: NAV_PITCH,
-      zoom: NAV_ZOOM,
-      altitude: NAV_ALTITUDE,
+    const h = filteredHeadingRef.current;
+    const speedKmh = progress?.speedKmh ?? 0;
+    const onTrail  = navModeRef.current === "trail";
+
+    let zoom: number;
+    if (onTrail) {
+      zoom = ZOOM_TRAIL;
+    } else if (!prefs.autoZoom) {
+      zoom = ZOOM_ROAD_MED;
+    } else {
+      zoom = speedKmh >= ZOOM_MED_KPH ? ZOOM_ROAD_FAST
+           : speedKmh >= ZOOM_SLOW_KPH ? ZOOM_ROAD_MED
+           : ZOOM_ROAD_SLOW;
+    }
+
+    const lookAheadM = onTrail ? 360 : 280;
+    const center = getNavigationCameraCenter(userPos, h, lookAheadM);
+    const cam: Camera = {
+      center, heading: h, pitch: NAV_PITCH,
+      zoom, altitude: onTrail ? ALTITUDE_TRAIL : ALTITUDE_ROAD,
     };
-    mapRef.current.animateCamera(camera, { duration: 400 });
-  }, [userPos, heading, overviewMode]);
+    mapRef.current.animateCamera(cam, { duration: 400 });
+  }, [userPos, rawHeading, overviewMode, isFollowing]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Overview mode: zoom to show entire route.
+  // Overview mode: fit all route points
   const handleOverviewToggle = useCallback(() => {
-    setOverviewMode((prev) => {
+    setOverviewMode(prev => {
       const next = !prev;
       if (next && navRoute && mapRef.current) {
         const pts = navRoute.polyline;
@@ -266,87 +418,99 @@ export default function NavigateScreen() {
           if (p.longitude < minLon) minLon = p.longitude;
           if (p.longitude > maxLon) maxLon = p.longitude;
         }
-        const camera: Camera = {
+        mapRef.current.animateCamera({
           center: { latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2 },
-          heading: 0,
-          pitch: OVERVIEW_PITCH,
-          zoom: 10,
-          altitude: 30000,
-        };
-        mapRef.current.animateCamera(camera, { duration: 600 });
+          heading: 0, pitch: NAV_PITCH_OVERVIEW, zoom: 10, altitude: 30000,
+        }, { duration: 600 });
+      } else if (!next && userPos) {
+        setIsFollowing(true);
       }
       return next;
     });
-  }, [navRoute]);
+  }, [navRoute, userPos]);
 
-  // ---------------------------------------------------------------------------
-  // Reroute
-  // ---------------------------------------------------------------------------
-  const triggerReroute = useCallback(
-    async (pos: NavLatLng, route: NavRoute) => {
-      setRerouteState((prev) => updateRerouteStateOnAttempt(prev, Date.now()));
-      setStatusMsg("Recalculating…");
-      speak("Recalculating", false);
+  // Re-centre logic
+  function handleMapInteraction() {
+    setIsFollowing(false);
+    lastInteractionRef.current = Date.now();
+    recentreTimerRef.current && clearTimeout(recentreTimerRef.current);
+    recentreTimerRef.current = setTimeout(() => {
+      setIsFollowing(true);
+    }, RECENTRE_AUTO_MS);
+    startRecentrePulse();
+  }
 
-      rerouteAbortRef.current?.abort();
-      rerouteAbortRef.current = new AbortController();
+  function handleRecentre() {
+    setIsFollowing(true);
+    recentreTimerRef.current && clearTimeout(recentreTimerRef.current);
+  }
 
-      // Target: entry of next trail section, or destination.
-      const prog = progressRef.current;
-      const nextTrailSection = route.sections
-        .slice((prog?.currentSectionIdx ?? 0) + 1)
-        .find((s) => s.kind === "trail");
-      const target: NavLatLng = nextTrailSection?.path[0] ?? route.to;
+  function startRecentrePulse() {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(recentrePulseAnim, { toValue: 1.3, duration: 600, useNativeDriver: true }),
+        Animated.timing(recentrePulseAnim, { toValue: 1.0, duration: 600, useNativeDriver: true }),
+      ]),
+      { iterations: 5 }
+    ).start(() => recentrePulseAnim.setValue(1));
+  }
 
-      const result = await fetchRoadRoute(pos, target, rerouteAbortRef.current.signal);
-      if (!result.ok) {
-        setRerouteState((prev) => updateRerouteStateOnFailure(prev));
-        setStatusMsg("Reroute failed — stay on route");
-        setTimeout(() => setStatusMsg(null), RECALC_BANNER_MS);
-        return;
-      }
+  // ── Reroute ───────────────────────────────────────────────────────────────
 
-      // Splice the new road polyline into the current road section.
-      const currentIdx = prog?.currentSectionIdx ?? 0;
-      const updatedSections = route.sections.map((sec, i) => {
-        if (i !== currentIdx || sec.kind !== "road") return sec;
-        return { ...sec, path: result.polyline, distanceM: result.distanceM };
-      });
+  const triggerReroute = useCallback(async (pos: NavLatLng, route: NavRoute) => {
+    setRerouteState(prev => updateRerouteStateOnAttempt(prev, Date.now()));
+    setStatusMsg("Recalculating…");
+    speak("Recalculating", false);
 
-      // Recompute cumulative distances.
-      let cum = 0;
-      const rebuiltSections = updatedSections.map((sec) => {
-        cum += sec.distanceM;
-        return { ...sec, cumulativeDistanceM: cum };
-      });
+    rerouteAbortRef.current?.abort();
+    rerouteAbortRef.current = new AbortController();
 
-      const newRoute: NavRoute = {
-        ...route,
-        sections: rebuiltSections,
-        polyline: rebuiltSections.flatMap((s) => s.path),
-        polylineSection: rebuiltSections.flatMap((s, i) => s.path.map(() => i)),
-        totalDistanceM: cum,
-      };
+    const prog = progressRef.current;
+    const nextTrailSection = route.sections
+      .slice((prog?.currentSectionIdx ?? 0) + 1)
+      .find(s => s.kind === "trail");
+    const target: NavLatLng = nextTrailSection?.path[0] ?? route.to;
 
-      routeRef.current = newRoute;
-      setNavRoute(newRoute);
-      setRerouteState((prev) => updateRerouteStateOnSuccess(prev));
-      announcedAtRef.current.clear();
-      setStatusMsg("Route updated");
-      setTimeout(() => setStatusMsg(null), RECALC_BANNER_MS);
-    },
-    [],
-  );
+    const result = await fetchRoadRoute(pos, target, rerouteAbortRef.current.signal);
+    if (!result.ok) {
+      setRerouteState(prev => updateRerouteStateOnFailure(prev));
+      setStatusMsg("Reroute failed — stay on route");
+      setTimeout(() => setStatusMsg(null), RECALC_MS);
+      return;
+    }
 
-  // ---------------------------------------------------------------------------
-  // Exit navigation
-  // ---------------------------------------------------------------------------
+    const currentIdx = prog?.currentSectionIdx ?? 0;
+    const updatedSections = route.sections.map((sec, i) => {
+      if (i !== currentIdx || sec.kind !== "road") return sec;
+      return { ...sec, path: result.polyline, distanceM: result.distanceM };
+    });
+    let cum = 0;
+    const rebuiltSections = updatedSections.map(sec => {
+      cum += sec.distanceM;
+      return { ...sec, cumulativeDistanceM: cum };
+    });
+    const newRoute: NavRoute = {
+      ...route,
+      sections: rebuiltSections,
+      polyline: rebuiltSections.flatMap(s => s.path),
+      polylineSection: rebuiltSections.flatMap((s, i) => s.path.map(() => i)),
+      totalDistanceM: cum,
+    };
+    routeRef.current = newRoute;
+    setNavRoute(newRoute);
+    setRerouteState(prev => updateRerouteStateOnSuccess(prev));
+    announcedAtRef.current.clear();
+    setStatusMsg("Route updated");
+    setTimeout(() => setStatusMsg(null), RECALC_MS);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Exit ──────────────────────────────────────────────────────────────────
+
   const exitNavigation = useCallback(() => {
     Alert.alert("Exit navigation?", "Your route progress will be lost.", [
       { text: "Cancel", style: "cancel" },
       {
-        text: "Exit",
-        style: "destructive",
+        text: "Exit", style: "destructive",
         onPress: () => {
           clearActiveNavRoute();
           rerouteAbortRef.current?.abort();
@@ -356,95 +520,131 @@ export default function NavigateScreen() {
     ]);
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Derived display values
-  // ---------------------------------------------------------------------------
-  const currentInstruction: NavInstruction | null = useMemo(() => {
-    if (!navRoute || !progress) return null;
-    return navRoute.instructions[progress.nextInstructionIdx] ?? null;
+  // ── Derived display ───────────────────────────────────────────────────────
+
+  const currentSection: NavSection | undefined = useMemo(() => {
+    if (!navRoute || !progress) return undefined;
+    return navRoute.sections[progress.currentSectionIdx];
   }, [navRoute, progress]);
+
+  const currentInstruction: NavInstruction | null = useMemo(() => {
+    if (!navRoute || !progress || navMode === "trail") return null;
+    return navRoute.instructions[progress.nextInstructionIdx] ?? null;
+  }, [navRoute, progress, navMode]);
 
   const distToInstruction: number = useMemo(() => {
     if (!currentInstruction || !progress) return 0;
     return Math.max(0, currentInstruction.triggerDistanceM - progress.distanceTravelledM);
   }, [currentInstruction, progress]);
 
-  // ---------------------------------------------------------------------------
-  // Loading state
-  // ---------------------------------------------------------------------------
+  // Next-next instruction preview (road mode)
+  const nextNextInstruction: NavInstruction | null = useMemo(() => {
+    if (!navRoute || !progress || navMode === "trail") return null;
+    return navRoute.instructions[progress.nextInstructionIdx + 1] ?? null;
+  }, [navRoute, progress, navMode]);
+
+  // Trail remaining distance (trail mode)
+  const trailRemainingKm: number = useMemo(() => {
+    if (!currentSection || currentSection.kind !== "trail" || !progress) return 0;
+    const sectionEnd = currentSection.cumulativeDistanceM;
+    const sectionStart = sectionEnd - currentSection.distanceM;
+    const ridden = Math.max(0, progress.distanceTravelledM - sectionStart);
+    return Math.max(0, (currentSection.distanceM - ridden) / 1000);
+  }, [currentSection, progress]);
+
+  // ── Polylines ─────────────────────────────────────────────────────────────
+
+  const polylines = useMemo(() => {
+    if (!navRoute) return [];
+    return navRoute.sections.map(sec => {
+      const completed = progress?.completedSectionIds.includes(sec.id) ?? false;
+      const isPulsing = sec.id === pulseSectionId;
+      const trailColor = difficultyColor(sec.grade != null ? String(sec.grade) : null);
+
+      let color: string;
+      let width: number;
+      let dash: number[] | undefined;
+
+      if (sec.kind === "road") {
+        color = completed ? "#444" : "#FFFFFF";
+        width = 2;
+        dash  = [6, 8];
+      } else {
+        color = completed ? trailColor + "66" : trailColor;
+        width = isPulsing && pulsePhase === "bright" ? 12 : 8;
+        dash  = undefined;
+      }
+
+      return { key: sec.id, coords: sec.path, color, width, dash };
+    });
+  }, [navRoute, progress?.completedSectionIds, pulseSectionId, pulsePhase]);
+
+  // ── Animated panel background colour ─────────────────────────────────────
+
+  const panelBgColor = modeTransAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [NAV_ROAD_BG, trailGradeColorRef.current],
+  });
+
+  // ── Loading ───────────────────────────────────────────────────────────────
+
   if (!navRoute) {
     return (
-      <View style={styles.loadingScreen}>
-        <ActivityIndicator color={NAV_AMBER} size="large" />
-        <Text style={styles.loadingText}>Building route…</Text>
+      <View style={[st.loadingScreen, { paddingTop: insets.top }]}>
+        <Text style={{ fontSize: 32 }}>🧭</Text>
+        <Text style={st.loadingText}>Building route…</Text>
       </View>
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Memoised polylines — only recomputed when sections or completed IDs change
-  // ---------------------------------------------------------------------------
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const polylines = useMemo(
-    () =>
-      navRoute.sections.map((sec) => {
-        const completed = progress?.completedSectionIds.includes(sec.id) ?? false;
-        return {
-          key: sec.id,
-          coords: sec.path,
-          color:
-            sec.kind === "trail"
-              ? completed
-                ? NAV_COMPLETED_TRAIL
-                : difficultyColor(sec.grade != null ? String(sec.grade) : null)
-              : completed
-              ? NAV_COMPLETED_ROAD
-              : NAV_ROAD_BLUE,
-          width: sec.kind === "trail" ? 7 : 2,
-        };
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [navRoute.sections, progress?.completedSectionIds],
-  );
-
-  // Upcoming trail sections for special highlight.
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const upcomingTrailSections = useMemo(
-    () =>
-      progress
-        ? navRoute.sections
-            .slice(progress.currentSectionIdx + 1)
-            .filter((s) => s.kind === "trail")
-        : [],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [navRoute.sections, progress?.currentSectionIdx],
-  );
+  const screenH = Dimensions.get("window").height;
 
   return (
-    <View style={styles.screen}>
-      <StatusBar barStyle="light-content" backgroundColor={NAV_BG} />
+    <View style={st.screen}>
+      <StatusBar barStyle="light-content" backgroundColor={NAV_BG} translucent />
 
-      {/* ── Map (full screen behind everything) ──────────────────────── */}
+      {/* ── TOP PANEL (90px, animated bg) ────────────────────────────────── */}
+      <Animated.View
+        style={[st.topPanel, {
+          paddingTop: insets.top + 8,
+          backgroundColor: panelBgColor,
+        }]}
+      >
+        {navMode === "road" ? (
+          <RoadModePanel
+            instruction={currentInstruction}
+            distanceM={distToInstruction}
+            nextNext={nextNextInstruction}
+          />
+        ) : (
+          <TrailModePanel
+            section={currentSection}
+            remainingKm={trailRemainingKm}
+            offRoadSlideAnim={offRoadSlideAnim}
+          />
+        )}
+      </Animated.View>
+
+      {/* ── MAP ──────────────────────────────────────────────────────────── */}
       <MapView
         ref={mapRef}
-        style={StyleSheet.absoluteFillObject}
+        style={st.map}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}
         toolbarEnabled={false}
         rotateEnabled={false}
-        userInterfaceStyle="dark"
+        userInterfaceStyle={isNight ? "dark" : "dark"}
         initialCamera={{
-          center: navRoute.from,
-          heading: 0,
-          pitch: NAV_PITCH,
-          zoom: NAV_ZOOM,
-          altitude: NAV_ALTITUDE,
+          center: navRoute.from, heading: 0,
+          pitch: NAV_PITCH, zoom: ZOOM_ROAD_MED, altitude: ALTITUDE_ROAD,
         }}
+        onPanDrag={handleMapInteraction}
+        onRegionChange={handleMapInteraction}
       >
-        {/* Route polylines — roads as dashed white, trails as vivid grade colour */}
-        {polylines.map((p) => (
+        {/* Route polylines */}
+        {polylines.map(p => (
           <Polyline
             key={p.key}
             coordinates={p.coords}
@@ -452,203 +652,221 @@ export default function NavigateScreen() {
             strokeWidth={p.width}
             lineCap="round"
             lineJoin="round"
-            lineDashPattern={p.width <= 2 ? [6, 8] : undefined}
+            lineDashPattern={p.dash}
           />
         ))}
 
-        {/* Upcoming trail section highlight in overview mode */}
-        {overviewMode &&
-          upcomingTrailSections.map((s) => (
-            <Polyline
-              key={`highlight-${s.id}`}
-              coordinates={s.path}
-              strokeColor={difficultyColor(s.grade != null ? String(s.grade) : null)}
-              strokeWidth={8}
-              lineDashPattern={[0]}
-            />
-          ))}
-
-        {/* Start marker */}
-        <Marker coordinate={navRoute.from} title="Start" anchor={{ x: 0.5, y: 0.5 }} flat>
-          <View style={styles.startMarker}>
-            <Feather name="flag" size={14} color={NAV_WHITE} />
-          </View>
-        </Marker>
-
-        {/* Destination marker */}
-        <Marker coordinate={navRoute.to} title="Destination" anchor={{ x: 0.5, y: 1 }}>
-          <View style={styles.destMarker}>
-            <Feather name="map-pin" size={24} color={NAV_RED} />
-          </View>
-        </Marker>
-
-        {/* User position marker — pulsing amber arrow */}
-        {userPos && (
-          <Marker coordinate={userPos} anchor={{ x: 0.5, y: 0.5 }} flat>
-            <View style={[styles.userArrow, { transform: [{ rotate: `${heading}deg` }] }]}>
-              <View style={styles.userArrowTri} />
-              <View style={styles.userArrowDot} />
-            </View>
-          </Marker>
-        )}
-
-        {/* Trail entry dots in overview mode */}
-        {overviewMode &&
-          navRoute.sections
-            .filter((s) => s.kind === "trail" && s.path.length > 0)
-            .map((s) => (
-              <Marker
-                key={`marker-${s.id}`}
-                coordinate={s.path[0]}
-                title={`${s.name}${s.grade ? ` — Grade ${s.grade}` : ""}`}
-                anchor={{ x: 0.5, y: 0.5 }}
-              >
-                <View style={[styles.trailEntryDot, { backgroundColor: difficultyColor(s.grade != null ? String(s.grade) : null) }]} />
+        {/* Overview: start/end markers + grade dots */}
+        {overviewMode && (
+          <>
+            <Marker coordinate={navRoute.from} anchor={{ x: 0.5, y: 0.5 }}>
+              <View style={[st.mapMarker, { backgroundColor: NAV_GREEN }]} />
+            </Marker>
+            <Marker coordinate={navRoute.to} anchor={{ x: 0.5, y: 0.5 }}>
+              <View style={[st.mapMarker, { backgroundColor: AMBER }]} />
+            </Marker>
+            {navRoute.sections.filter(s => s.kind === "trail").map(s => (
+              <Marker key={`dot-${s.id}`} coordinate={s.path[0] ?? navRoute.from} anchor={{ x: 0.5, y: 0.5 }}>
+                <View style={[st.gradeDot, { backgroundColor: gradeToColor(s.grade) }]}>
+                  <Text style={st.gradeDotText}>G{s.grade ?? "?"}</Text>
+                </View>
               </Marker>
             ))}
-      </MapView>
-
-      {/* ── Instruction banner (TOP — 35% of screen) ─────────────────── */}
-      {currentInstruction && (
-        <InstructionBanner
-          instruction={currentInstruction}
-          distanceM={distToInstruction}
-          currentSection={navRoute.sections[progress?.currentSectionIdx ?? 0]}
-        />
-      )}
-
-      {/* ── Status overlay (recalculating / arrived) ─────────────────── */}
-      {statusMsg && (
-        <View style={styles.statusBanner} pointerEvents="none">
-          <ActivityIndicator color={NAV_AMBER} size="small" style={{ marginRight: 10 }} />
-          <Text style={styles.statusBannerText}>{statusMsg}</Text>
-        </View>
-      )}
-
-      {/* ── Overview mode toggle (floating, mid-right) ───────────────── */}
-      <Pressable
-        onPress={handleOverviewToggle}
-        style={[styles.overviewBtn, overviewMode && styles.overviewBtnActive]}
-      >
-        <Feather name={overviewMode ? "navigation" : "maximize-2"} size={20} color={overviewMode ? NAV_BG : NAV_WHITE} />
-      </Pressable>
-
-      {/* ── Bottom section: stats + control buttons ──────────────────── */}
-      <View style={styles.bottomSection}>
-        {/* Stats bar */}
-        {progress && (
-          <View style={styles.statsBar}>
-            <BottomStat value={`${Math.round(progress.speedKmh)}`} label="km/h" />
-            <View style={styles.statDivider} />
-            <BottomStat
-              value={progress.distanceRemainingM >= 1000
-                ? `${(progress.distanceRemainingM / 1000).toFixed(1)}`
-                : `${Math.round(progress.distanceRemainingM)}`}
-              label={progress.distanceRemainingM >= 1000 ? "km left" : "m left"}
-            />
-            <View style={styles.statDivider} />
-            <BottomStat value={formatArrivalTime(progress.etaMin)} label="ETA" />
-          </View>
+          </>
         )}
 
-        {/* Control buttons */}
-        <View style={styles.controlRow}>
-          <Pressable onPress={exitNavigation} style={[styles.ctrlBtn, styles.ctrlBtnExit]}>
-            <Feather name="x-circle" size={22} color={NAV_WHITE} />
-            <Text style={styles.ctrlBtnText}>EXIT NAVIGATION</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setMuted((m) => !m)}
-            style={[styles.ctrlBtn, styles.ctrlBtnMute, muted && styles.ctrlBtnMuteActive]}
+        {/* User position marker */}
+        {userPos && (
+          <Marker
+            coordinate={userPos}
+            anchor={{ x: 0.5, y: 0.5 }}
+            flat
           >
-            <Feather name={muted ? "volume-x" : "volume-2"} size={22} color={muted ? NAV_AMBER : NAV_WHITE} />
-            <Text style={[styles.ctrlBtnText, muted && { color: NAV_AMBER }]}>{muted ? "UNMUTE" : "MUTE"}</Text>
-          </Pressable>
+            <UserMarker
+              markerStyle={prefs.markerStyle}
+              heading={filteredHeadingRef.current}
+            />
+          </Marker>
+        )}
+      </MapView>
+
+      {/* ── STATUS BANNER (recalculating / arrived) ──────────────────────── */}
+      {statusMsg && (
+        <View style={st.statusBanner} pointerEvents="none">
+          <Text style={st.statusBannerText}>{statusMsg}</Text>
         </View>
+      )}
+
+      {/* ── OVERVIEW TOGGLE (top right of map area) ──────────────────────── */}
+      <Pressable
+        onPress={handleOverviewToggle}
+        style={[st.overviewBtn, { top: insets.top + TOP_PANEL_H + 12 }, overviewMode && st.overviewBtnActive]}
+        hitSlop={8}
+      >
+        <Feather name={overviewMode ? "navigation" : "maximize-2"} size={22} color={overviewMode ? NAV_BG : NAV_WHITE} />
+      </Pressable>
+
+      {/* ── RE-CENTRE button (appears when user pans) ────────────────────── */}
+      {!isFollowing && !overviewMode && (
+        <Animated.View
+          style={[st.recentreBtn, { transform: [{ scale: recentrePulseAnim }] }]}
+          pointerEvents="box-none"
+        >
+          <Pressable onPress={handleRecentre} style={st.recentreBtnInner} hitSlop={8}>
+            <Feather name="navigation" size={20} color={NAV_BG} />
+          </Pressable>
+        </Animated.View>
+      )}
+
+      {/* ── PERSISTENT CONTROLS — always visible, never covered ──────────── */}
+      <View style={[st.ctrlRow, { paddingBottom: insets.bottom + 4 }]}>
+        <Pressable onPress={exitNavigation} style={st.ctrlExit} hitSlop={4}>
+          <Feather name="x" size={24} color={NAV_WHITE} />
+          <Text style={st.ctrlText}>EXIT</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => { setMuted(m => !m); }}
+          style={[st.ctrlMute, muted && st.ctrlMuteMuted]}
+          hitSlop={4}
+        >
+          <Feather name={muted ? "volume-x" : "volume-2"} size={24} color={muted ? AMBER : MUTED_TEXT} />
+          <Text style={[st.ctrlText, muted && { color: AMBER }]}>{muted ? "UNMUTE" : "MUTE"}</Text>
+        </Pressable>
       </View>
+
+      {/* ── BOTTOM INFO BAR ──────────────────────────────────────────────── */}
+      <View style={[st.bottomBar, { paddingBottom: insets.bottom + CTRL_H + 4 }]}>
+        <BottomCell
+          value={progress ? formatSpeed(progress.speedKmh / 3.6, prefs.speedUnit) : "0"}
+          label={prefs.speedUnit}
+        />
+        <View style={st.barDiv} />
+        <BottomCell
+          value={progress ? (progress.distanceRemainingM >= 1000
+            ? `${(progress.distanceRemainingM / 1000).toFixed(1)}`
+            : `${Math.round(progress.distanceRemainingM)}`)
+          : "—"}
+          label={progress && progress.distanceRemainingM >= 1000 ? "km left" : "m left"}
+        />
+        <View style={st.barDiv} />
+        <BottomCell
+          value={progress ? formatArrivalTime(progress.etaMin) : "—"}
+          label="ETA"
+        />
+      </View>
+
+      {/* ── HANDOFF DIALOG ───────────────────────────────────────────────── */}
+      {showHandoff && (
+        <HandoffSheet
+          distM={handoffDistM}
+          onNavigateToStart={() => {
+            setShowHandoff(false);
+            // TODO: insert road section to start
+            speak("Navigating to route start", false);
+          }}
+          onStartHere={() => setShowHandoff(false)}
+        />
+      )}
     </View>
   );
 }
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Sub-components
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ── Instruction Banner ─────────────────────────────────────────────────────
+// ── Road mode top panel ───────────────────────────────────────────────────────
 
-function InstructionBanner({
-  instruction,
-  distanceM,
-  currentSection,
+function RoadModePanel({
+  instruction, distanceM, nextNext,
 }: {
-  instruction: NavInstruction;
+  instruction: NavInstruction | null;
   distanceM: number;
-  currentSection?: { kind: string; grade?: number | null; name?: string };
+  nextNext: NavInstruction | null;
 }) {
-  const isTrailEntry = instruction.icon === "enter-trail";
-  const isTrailExit  = instruction.icon === "exit-trail";
-  const isArrival    = instruction.icon === "arrive";
-  const isOnTrail    = currentSection?.kind === "trail";
-
-  // Amber left border accent colour changes per state
-  const accentColor = isArrival
-    ? NAV_ARRIVAL_GREEN
-    : isTrailEntry || isOnTrail
-    ? difficultyColor(currentSection?.grade != null ? String(currentSection.grade) : null)
-    : NAV_AMBER;
+  if (!instruction) {
+    return (
+      <View style={panel.row}>
+        <Feather name="arrow-up" size={48} color={NAV_WHITE} />
+        <View style={panel.centre}>
+          <Text style={panel.distText}>Continue</Text>
+          <Text style={panel.roadText}>Stay on route</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
-    <View style={[styles.instructionBanner, { borderLeftColor: accentColor }]}>
-      {/* State badge */}
-      {isTrailEntry && (
-        <View style={[styles.stateBadge, { backgroundColor: accentColor + "22", borderColor: accentColor }]}>
-          <Text style={[styles.stateBadgeText, { color: accentColor }]}>
-            🟠 ENTERING TRAIL
-            {instruction.grade != null ? `  ·  GRADE ${instruction.grade}` : ""}
-          </Text>
-        </View>
-      )}
-      {isTrailExit && (
-        <View style={[styles.stateBadge, { backgroundColor: "#2A2A2A", borderColor: "#555" }]}>
-          <Text style={[styles.stateBadgeText, { color: NAV_WHITE }]}>⬛ RETURNING TO ROAD</Text>
-        </View>
-      )}
-      {isArrival && (
-        <View style={[styles.stateBadge, { backgroundColor: NAV_ARRIVAL_GREEN + "22", borderColor: NAV_ARRIVAL_GREEN }]}>
-          <Text style={[styles.stateBadgeText, { color: NAV_ARRIVAL_GREEN }]}>✅ YOU HAVE ARRIVED</Text>
-        </View>
-      )}
-      {isOnTrail && !isTrailEntry && !isTrailExit && !isArrival && (
-        <View style={[styles.stateBadge, { backgroundColor: accentColor + "22", borderColor: accentColor }]}>
-          <Text style={[styles.stateBadgeText, { color: accentColor }]}>
-            🟢 ON TRAIL
-            {currentSection?.grade != null ? `  ·  GRADE ${currentSection.grade}` : ""}
-          </Text>
-        </View>
-      )}
-
-      {/* Main instruction row */}
-      <View style={styles.instructionRow}>
-        <View style={styles.instructionIconWrap}>
-          <InstructionArrow icon={instruction.icon} />
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.instructionText} numberOfLines={2}>
-            {instruction.shortText}
-          </Text>
-          {distanceM > 30 && (
-            <Text style={styles.instructionDist}>In {formatDistance(distanceM)}</Text>
-          )}
-          {instruction.trailName && (
-            <Text style={styles.instructionSub} numberOfLines={1}>{instruction.trailName}</Text>
-          )}
-        </View>
+    <View style={panel.row}>
+      {/* Direction arrow */}
+      <View style={panel.arrowBox}>
+        <InstructionArrow icon={instruction.icon} size={48} />
       </View>
+
+      {/* Centre: distance + instruction + road/trail name */}
+      <View style={panel.centre}>
+        {distanceM > 30 ? (
+          <Text style={panel.distText}>In {formatDistance(distanceM)}</Text>
+        ) : null}
+        <Text style={panel.instrText} numberOfLines={1}>{instruction.shortText}</Text>
+        {instruction.trailName ? (
+          <Text style={panel.subText} numberOfLines={1}>{instruction.trailName}</Text>
+        ) : null}
+      </View>
+
+      {/* Next-next preview */}
+      {nextNext ? (
+        <View style={panel.nextBox}>
+          <Text style={panel.nextLabel}>Then</Text>
+          <InstructionArrow icon={nextNext.icon} size={18} />
+        </View>
+      ) : null}
     </View>
   );
 }
 
-function InstructionArrow({ icon }: { icon: InstructionIcon }) {
+// ── Trail mode top panel ──────────────────────────────────────────────────────
+
+function TrailModePanel({
+  section, remainingKm, offRoadSlideAnim,
+}: {
+  section?: NavSection;
+  remainingKm: number;
+  offRoadSlideAnim: Animated.Value;
+}) {
+  const grade = section?.grade ?? null;
+  const gradeColor = gradeToColor(grade);
+
+  return (
+    <View style={panel.row}>
+      {/* Grade badge */}
+      <View style={[panel.gradeBadge, { backgroundColor: "#FFFFFF22" }]}>
+        <Text style={panel.gradeLetter}>G</Text>
+        <Text style={panel.gradeNum}>{grade ?? "?"}</Text>
+      </View>
+
+      {/* Centre: trail name + km remaining */}
+      <View style={panel.centre}>
+        <Text style={panel.trailName} numberOfLines={1}>{section?.name ?? "Trail"}</Text>
+        <Text style={panel.trailKm}>{remainingKm.toFixed(1)}km remaining on trail</Text>
+      </View>
+
+      {/* OFFROAD badge slides in */}
+      <Animated.View
+        style={[panel.offroadBadge, {
+          backgroundColor: gradeColor,
+          transform: [{ translateX: offRoadSlideAnim }],
+        }]}
+      >
+        <Text style={panel.offroadText}>OFFROAD</Text>
+      </Animated.View>
+    </View>
+  );
+}
+
+// ── Instruction arrow ─────────────────────────────────────────────────────────
+
+function InstructionArrow({ icon, size }: { icon: InstructionIcon; size: number }) {
   const iconMap: Record<InstructionIcon, keyof typeof Feather.glyphMap> = {
     straight:      "arrow-up",
     "turn-left":   "corner-up-left",
@@ -659,23 +877,60 @@ function InstructionArrow({ icon }: { icon: InstructionIcon }) {
     arrive:        "flag",
     start:         "navigation",
   };
-  return <Feather name={iconMap[icon]} size={64} color={NAV_WHITE} />;
+  return <Feather name={iconMap[icon]} size={size} color={NAV_WHITE} />;
 }
 
-// ── Bottom stat cell ───────────────────────────────────────────────────────
+// ── User position marker ──────────────────────────────────────────────────────
 
-function BottomStat({ value, label }: { value: string; label: string }) {
+function UserMarker({ markerStyle, heading }: { markerStyle: "arrow" | "motorcycle"; heading: number }) {
+  if (markerStyle === "motorcycle") {
+    return (
+      <View style={[st.motoMarker, { transform: [{ rotate: `${heading}deg` }] }]}>
+        <Text style={{ fontSize: 28 }}>🏍️</Text>
+      </View>
+    );
+  }
+  // Default: amber directional arrow
   return (
-    <View style={styles.bottomStat}>
-      <Text style={styles.bottomStatValue}>{value}</Text>
-      <Text style={styles.bottomStatLabel}>{label}</Text>
+    <View style={[st.arrowMarker, { transform: [{ rotate: `${heading}deg` }] }]}>
+      <View style={st.arrowTri} />
+      <View style={st.arrowDot} />
     </View>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Voice helper (avoids speech queue pile-up)
-// ---------------------------------------------------------------------------
+// ── Bottom info cell ──────────────────────────────────────────────────────────
+
+function BottomCell({ value, label }: { value: string; label: string }) {
+  return (
+    <View style={st.bottomCell}>
+      <Text style={st.bottomValue}>{value}</Text>
+      <Text style={st.bottomLabel}>{label}</Text>
+    </View>
+  );
+}
+
+// ── Handoff sheet ─────────────────────────────────────────────────────────────
+
+function HandoffSheet({
+  distM, onNavigateToStart, onStartHere,
+}: { distM: number; onNavigateToStart: () => void; onStartHere: () => void }) {
+  return (
+    <View style={st.handoffSheet}>
+      <View style={st.handoffHandle} />
+      <Text style={st.handoffTitle}>You are {(distM / 1000).toFixed(1)}km from the start</Text>
+      <Text style={st.handoffSub}>Where would you like to begin?</Text>
+      <Pressable style={st.handoffPrimary} onPress={onNavigateToStart}>
+        <Text style={st.handoffPrimaryText}>Navigate to start first</Text>
+      </Pressable>
+      <Pressable style={st.handoffSecondary} onPress={onStartHere}>
+        <Text style={st.handoffSecondaryText}>Start from here anyway</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+// ── Voice helper ──────────────────────────────────────────────────────────────
 
 let _speechBusy = false;
 
@@ -683,8 +938,9 @@ function speak(text: string, muted: boolean): void {
   if (muted || _speechBusy) return;
   _speechBusy = true;
   Speech.speak(text, {
-    language: "en",
-    rate: 0.95,
+    language: "en-GB",
+    rate: 0.9,
+    pitch: 1.0,
     onDone: () => { _speechBusy = false; },
     onError: () => { _speechBusy = false; },
     onStopped: () => { _speechBusy = false; },
@@ -692,207 +948,227 @@ function speak(text: string, muted: boolean): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Styles — premium dark navigation
+// Styles
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BOTTOM_STATS_H = 80;
-const CONTROL_ROW_H  = 72;
-const SAFE_TOP       = Platform.OS === "ios" ? 52 : 28;
-
-const styles = StyleSheet.create({
+const st = StyleSheet.create({
   screen: { flex: 1, backgroundColor: NAV_BG },
 
   loadingScreen: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: NAV_BG,
-    gap: 16,
+    flex: 1, backgroundColor: NAV_BG,
+    alignItems: "center", justifyContent: "center", gap: 16,
   },
-  loadingText: { color: NAV_WHITE, fontSize: 16, fontWeight: "600" },
+  loadingText: { color: NAV_WHITE, fontSize: 18, fontWeight: "700" },
 
-  // ── Instruction banner — sits at top, ~35% of screen ─────────────────────
-  instructionBanner: {
-    position: "absolute",
-    top: SAFE_TOP,
-    left: 0,
-    right: 0,
-    backgroundColor: NAV_CARD,
-    borderLeftWidth: 6,
-    borderLeftColor: NAV_AMBER,
+  // ── Top panel ──────────────────────────────────────────────────────────────
+  topPanel: {
+    zIndex: 10,
     paddingHorizontal: 16,
-    paddingVertical: 14,
-    gap: 10,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.6,
-    shadowRadius: 16,
-    elevation: 16,
-  },
-  stateBadge: {
-    borderRadius: 8,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    alignSelf: "flex-start",
-  },
-  stateBadgeText: {
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 1,
-    textTransform: "uppercase",
-  },
-  instructionRow: { flexDirection: "row", alignItems: "center", gap: 16 },
-  instructionIconWrap: {
-    width: 80,
-    height: 80,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.05)",
-    borderRadius: 12,
-  },
-  instructionText: {
-    color: NAV_WHITE,
-    fontSize: 28,
-    fontWeight: "900",
-    lineHeight: 34,
-    letterSpacing: -0.5,
-  },
-  instructionDist: {
-    color: NAV_AMBER,
-    fontSize: 20,
-    fontWeight: "700",
-    marginTop: 6,
-  },
-  instructionSub: {
-    color: "#A0A0A0",
-    fontSize: 14,
-    marginTop: 4,
-  },
-
-  // ── Status banner (recalculating) ─────────────────────────────────────────
-  statusBanner: {
-    position: "absolute",
-    alignSelf: "center",
-    top: "42%",
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: NAV_AMBER,
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 14,
+    paddingBottom: 12,
+    minHeight: TOP_PANEL_H,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.5,
     shadowRadius: 12,
-    elevation: 12,
+    elevation: 14,
   },
-  statusBannerText: { color: NAV_BG, fontSize: 16, fontWeight: "800" },
 
-  // ── Overview toggle (floating right) ─────────────────────────────────────
-  overviewBtn: {
-    position: "absolute",
-    right: 16,
-    top: "50%",
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: NAV_OVERLAY_CONTROL,
-    borderColor: "#333",
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 6,
-  },
-  overviewBtnActive: { backgroundColor: NAV_AMBER },
+  // ── Map (fills middle) ─────────────────────────────────────────────────────
+  map: { flex: 1 },
 
-  // ── Bottom section ────────────────────────────────────────────────────────
-  bottomSection: {
+  // ── Bottom bar ─────────────────────────────────────────────────────────────
+  bottomBar: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: NAV_OVERLAY_DARK,
-    borderTopWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: NAV_BG + "F0",
+    borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "#2A2A2A",
+    minHeight: BOTTOM_BAR_H,
+    paddingTop: 6,
   },
-  statsBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    height: BOTTOM_STATS_H,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: "#2A2A2A",
-  },
-  statDivider: { width: 1, height: 40, backgroundColor: "#2A2A2A" },
-  bottomStat: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 8 },
-  bottomStatValue: { color: NAV_WHITE, fontSize: 24, fontWeight: "900" },
-  bottomStatLabel: { color: "#A0A0A0", fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.8, marginTop: 2 },
+  bottomCell: { flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 8 },
+  bottomValue:{ color: NAV_WHITE, fontSize: 24, fontWeight: "900" },
+  bottomLabel:{ color: MUTED_TEXT, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.8 },
+  barDiv:     { width: StyleSheet.hairlineWidth, height: 36, backgroundColor: "#2A2A2A" },
 
-  // ── Control buttons ───────────────────────────────────────────────────────
-  controlRow: {
+  // ── Persistent controls ────────────────────────────────────────────────────
+  ctrlRow: {
+    position: "absolute",
+    bottom: BOTTOM_BAR_H,
+    left: 0,
+    right: 0,
     flexDirection: "row",
-    height: CONTROL_ROW_H + (Platform.OS === "ios" ? 24 : 0),
-    paddingBottom: Platform.OS === "ios" ? 24 : 0,
   },
-  ctrlBtn: {
-    flex: 1,
-    flexDirection: "row",
+  ctrlExit: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    height: CTRL_H, gap: 8, backgroundColor: NAV_RED + "CC",
+  },
+  ctrlMute: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    height: CTRL_H, gap: 8, backgroundColor: "#1E1E1E",
+  },
+  ctrlMuteMuted: { backgroundColor: "#221A00" },
+  ctrlText: { color: NAV_WHITE, fontSize: 14, fontWeight: "800", letterSpacing: 0.8 },
+
+  // ── Overview toggle ────────────────────────────────────────────────────────
+  overviewBtn: {
+    position: "absolute",
+    right: 16,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#1A1A1AE0",
+    borderWidth: 1,
+    borderColor: "#333",
     alignItems: "center",
     justifyContent: "center",
-    gap: 10,
+    zIndex: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 8,
   },
-  ctrlBtnExit: { backgroundColor: NAV_RED + "CC" },
-  ctrlBtnMute: { backgroundColor: "#2A2A2A" },
-  ctrlBtnMuteActive: { backgroundColor: "#1A1A00" },
-  ctrlBtnText: { fontSize: 13, fontWeight: "800", color: NAV_WHITE, letterSpacing: 0.8 },
+  overviewBtnActive: { backgroundColor: AMBER },
 
-  // ── User position marker ──────────────────────────────────────────────────
-  userArrow: {
-    width: 36,
-    height: 36,
+  // ── Re-centre ──────────────────────────────────────────────────────────────
+  recentreBtn: {
+    position: "absolute",
+    right: 16,
+    bottom: BOTTOM_BAR_H + CTRL_H + 16,
+    zIndex: 20,
+  },
+  recentreBtnInner: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: AMBER,
     alignItems: "center",
-    justifyContent: "flex-start",
-  },
-  userArrowTri: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 10,
-    borderRightWidth: 10,
-    borderBottomWidth: 26,
-    borderLeftColor: "transparent",
-    borderRightColor: "transparent",
-    borderBottomColor: NAV_AMBER,
-  },
-  userArrowDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: NAV_AMBER,
-    marginTop: -4,
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 10,
   },
 
-  // ── Map markers ───────────────────────────────────────────────────────────
-  startMarker: {
-    width: 32,
-    height: 32,
+  // ── Status banner ──────────────────────────────────────────────────────────
+  statusBanner: {
+    position: "absolute",
+    alignSelf: "center",
+    top: "40%",
+    backgroundColor: AMBER,
+    paddingHorizontal: 28,
+    paddingVertical: 14,
     borderRadius: 16,
-    backgroundColor: NAV_ARRIVAL_GREEN,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    elevation: 14,
+  },
+  statusBannerText: { color: NAV_BG, fontSize: 16, fontWeight: "900" },
+
+  // ── User position markers ──────────────────────────────────────────────────
+  arrowMarker: { width: 36, height: 36, alignItems: "center", justifyContent: "flex-start" },
+  arrowTri: {
+    width: 0, height: 0,
+    borderLeftWidth: 11, borderRightWidth: 11, borderBottomWidth: 28,
+    borderLeftColor: "transparent", borderRightColor: "transparent",
+    borderBottomColor: AMBER,
+  },
+  arrowDot: {
+    width: 11, height: 11, borderRadius: 6,
+    backgroundColor: AMBER, marginTop: -4,
+  },
+  motoMarker: {
+    width: 40, height: 40,
+    alignItems: "center", justifyContent: "center",
+  },
+
+  // ── Map markers ────────────────────────────────────────────────────────────
+  mapMarker: {
+    width: 18, height: 18, borderRadius: 9,
+    borderWidth: 2, borderColor: NAV_WHITE,
+  },
+  gradeDot: {
+    minWidth: 36, height: 26, borderRadius: 6, paddingHorizontal: 4,
+    alignItems: "center", justifyContent: "center",
+    borderWidth: 1.5, borderColor: NAV_WHITE,
+  },
+  gradeDotText: { color: NAV_WHITE, fontSize: 11, fontWeight: "900" },
+
+  // ── Handoff sheet ──────────────────────────────────────────────────────────
+  handoffSheet: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#1A1A1A",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+    zIndex: 50,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
+    elevation: 24,
+  },
+  handoffHandle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: AMBER, alignSelf: "center", marginBottom: 18,
+  },
+  handoffTitle:  { color: NAV_WHITE, fontSize: 20, fontWeight: "800", marginBottom: 6 },
+  handoffSub:    { color: MUTED_TEXT, fontSize: 14, marginBottom: 20 },
+  handoffPrimary:{ backgroundColor: AMBER, borderRadius: 14, height: 68, alignItems: "center", justifyContent: "center", marginBottom: 12 },
+  handoffPrimaryText: { color: NAV_BG, fontSize: 17, fontWeight: "900" },
+  handoffSecondary: { borderRadius: 14, height: 56, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#333" },
+  handoffSecondaryText: { color: MUTED_TEXT, fontSize: 16, fontWeight: "600" },
+});
+
+// ── Panel sub-styles ──────────────────────────────────────────────────────────
+
+const panel = StyleSheet.create({
+  row: {
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 2,
-    borderColor: NAV_WHITE,
+    flex: 1,
+    gap: 12,
   },
-  destMarker: { alignItems: "center" },
-  trailEntryDot: {
-    width: 16,
-    height: 16,
+  arrowBox: {
+    width: 56, height: 56,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.1)",
+    borderRadius: 10,
+  },
+  centre: { flex: 1 },
+  distText:  { color: AMBER, fontSize: 16, fontWeight: "700" },
+  instrText: { color: NAV_WHITE, fontSize: 22, fontWeight: "900", letterSpacing: -0.5 },
+  roadText:  { color: NAV_WHITE, fontSize: 18, fontWeight: "700" },
+  subText:   { color: "rgba(255,255,255,0.7)", fontSize: 13, marginTop: 2 },
+  nextBox:   { alignItems: "center", width: 44 },
+  nextLabel: { color: "rgba(255,255,255,0.6)", fontSize: 10, fontWeight: "700", marginBottom: 2 },
+
+  // Trail mode
+  gradeBadge: {
+    width: 56, height: 56, borderRadius: 10,
+    alignItems: "center", justifyContent: "center",
+  },
+  gradeLetter: { color: "rgba(255,255,255,0.8)", fontSize: 11, fontWeight: "700", letterSpacing: 1 },
+  gradeNum:    { color: NAV_WHITE, fontSize: 32, fontWeight: "900", lineHeight: 34 },
+  trailName:   { color: NAV_WHITE, fontSize: 18, fontWeight: "800", letterSpacing: -0.3 },
+  trailKm:     { color: "rgba(255,255,255,0.85)", fontSize: 13, marginTop: 2 },
+  offroadBadge:{
+    backgroundColor: AMBER,
     borderRadius: 8,
-    borderWidth: 2,
-    borderColor: NAV_WHITE,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
+  offroadText: { color: NAV_WHITE, fontSize: 10, fontWeight: "900", letterSpacing: 1.5 },
 });
