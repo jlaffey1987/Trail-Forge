@@ -18,7 +18,11 @@
         "NSLocationAlwaysUsageDescription": "TrailForge keeps recording your ride in the background so you don't have to keep the app open.",
         "NSPhotoLibraryUsageDescription": "TrailForge needs access to your photos so you can attach trail photos.",
         "NSCameraUsageDescription": "TrailForge needs the camera to capture trail photos.",
-        "UIBackgroundModes": ["location", "fetch", "remote-notification"],
+        "UIBackgroundModes": [
+          "location",
+          "fetch",
+          "remote-notification"
+        ],
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -76,7 +80,8 @@
           "photosPermission": "TrailForge needs access to your photos so you can attach trail photos.",
           "cameraPermission": "TrailForge needs the camera to capture trail photos."
         }
-      ]
+      ],
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true

@@ -487,8 +487,13 @@ async function main() {
   if (opts.dryRun) console.log("DRY RUN — no database writes");
   if (opts.simple) console.log("SIMPLE MODE — single-clause motor_vehicle=yes query only");
 
-  // Verify Overpass connectivity before doing anything else.
-  await testOverpassConnectivity();
+  // Verify Overpass connectivity — non-fatal; a 504 is often a transient load spike.
+  try {
+    await testOverpassConnectivity();
+  } catch (e) {
+    console.warn(`[Overpass] Connectivity check failed: ${(e as Error).message}`);
+    console.warn("[Overpass] Proceeding anyway — the actual query may still succeed.\n");
+  }
 
   const supabaseUrl = process.env["SUPABASE_URL"];
   const supabaseKey = process.env["SUPABASE_SERVICE_ROLE_KEY"];
