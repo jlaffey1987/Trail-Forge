@@ -84,15 +84,52 @@ function parseCli(): Opts {
 
 // ---------------------------------------------------------------------------
 // Region bounding boxes [south, west, north, east]
+//
+// Large regions (England) are deliberately split into small sub-regions so
+// each Overpass query stays well under the 60-second timeout.  Using one big
+// bbox for England would cause a timeout → 0 results.
 // ---------------------------------------------------------------------------
 
-const REGIONS: Record<string, { bbox: [number, number, number, number]; label: string }> = {
-  scotland: { bbox: [54.5, -7.6, 60.9, 1.8], label: "Scotland" },
-  wales: { bbox: [51.3, -5.4, 53.5, -2.6], label: "Wales" },
-  "england-north": { bbox: [52.5, -3.6, 55.5, 2.0], label: "England North" },
-  "england-midlands": { bbox: [51.5, -3.5, 53.0, 1.8], label: "England Midlands" },
-  "england-south": { bbox: [49.8, -5.6, 52.0, 1.8], label: "England South" },
+const REGIONS: Record<string, { bbox: [number, number, number, number]; label: string; scotland?: boolean }> = {
+  // ── Scotland (separate flag triggers extra forest-road clauses) ───────────
+  scotland:           { bbox: [54.5, -7.6, 60.9,  1.8],  label: "Scotland",          scotland: true },
+
+  // ── Wales ─────────────────────────────────────────────────────────────────
+  wales:              { bbox: [51.3, -5.4, 53.5, -2.6],  label: "Wales" },
+
+  // ── England North (split — single bbox would timeout at 60s) ─────────────
+  yorkshire:          { bbox: [53.3, -2.5, 54.5,  0.1],  label: "Yorkshire" },
+  "lake-district":    { bbox: [54.2, -3.5, 55.0, -2.0],  label: "Lake District" },
+  "peak-district":    { bbox: [53.0, -2.2, 53.6, -1.4],  label: "Peak District" },
+  "northumberland":   { bbox: [54.8, -2.5, 55.5, -1.5],  label: "Northumberland" },
+
+  // ── England Midlands (split) ──────────────────────────────────────────────
+  shropshire:         { bbox: [52.3, -3.1, 52.9, -2.4],  label: "Shropshire" },
+  "welsh-marches":    { bbox: [51.8, -3.0, 52.5, -2.6],  label: "Welsh Marches" },
+  "midlands-central": { bbox: [52.0, -1.8, 53.0,  1.8],  label: "Midlands Central" },
+
+  // ── England South (split) ─────────────────────────────────────────────────
+  dartmoor:           { bbox: [50.3, -4.1, 50.7, -3.5],  label: "Dartmoor" },
+  cotswolds:          { bbox: [51.6, -2.2, 52.0, -1.4],  label: "Cotswolds" },
+  "south-downs":      { bbox: [50.8, -1.2, 51.1,  0.3],  label: "South Downs" },
+  "new-forest":       { bbox: [50.7, -1.8, 51.0, -1.3],  label: "New Forest" },
+  "exmoor":           { bbox: [51.0, -3.8, 51.3, -3.3],  label: "Exmoor" },
+
+  // ── Convenience aliases that group sub-regions (run via --region all) ─────
+  // These are not queried directly — see expandRegions() below.
 };
+
+/**
+ * Keys to use when --region all is specified.
+ * Lists every leaf region in a sensible south→north order.
+ */
+const ALL_REGIONS = [
+  "dartmoor", "exmoor", "new-forest", "south-downs", "cotswolds",
+  "welsh-marches", "shropshire", "midlands-central",
+  "peak-district", "yorkshire", "lake-district", "northumberland",
+  "wales",
+  "scotland",
+];
 
 // ---------------------------------------------------------------------------
 // Overpass types
@@ -117,24 +154,61 @@ interface OverpassResponse {
 // Overpass query
 // ---------------------------------------------------------------------------
 
+/**
+ * Standard query — covers all legal motorcycle trail tags for England/Wales.
+ * Each clause uses a small focused bbox to stay under the 60s Overpass timeout.
+ */
 function buildOverpassQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
   const b = `${s},${w},${n},${e}`;
-  // Timeout reduced to 60s — Overpass rejects queries with timeout>60 on the
-  // public API when the server is under load, which can return HTTP 406.
-  // Each union clause is a separate equality filter (no regex) for broadest
-  // compatibility across all Overpass API versions.
-  return `[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](${b});way["highway"="track"]["motor_vehicle"="permissive"](${b});way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});way["highway"="byway"](${b});way["highway"="track"]["tracktype"="grade2"](${b});way["highway"="track"]["tracktype"="grade3"](${b});way["highway"="track"]["tracktype"="grade4"](${b});way["highway"="track"]["tracktype"="grade5"](${b}););out geom;`;
+  return (
+    `[out:json][timeout:60];(` +
+    `way["highway"="track"]["motor_vehicle"="yes"](${b});` +
+    `way["highway"="track"]["motor_vehicle"="permissive"](${b});` +
+    `way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});` +
+    `way["highway"="byway"](${b});` +
+    `way["highway"="track"]["tracktype"="grade2"](${b});` +
+    `way["highway"="track"]["tracktype"="grade3"](${b});` +
+    `way["highway"="track"]["tracktype"="grade4"](${b});` +
+    `way["highway"="track"]["tracktype"="grade5"](${b});` +
+    `);out geom;`
+  );
 }
 
 /**
- * Single-clause query for smoke-testing a region.
- * Matches the exact format specified in the fix spec:
- *   data=[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](<bbox>););out geom;
+ * Scotland query — adds forest road clauses (access=yes / foot=yes on tracks)
+ * which are commonly used by Forestry & Land Scotland.
+ */
+function buildScotlandQuery(bbox: [number, number, number, number]): string {
+  const [s, w, n, e] = bbox;
+  const b = `${s},${w},${n},${e}`;
+  return (
+    `[out:json][timeout:60];(` +
+    `way["highway"="track"]["motor_vehicle"="yes"](${b});` +
+    `way["highway"="track"]["motor_vehicle"="permissive"](${b});` +
+    `way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});` +
+    `way["highway"="byway"](${b});` +
+    `way["highway"="track"]["tracktype"="grade2"](${b});` +
+    `way["highway"="track"]["tracktype"="grade3"](${b});` +
+    `way["highway"="track"]["tracktype"="grade4"](${b});` +
+    `way["highway"="track"]["tracktype"="grade5"](${b});` +
+    `way["highway"="track"]["access"="yes"](${b});` +
+    `way["highway"="track"]["foot"="yes"](${b});` +
+    `);out geom;`
+  );
+}
+
+/**
+ * Simple single-clause query for smoke-testing a region.
  */
 function buildSimpleQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
   return `[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](${s},${w},${n},${e}););out geom;`;
+}
+
+/** Sleep helper */
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
 }
 
 async function fetchOverpass(query: string, attempt = 1): Promise<OverpassResponse> {
@@ -142,7 +216,6 @@ async function fetchOverpass(query: string, attempt = 1): Promise<OverpassRespon
   const body = `data=${encodeURIComponent(query)}`;
 
   console.log(`  [Overpass] POST ${url} (attempt ${attempt})`);
-  console.log(`  [Overpass] Query:\n${query}\n`);
 
   const res = await fetch(url, {
     method: "POST",
@@ -156,18 +229,20 @@ async function fetchOverpass(query: string, attempt = 1): Promise<OverpassRespon
 
   console.log(`  [Overpass] Response: HTTP ${res.status}`);
 
-  if (res.status === 429 || res.status === 503) {
-    if (attempt >= 4) throw new Error(`Overpass rate-limited after ${attempt} attempts`);
-    const wait = attempt * 30_000;
-    console.log(`  Overpass busy (${res.status}), waiting ${wait / 1000}s...`);
-    await new Promise(r => setTimeout(r, wait));
+  // 429 = rate limit, 503 = server busy, 504 = gateway timeout
+  // All are transient — wait and retry up to 3 times.
+  if (res.status === 429 || res.status === 503 || res.status === 504) {
+    if (attempt >= 3) throw new Error(`Overpass server error (${res.status}) after ${attempt} attempts`);
+    const wait = attempt === 1 ? 60_000 : 90_000;
+    console.log(`  Overpass busy (${res.status}), waiting ${wait / 1000}s before retry...`);
+    await sleep(wait);
     return fetchOverpass(query, attempt + 1);
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "(could not read body)");
-    console.error(`  [Overpass] Error body:\n${text}`);
-    throw new Error(`Overpass HTTP ${res.status}: ${text.slice(0, 300)}`);
+    console.error(`  [Overpass] Error body:\n${text.slice(0, 400)}`);
+    throw new Error(`Overpass HTTP ${res.status}`);
   }
 
   return res.json() as Promise<OverpassResponse>;
@@ -348,6 +423,7 @@ function splitAtGaps(pts: OsmWayGeom[]): OsmSegment[] {
 interface TrailRow {
   name: string;
   source: string;
+  type: string;
   terrain: string;
   difficulty: number;
   distance_km: number;
@@ -385,8 +461,13 @@ async function importRegion(
   if (!reg) throw new Error(`Unknown region: ${regionKey}`);
 
   console.log(`\n[${reg.label}] Querying Overpass...`);
-  const query = opts.simple ? buildSimpleQuery(reg.bbox) : buildOverpassQuery(reg.bbox);
+  const query = opts.simple
+    ? buildSimpleQuery(reg.bbox)
+    : reg.scotland
+      ? buildScotlandQuery(reg.bbox)
+      : buildOverpassQuery(reg.bbox);
   if (opts.simple) console.log(`  [Overpass] Using simplified single-clause query (--simple mode)`);
+  if (reg.scotland && !opts.simple) console.log(`  [Overpass] Using Scotland query (includes forest road clauses)`);
   const response = await fetchOverpass(query);
   const ways = response.elements.filter((e): e is OsmWay => e.type === "way" && e.geometry?.length >= 2);
   console.log(`[${reg.label}] ${ways.length} ways received`);
@@ -445,6 +526,7 @@ async function importRegion(
       const row: TrailRow = {
         name,
         source: "OSM-UK",
+        type: legal_status === "BOAT" ? "BOAT" : "green-lane",
         terrain: "trail",
         difficulty,
         distance_km: Math.round(seg.distKm * 100) / 100,
@@ -458,7 +540,7 @@ async function importRegion(
         legal_confidence,
         legal_source: "OpenStreetMap",
         osm_way_ids: [String(way.id)],
-        verification_status: "approved",
+        verification_status: "verified",
       };
 
       const { error } = await supabase.from("trails").insert(row as never);
@@ -507,18 +589,39 @@ async function main() {
   });
 
   const regionKeys = opts.region === "all"
-    ? Object.keys(REGIONS)
+    ? ALL_REGIONS
     : [opts.region];
+
+  // Validate region keys
+  for (const key of regionKeys) {
+    if (!REGIONS[key]) {
+      console.error(`Unknown region: "${key}". Valid regions: ${Object.keys(REGIONS).join(", ")}`);
+      process.exit(1);
+    }
+  }
 
   let totalQueried = 0, totalSegments = 0, totalInserted = 0, totalSkipped = 0, totalErrors = 0;
 
-  for (const regionKey of regionKeys) {
-    const result = await importRegion(regionKey, opts, supabase);
-    totalQueried += result.queried;
-    totalSegments += result.segments;
-    totalInserted += result.inserted;
-    totalSkipped += result.skipped;
-    totalErrors += result.errors;
+  for (let i = 0; i < regionKeys.length; i++) {
+    const regionKey = regionKeys[i];
+
+    // 30-second courtesy pause between queries to avoid rate limiting
+    if (i > 0) {
+      console.log(`\n[Overpass] Waiting 30s before next region (rate limit courtesy)...`);
+      await sleep(30_000);
+    }
+
+    try {
+      const result = await importRegion(regionKey, opts, supabase);
+      totalQueried  += result.queried;
+      totalSegments += result.segments;
+      totalInserted += result.inserted;
+      totalSkipped  += result.skipped;
+      totalErrors   += result.errors;
+    } catch (err) {
+      console.error(`[${regionKey}] Failed: ${(err as Error).message} — skipping to next region`);
+      totalErrors++;
+    }
   }
 
   console.log("\n=== Summary ===");
