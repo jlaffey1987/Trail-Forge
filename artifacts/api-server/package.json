@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.mjs",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "dev:local": "node ./scripts/devLocal.mjs",
