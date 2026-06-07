@@ -6,6 +6,7 @@ primary_region = "lhr"
 [env]
   PORT = "8080"
   SKIP_SCHEMA_PREFLIGHT = "true"
+  NODE_ENV = "production"
 
 [http_service]
   internal_port = 8080

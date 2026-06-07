@@ -10,54 +10,57 @@
 
 let _bearerGetter: (() => Promise<string | null> | string | null) | null = null;
 
+/** Production API host on Fly.io — used when not in development mode. */
+export const PRODUCTION_API_BASE_URL = "https://trailforge-api.fly.dev";
+
 export function setSharedBearerGetter(
   getter: (() => Promise<string | null> | string | null) | null,
 ): void {
   _bearerGetter = getter;
 }
 
+export function isDevelopmentApiMode(): boolean {
+  if (typeof __DEV__ !== "undefined") return __DEV__;
+  return process.env.NODE_ENV !== "production";
+}
+
 export function apiBaseUrl(): string {
-  // 1. Explicit env var always wins (set in .env.local for production/staging)
   const explicitBase = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
+
+  // Production builds / release: Fly.io unless explicitly overridden.
+  if (!isDevelopmentApiMode()) {
+    return (explicitBase ?? PRODUCTION_API_BASE_URL).replace(/\/+$/, "");
+  }
+
+  // Development: honour .env.local when set (local IP or Fly.io for off-WiFi testing).
   if (explicitBase) {
     return explicitBase.replace(/\/+$/, "");
   }
 
-  // 2. In development (Expo Go / Metro), derive the host dynamically from the
-  //    Expo manifest so a hardcoded IP is never needed.
-  //    The API server always runs on port 8080 on the same machine as Metro.
-  if (__DEV__) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const Constants = require("expo-constants").default as {
-        expoGoConfig?: { debuggerHost?: string };
-        manifest?:     { debuggerHost?: string };
-        expoConfig?:   { hostUri?: string };
-      };
-      const rawHost =
-        Constants.expoGoConfig?.debuggerHost          // Expo SDK 47+ / Expo Go
-        ?? (Constants.manifest as { debuggerHost?: string } | null)?.debuggerHost  // SDK <47
-        ?? Constants.expoConfig?.hostUri;             // EAS update / SDK 48+
+  // Expo Go on the same network as Metro — derive laptop IP automatically.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Constants = require("expo-constants").default as {
+      expoGoConfig?: { debuggerHost?: string };
+      manifest?: { debuggerHost?: string };
+      expoConfig?: { hostUri?: string };
+    };
+    const rawHost =
+      Constants.expoGoConfig?.debuggerHost
+      ?? (Constants.manifest as { debuggerHost?: string } | null)?.debuggerHost
+      ?? Constants.expoConfig?.hostUri;
 
-      if (rawHost) {
-        // rawHost looks like "192.168.1.85:8765" — we only want the IP/hostname
-        const host = rawHost.split(":")[0];
-        const derived = `http://${host}:8080`;
-        return derived;
-      }
-    } catch {
-      // expo-constants not available — fall through to domain check
+    if (rawHost) {
+      const host = rawHost.split(":")[0];
+      return `http://${host}:8080`;
     }
+  } catch {
+    // expo-constants not available — fall through
   }
 
-  // 3. Production: EXPO_PUBLIC_DOMAIN (e.g. "myapp.replit.app")
-  const domain = process.env.EXPO_PUBLIC_DOMAIN;
-  if (!domain) {
-    throw new Error(
-      "Set EXPO_PUBLIC_API_BASE_URL or EXPO_PUBLIC_DOMAIN so mobile can reach the API.",
-    );
-  }
-  return `https://${domain}`;
+  throw new Error(
+    "Set EXPO_PUBLIC_API_BASE_URL in .env.local (local IP or https://trailforge-api.fly.dev).",
+  );
 }
 
 export interface ApiFetchOptions extends RequestInit {
