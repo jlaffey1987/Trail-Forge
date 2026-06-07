@@ -23,6 +23,14 @@ import { BrandedLoader } from "@/components/BrandedLoader";
 import colors from "@/constants/colors";
 import { tokenCache } from "@/lib/clerkTokenCache";
 import { setSharedBearerGetter, apiBaseUrl } from "@/lib/api";
+import {
+  clerkSlugFromPublishableKey,
+  isClerkKidMismatchMessage,
+  jwtKid,
+  parseKidMismatch,
+  publishableKeyChanged,
+  rememberPublishableKey,
+} from "@/lib/clerkSessionGuard";
 import { subscribeToNotificationTaps } from "@/lib/notificationRouting";
 import { runStartupChecks } from "@/lib/startupChecks";
 
@@ -115,14 +123,15 @@ async function getTokenWithRetry(
 }
 
 function ApiAuthBridge({ children }: { children: React.ReactNode }) {
-  const { getToken, isLoaded, isSignedIn } = useAuth();
+  const { getToken, isLoaded, isSignedIn, signOut } = useAuth();
+  const staleSignOutRef = React.useRef(false);
 
   useEffect(() => {
-    // Wrap in a retry-aware closure so transient null returns during Clerk's
-    // initialization window don't send an un-authenticated request.
     const fn = () => getTokenWithRetry(getToken);
-    setAuthTokenGetter(fn);
-    setSharedBearerGetter(fn);
+    if (isLoaded) {
+      setAuthTokenGetter(fn);
+      setSharedBearerGetter(fn);
+    }
     return () => {
       setAuthTokenGetter(null);
       setSharedBearerGetter(null);
@@ -130,48 +139,86 @@ function ApiAuthBridge({ children }: { children: React.ReactNode }) {
   }, [getToken, isLoaded]);
 
   useEffect(() => {
+    if (!isLoaded || !CLERK_PUBLISHABLE_KEY) return;
+    void (async () => {
+      if (await publishableKeyChanged(CLERK_PUBLISHABLE_KEY)) {
+        console.warn(
+          "[ApiAuthBridge] Clerk publishable key changed — signing out stale session",
+        );
+        staleSignOutRef.current = true;
+        await signOut();
+      }
+      await rememberPublishableKey(CLERK_PUBLISHABLE_KEY);
+    })();
+  }, [isLoaded, signOut]);
+
+  useEffect(() => {
     if (!isLoaded) return;
+
+    const slug = clerkSlugFromPublishableKey(CLERK_PUBLISHABLE_KEY);
     if (__DEV__) {
       console.log(
-        `[ApiAuthBridge] isLoaded=${isLoaded} isSignedIn=${isSignedIn} API=${API_BASE_URL || "(none)"}`,
+        `[ApiAuthBridge] isLoaded=${isLoaded} isSignedIn=${isSignedIn} API=${API_BASE_URL || "(none)"} clerk=${slug ?? "?"}`,
       );
-      if (isSignedIn) {
-        getTokenWithRetry(getToken)
-          .then(async (t) => {
-            console.log(`[ApiAuthBridge] token present=${Boolean(t)} prefix="${t?.slice(0, 20) ?? "null"}"`);
-            if (t) {
-              // Ping /api/auth-test to confirm full round-trip auth
-              try {
-                const r = await fetch(`${API_BASE_URL}/api/auth-test`, {
-                  headers: { Authorization: `Bearer ${t}` },
-                });
-                const body = await r.json() as Record<string, unknown>;
-                if (r.ok) {
-                  console.log(`[ApiAuthBridge] ✅ auth-test OK → userId=${body.userId as string}`);
-                } else {
-                  console.warn(`[ApiAuthBridge] ❌ auth-test ${r.status} →`, JSON.stringify(body));
-                  console.warn(`[ApiAuthBridge] Server URL used: ${API_BASE_URL}`);
-                }
-              } catch (e) {
-                console.warn("[ApiAuthBridge] auth-test fetch error:", e);
-              }
-            }
-          })
-          .catch((e) => console.warn("[ApiAuthBridge] getToken error:", e));
-      }
     }
-  }, [isLoaded, isSignedIn, getToken]);
+
+    if (!isSignedIn) return;
+
+    void getTokenWithRetry(getToken)
+      .then(async (t) => {
+        const kid = t ? jwtKid(t) : null;
+        if (__DEV__) {
+          console.log(
+            `[ApiAuthBridge] token present=${Boolean(t)} prefix="${t?.slice(0, 20) ?? "null"}" kid=${kid ?? "?"}`,
+          );
+        }
+        if (!t) return;
+
+        try {
+          const r = await fetch(`${API_BASE_URL}/api/auth-test`, {
+            headers: { Authorization: `Bearer ${t}` },
+          });
+          const body = await r.json() as Record<string, unknown>;
+          if (r.ok) {
+            if (__DEV__) {
+              console.log(`[ApiAuthBridge] ✅ auth-test OK → userId=${body.userId as string}`);
+            }
+            return;
+          }
+
+          if (__DEV__) {
+            console.warn(`[ApiAuthBridge] ❌ auth-test ${r.status} →`, JSON.stringify(body));
+          }
+
+          const verifyError = String(body.verifyError ?? body.hint ?? "");
+          if (
+            body.code === "CLERK_INSTANCE_MISMATCH"
+            || isClerkKidMismatchMessage(verifyError)
+          ) {
+            const { tokenKid, serverKid } = parseKidMismatch(verifyError);
+            console.warn(
+              `[ApiAuthBridge] Stale Clerk session — token kid=${String(body.tokenKid ?? tokenKid)} server kid=${String(body.serverKid ?? serverKid)}. Signing out.`,
+            );
+            if (!staleSignOutRef.current) {
+              staleSignOutRef.current = true;
+              await signOut();
+            }
+          }
+        } catch (e) {
+          if (__DEV__) console.warn("[ApiAuthBridge] auth-test fetch error:", e);
+        }
+      })
+      .catch((e) => {
+        if (__DEV__) console.warn("[ApiAuthBridge] getToken error:", e);
+      });
+  }, [isLoaded, isSignedIn, getToken, signOut]);
 
   return <>{children}</>;
 }
 
 function RootLayoutNav() {
-  // Notification taps — mounted inside the Stack tree so expo-router's
-  // navigation context is live when the listener fires.
   useEffect(() => subscribeToNotificationTaps(), []);
 
-  // Startup diagnostics — logs API URL, Clerk env, and service reachability.
-  // Runs once on app mount, dev only. Output visible in Expo terminal / Metro.
   useEffect(() => {
     void runStartupChecks();
   }, []);
@@ -186,6 +233,7 @@ function RootLayoutNav() {
         contentStyle: { backgroundColor: colors.light.background },
       }}
     >
+      <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="sign-in" options={{ headerShown: false }} />
       <Stack.Screen
@@ -193,6 +241,7 @@ function RootLayoutNav() {
         options={{ headerShown: false, animation: "fade" }}
       />
       <Stack.Screen name="record" options={{ title: "Record ride" }} />
+      <Stack.Screen name="add-trail" options={{ title: "Add trail", headerShown: false }} />
       <Stack.Screen
         name="trail/[trailId]"
         options={{ title: "Trail", presentation: "modal" }}
@@ -211,7 +260,8 @@ function RootLayoutNav() {
       <Stack.Screen name="linesman" options={{ headerShown: false, animation: "slide_from_right" }} />
       <Stack.Screen name="intro"    options={{ headerShown: false, animation: "fade" }} />
       <Stack.Screen name="rate"         options={{ title: "Rate Trail", presentation: "modal" }} />
-      <Stack.Screen name="nav-settings" options={{ title: "Navigation", presentation: "modal" }} />
+      <Stack.Screen name="route-wizard" options={{ title: "Route Builder", headerShown: false }} />
+      <Stack.Screen name="routes/tnt" options={{ title: "Trans Northern Trail", headerShown: false }} />
     </Stack>
   );
 }

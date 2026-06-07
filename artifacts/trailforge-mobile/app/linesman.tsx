@@ -61,7 +61,7 @@ import {
   type LinesmanEdit,
   type MapTrail,
 } from "@/lib/api";
-import { haversineKm, parseGeoJsonPath } from "@/lib/geo";
+import { formatSearchBboxFromRegion, haversineKm, trailMapCoordinates } from "@/lib/geo";
 import {
   startRecording,
   stopRecording,
@@ -169,10 +169,10 @@ function MapSelector({
   });
   const [selected, setSelected] = useState<string | null>(null);
 
-  const bbox = useMemo(() => {
-    const { latitude: lat, longitude: lon, latitudeDelta: dLat, longitudeDelta: dLon } = region;
-    return `${(lon - dLon / 2).toFixed(4)},${(lat - dLat / 2).toFixed(4)},${(lon + dLon / 2).toFixed(4)},${(lat + dLat / 2).toFixed(4)}`;
-  }, [region]);
+  const bbox = useMemo(
+    () => formatSearchBboxFromRegion(region),
+    [region],
+  );
 
   const trailsQ = useQuery({
     queryKey: ["lm-trails-bbox", bbox],
@@ -210,10 +210,7 @@ function MapSelector({
         userInterfaceStyle="dark"
       >
         {trails.map(t => {
-          const raw = Array.isArray(t.path) && Array.isArray((t.path as unknown[])[0])
-            ? (t.path as [number, number][])
-            : [];
-          const coords = parseGeoJsonPath(raw);
+          const coords = trailMapCoordinates(t);
           if (coords.length < 2) return null;
           const isSelected = selected === t.id;
           return (

@@ -2,8 +2,10 @@
 
 export const GAP_THRESHOLD_KM = 0.5;
 export const MERGE_MIN_KM = 0.5;
-/** TNT spec: discard sections under 1 km after merging. */
+/** TNT master-route spec; named KML trails use {@link DISCARD_MIN_NAMED_KM}. */
 export const DISCARD_MIN_KM = 1.0;
+/** Named trail lines — keep short BOATs/byways (matches TET import). */
+export const DISCARD_MIN_NAMED_KM = 0.1;
 
 export interface TrackPoint {
   lat: number;
@@ -147,7 +149,10 @@ export function splitAtGaps(points: TrackPoint[]): {
   return { trailSections, roadSections, gapCount };
 }
 
-export function mergeShortSections(rawSections: RawSection[]): {
+export function mergeShortSections(
+  rawSections: RawSection[],
+  discardMinKm = DISCARD_MIN_KM,
+): {
   sections: RawSection[];
   mergeCount: number;
   discardCount: number;
@@ -182,7 +187,7 @@ export function mergeShortSections(rawSections: RawSection[]): {
   }
 
   const before = arr.length;
-  arr = arr.filter((s) => s.distanceKm >= DISCARD_MIN_KM);
+  arr = arr.filter((s) => s.distanceKm >= discardMinKm);
   return { sections: arr, mergeCount, discardCount: before - arr.length };
 }
 
@@ -204,6 +209,139 @@ ${trkpts}
 </gpx>`;
 }
 
+export function trailSectionName(trailName: string, index: number, total: number): string {
+  if (total === 1) return trailName;
+  return `${trailName} — Section ${index + 1}`;
+}
+
+export function roadSectionName(trailName: string, index: number): string {
+  return `${trailName} — Road Section ${index + 1}`;
+}
+
+function rawToParsedSection(
+  sec: RawSection,
+  name: string,
+  terrain: "trail" | "road",
+  sectionNumber: number,
+): ParsedSection {
+  const bbox = computeBbox(sec.points);
+  const centroid = computeCentroid(sec.points);
+  const elev = computeElevation(sec.points);
+  return {
+    name,
+    terrain,
+    points: sec.points,
+    distanceKm: Math.round(sec.distanceKm * 10) / 10,
+    bboxMinLat: bbox.minLat,
+    bboxMaxLat: bbox.maxLat,
+    bboxMinLon: bbox.minLon,
+    bboxMaxLon: bbox.maxLon,
+    startLat: sec.points[0].lat,
+    startLon: sec.points[0].lon,
+    endLat: sec.points[sec.points.length - 1].lat,
+    endLon: sec.points[sec.points.length - 1].lon,
+    centroidLat: centroid.lat,
+    centroidLon: centroid.lon,
+    elevationGainM: elev.gainM,
+    elevationLossM: elev.lossM,
+    sectionNumber,
+  };
+}
+
+/** Gap-split and merge within a single named KML trail line. */
+export function processNamedTrailLine(trailName: string, points: TrackPoint[]): {
+  sections: ParsedSection[];
+  stats: {
+    gapsFound: number;
+    mergeCount: number;
+    discardCount: number;
+    duplicatePointsRemoved: number;
+  };
+} {
+  const { points: cleanPoints, removed } = deduplicatePoints(points);
+  const { trailSections: rawTrail, roadSections: rawRoad, gapCount } = splitAtGaps(cleanPoints);
+  const { sections: mergedTrail, mergeCount, discardCount } = mergeShortSections(
+    rawTrail,
+    DISCARD_MIN_NAMED_KM,
+  );
+
+  const sections: ParsedSection[] = [];
+  let sectionNumber = 0;
+
+  for (let i = 0; i < mergedTrail.length; i++) {
+    sectionNumber++;
+    sections.push(
+      rawToParsedSection(
+        mergedTrail[i],
+        trailSectionName(trailName, i, mergedTrail.length),
+        "trail",
+        sectionNumber,
+      ),
+    );
+  }
+
+  let roadNum = 0;
+  for (const sec of rawRoad) {
+    if (sec.distanceKm < 0.05) continue;
+    roadNum++;
+    sectionNumber++;
+    sections.push(
+      rawToParsedSection(
+        sec,
+        roadSectionName(trailName, roadNum - 1),
+        "road",
+        sectionNumber,
+      ),
+    );
+  }
+
+  return {
+    sections,
+    stats: {
+      gapsFound: gapCount,
+      mergeCount,
+      discardCount,
+      duplicatePointsRemoved: removed,
+    },
+  };
+}
+
+export interface NamedTrailLineInput {
+  name: string;
+  points: TrackPoint[];
+}
+
+export function processAllTrailLines(lines: NamedTrailLineInput[]): {
+  sections: ParsedSection[];
+  stats: {
+    namedTrailLines: number;
+    gapsFound: number;
+    mergeCount: number;
+    discardCount: number;
+    duplicatePointsRemoved: number;
+  };
+} {
+  const sections: ParsedSection[] = [];
+  const stats = {
+    namedTrailLines: lines.length,
+    gapsFound: 0,
+    mergeCount: 0,
+    discardCount: 0,
+    duplicatePointsRemoved: 0,
+  };
+
+  for (const line of lines) {
+    const result = processNamedTrailLine(line.name, line.points);
+    sections.push(...result.sections);
+    stats.gapsFound += result.stats.gapsFound;
+    stats.mergeCount += result.stats.mergeCount;
+    stats.discardCount += result.stats.discardCount;
+    stats.duplicatePointsRemoved += result.stats.duplicatePointsRemoved;
+  }
+
+  return { sections, stats };
+}
+
 export function processRoutePoints(points: TrackPoint[]): {
   sections: ParsedSection[];
   stats: {
@@ -223,59 +361,29 @@ export function processRoutePoints(points: TrackPoint[]): {
 
   for (const sec of mergedTrail) {
     trailNum++;
-    const bbox = computeBbox(sec.points);
-    const centroid = computeCentroid(sec.points);
-    const elev = computeElevation(sec.points);
-    const multi = mergedTrail.length > 1;
-    const name = multi
-      ? `Trans Northern Trail — Section ${trailNum}`
-      : "Trans Northern Trail — Section 1";
-    sections.push({
-      name,
-      terrain: "trail",
-      points: sec.points,
-      distanceKm: Math.round(sec.distanceKm * 10) / 10,
-      bboxMinLat: bbox.minLat,
-      bboxMaxLat: bbox.maxLat,
-      bboxMinLon: bbox.minLon,
-      bboxMaxLon: bbox.maxLon,
-      startLat: sec.points[0].lat,
-      startLon: sec.points[0].lon,
-      endLat: sec.points[sec.points.length - 1].lat,
-      endLon: sec.points[sec.points.length - 1].lon,
-      centroidLat: centroid.lat,
-      centroidLon: centroid.lon,
-      elevationGainM: elev.gainM,
-      elevationLossM: elev.lossM,
-      sectionNumber: trailNum,
-    });
+    sections.push(
+      rawToParsedSection(
+        sec,
+        trailNum === 1 && mergedTrail.length === 1
+          ? "Trans Northern Trail — Section 1"
+          : `Trans Northern Trail — Section ${trailNum}`,
+        "trail",
+        trailNum,
+      ),
+    );
   }
 
   for (const sec of rawRoad) {
     if (sec.distanceKm < 0.05) continue;
     roadNum++;
-    const bbox = computeBbox(sec.points);
-    const centroid = computeCentroid(sec.points);
-    const elev = computeElevation(sec.points);
-    sections.push({
-      name: `Trans Northern Trail — Road Section ${roadNum}`,
-      terrain: "road",
-      points: sec.points,
-      distanceKm: Math.round(sec.distanceKm * 10) / 10,
-      bboxMinLat: bbox.minLat,
-      bboxMaxLat: bbox.maxLat,
-      bboxMinLon: bbox.minLon,
-      bboxMaxLon: bbox.maxLon,
-      startLat: sec.points[0].lat,
-      startLon: sec.points[0].lon,
-      endLat: sec.points[sec.points.length - 1].lat,
-      endLon: sec.points[sec.points.length - 1].lon,
-      centroidLat: centroid.lat,
-      centroidLon: centroid.lon,
-      elevationGainM: elev.gainM,
-      elevationLossM: elev.lossM,
-      sectionNumber: roadNum,
-    });
+    sections.push(
+      rawToParsedSection(
+        sec,
+        `Trans Northern Trail — Road Section ${roadNum}`,
+        "road",
+        roadNum,
+      ),
+    );
   }
 
   return {

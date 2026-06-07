@@ -17,6 +17,13 @@ const STORAGE_KEY = "@trailforge/route-planner-v1";
 export type RideStyle = "easy" | "moderate" | "challenge";
 export type PlannerStep = 1 | 2 | 3 | 4;
 export type AdjustmentMode = "more_trails" | "less_trails" | "harder" | "easier" | null;
+export type PlannerMapMode = "idle" | "planning";
+export type PlanningSource = "suggest" | "browse";
+
+export interface RoadPoint {
+  latitude: number;
+  longitude: number;
+}
 
 export interface LocationPoint {
   lat: number;
@@ -38,6 +45,18 @@ export interface PlannerState {
   adjustmentMode: AdjustmentMode;
   selectedSectionId: string | null;
   savedRouteName: string;
+  /** Map-tab planning session (planner → map flow). */
+  mapMode: PlannerMapMode;
+  planningSource: PlanningSource | null;
+  difficultyGrades: number[];
+  /** Ordered trail ids in the active route. */
+  activeTrailIds: string[];
+  /** Subset of activeTrailIds that came from AI suggestion. */
+  suggestedTrailIds: string[];
+  roadPolyline: RoadPoint[] | null;
+  roadDistanceKm: number | null;
+  routeReady: boolean;
+  isRebuildingRoute: boolean;
 }
 
 const DEFAULT_STATE: PlannerState = {
@@ -53,6 +72,15 @@ const DEFAULT_STATE: PlannerState = {
   adjustmentMode: null,
   selectedSectionId: null,
   savedRouteName: "",
+  mapMode: "idle",
+  planningSource: null,
+  difficultyGrades: [],
+  activeTrailIds: [],
+  suggestedTrailIds: [],
+  roadPolyline: null,
+  roadDistanceKm: null,
+  routeReady: false,
+  isRebuildingRoute: false,
 };
 
 // ── Module-level state + listeners ───────────────────────────────────────────
@@ -91,6 +119,10 @@ export async function hydratePlannerStore(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+export function getPlannerState(): PlannerState {
+  return _state;
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -133,6 +165,66 @@ export const plannerActions = {
   },
   setSavedRouteName(name: string) {
     _setState({ savedRouteName: name });
+  },
+  startMapPlanning(input: {
+    from: LocationPoint;
+    to: LocationPoint;
+    difficultyGrades: number[];
+    source: PlanningSource;
+  }) {
+    _setState({
+      from: input.from,
+      to: input.to,
+      difficultyGrades: input.difficultyGrades,
+      planningSource: input.source,
+      mapMode: "planning",
+      activeTrailIds: [],
+      suggestedTrailIds: [],
+      roadPolyline: null,
+      roadDistanceKm: null,
+      routeReady: false,
+      skippedIds: [],
+      suggestions: [],
+    });
+  },
+  setMapTrails(activeTrailIds: string[], suggestedTrailIds: string[], trailDetails: MapTrail[]) {
+    const merged = new Map(_state.trailDetails.map((t) => [t.id, t]));
+    for (const t of trailDetails) merged.set(t.id, t);
+    _setState({
+      activeTrailIds,
+      suggestedTrailIds,
+      trailDetails: [...merged.values()],
+      isCalculating: false,
+    });
+  },
+  mergeTrailDetails(trails: MapTrail[]) {
+    const merged = new Map(_state.trailDetails.map((t) => [t.id, t]));
+    for (const t of trails) merged.set(t.id, t);
+    _setState({ trailDetails: [...merged.values()] });
+  },
+  setActiveTrailIds(activeTrailIds: string[]) {
+    _setState({ activeTrailIds });
+  },
+  setRoadRoute(polyline: RoadPoint[] | null, distanceKm: number | null) {
+    _setState({ roadPolyline: polyline, roadDistanceKm: distanceKm, routeReady: polyline != null });
+  },
+  setRouteReady(routeReady: boolean) {
+    _setState({ routeReady });
+  },
+  setRebuildingRoute(isRebuildingRoute: boolean) {
+    _setState({ isRebuildingRoute });
+  },
+  endMapPlanning() {
+    _setState({
+      mapMode: "idle",
+      planningSource: null,
+      activeTrailIds: [],
+      suggestedTrailIds: [],
+      roadPolyline: null,
+      roadDistanceKm: null,
+      routeReady: false,
+      isRebuildingRoute: false,
+    });
   },
   reset() {
     _state = { ...DEFAULT_STATE };

@@ -9,6 +9,7 @@
  */
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
+import { useFocusEffect } from "expo-router";
 import * as Location from "expo-location";
 import { router } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -17,6 +18,7 @@ import {
   Animated,
   Keyboard,
   Platform,
+  ScrollView,
   StyleSheet,
   Switch,
   Text,
@@ -26,7 +28,8 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-import { geocode, type NominatimResult } from "@/lib/nominatim";
+import { geocode, shortLabel, type NominatimResult } from "@/lib/nominatim";
+import { getAccuratePosition } from "@/lib/location";
 import ClusterMapView from "react-native-map-clustering";
 import MapView, {
   Marker,
@@ -40,6 +43,8 @@ import {
   TrailDetailSheet,
   type TrailDetailData,
 } from "@/components/TrailDetailSheet";
+import { AppShellHeader } from "@/components/shell/AppShellHeader";
+import { PlannerMapChrome } from "@/components/planner/PlannerMapChrome";
 import { UpgradePrompt } from "@/components/UpgradePrompt";
 import { useProfile } from "@/components/ProfileContext";
 import colors from "@/constants/colors";
@@ -54,8 +59,10 @@ import {
   gradeFromDifficulty,
   TRAIL_ORANGE,
 } from "@/lib/trailColors";
-import { parseGeoJsonPath } from "@/lib/geo";
+import { formatSearchBbox, formatSearchBboxFromRegion, trailMapCoordinates, trailCentroid } from "@/lib/geo";
 import { publishVisibleTrails } from "@/lib/visibleTrails";
+import { toggleTrailOnRoute } from "@/lib/plannerMapSession";
+import { usePlannerStore } from "@/store/routePlannerStore";
 
 // ---------------------------------------------------------------------------
 // Filter types
@@ -172,29 +179,28 @@ const SHEET_BG = "#1A1A1A";
 const SHEET_BORDER = "#2A2A2A";
 
 interface FiltersSheetProps {
-  // current filter values
+  open: boolean;
+  onClose: () => void;
   gradeFilter: GradeFilter;
   bikeFilter: BikeFilter;
   visibilityFilter: VisibilityFilter;
   layers: Record<LayerId, boolean>;
   isPremium: boolean;
-  hasFiltersActive: boolean;
-  // callbacks
   onApply: (g: GradeFilter, b: BikeFilter, v: VisibilityFilter, l: Record<LayerId, boolean>) => void;
   onShowUpgrade: (feature: string) => void;
 }
 
 function FiltersSheet({
+  open,
+  onClose,
   gradeFilter,
   bikeFilter,
   visibilityFilter,
   layers,
   isPremium,
-  hasFiltersActive,
   onApply,
   onShowUpgrade,
 }: FiltersSheetProps) {
-  const [open, setOpen] = useState(false);
   const slideAnim = useRef(new Animated.Value(0)).current;
 
   // Draft state — only committed on APPLY
@@ -220,18 +226,22 @@ function FiltersSheet({
   };
   const [gradeNum, setGradeNum] = useState(() => gradeNumFromFilter(gradeFilter));
 
-  function openSheet() {
-    // Reset draft to current values
-    setDraftGrade(gradeFilter); setGradeNum(gradeNumFromFilter(gradeFilter));
+  useEffect(() => {
+    if (!open) {
+      slideAnim.setValue(0);
+      return;
+    }
+    setDraftGrade(gradeFilter);
+    setGradeNum(gradeNumFromFilter(gradeFilter));
     setDraftBike(bikeFilter);
     setDraftVis(visibilityFilter);
     setDraftLayers({ ...layers });
-    setOpen(true);
     Animated.spring(slideAnim, { toValue: 1, useNativeDriver: true, tension: 65, friction: 11 }).start();
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   function closeSheet() {
-    Animated.timing(slideAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => setOpen(false));
+    Animated.timing(slideAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => onClose());
   }
 
   function apply() {
@@ -269,17 +279,8 @@ function FiltersSheet({
 
   return (
     <>
-      {/* ── Floating FILTERS button ─────────────────────────────────────── */}
-      <TouchableOpacity style={fs.floatBtn} onPress={openSheet} activeOpacity={0.85}>
-        <Feather name="sliders" size={16} color="#000" />
-        <Text style={fs.floatBtnTxt}>FILTERS</Text>
-        {hasFiltersActive && <View style={fs.activeDot} />}
-      </TouchableOpacity>
-
-      {/* ── Bottom sheet ────────────────────────────────────────────────── */}
       {open && (
         <>
-          {/* Scrim — tap to dismiss */}
           <TouchableOpacity
             style={StyleSheet.absoluteFill}
             activeOpacity={1}
@@ -287,70 +288,71 @@ function FiltersSheet({
           />
           <Animated.View style={[fs.sheet, { transform: [{ translateY: sheetTranslate }] }]}>
             <View style={fs.handle} />
-
             <Text style={fs.sheetTitle}>FILTERS</Text>
 
-            {/* ── DIFFICULTY ────────────────────────────────────── */}
-            <Text style={fs.sectionLabel}>DIFFICULTY</Text>
-            <View style={[fs.gradeDisplay, { borderColor: gradeColor(gradeNum) }]}>
-              <Text style={[fs.gradeNum, { color: gradeColor(gradeNum) }]}>
-                {gradeNum === 0 ? "All" : gradeNum}
-              </Text>
-              <Text style={[fs.gradeDesc, { color: gradeColor(gradeNum) }]}>
-                {GRADE_LABELS[gradeNum]}
-              </Text>
-            </View>
-            {/* Tap-track slider */}
-            <View style={fs.trackWrap}>
-              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                <TouchableOpacity
-                  key={n}
-                  style={[
-                    fs.trackCell,
-                    n > 0 && n <= gradeNum && { backgroundColor: gradeColor(n), borderColor: gradeColor(n) },
-                    n === gradeNum && { borderColor: gradeColor(n), borderWidth: 2 },
-                  ]}
-                  onPress={() => setGradeNum(n)}
-                >
-                  <Text style={[fs.trackCellTxt, n > 0 && n <= gradeNum && { color: "#000" }]}>
-                    {n === 0 ? "★" : n}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* ── BIKE TYPE ─────────────────────────────────────── */}
-            <Text style={fs.sectionLabel}>BIKE TYPE</Text>
-            <View style={fs.bikeRow}>
-              {(["all", "adventure", "trail", "enduro"] as BikeFilter[]).map(b => (
-                <TouchableOpacity
-                  key={b}
-                  style={[fs.bikeChip, draftBike === b && fs.bikeChipActive]}
-                  onPress={() => handleBike(b)}
-                >
-                  <Text style={[fs.bikeChipTxt, draftBike === b && fs.bikeChipTxtActive]}>
-                    {b === "all" ? "Any" : b.charAt(0).toUpperCase() + b.slice(1)}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* ── MAP LAYERS ────────────────────────────────────── */}
-            <Text style={fs.sectionLabel}>MAP LAYERS</Text>
-            {LAYER_DEFS.map(layer => (
-              <View key={layer.id} style={fs.layerRow}>
-                <View style={[fs.layerDot, { backgroundColor: layer.color }]} />
-                <Text style={fs.layerLabel}>{layer.label}</Text>
-                <Switch
-                  value={draftLayers[layer.id]}
-                  onValueChange={() => setDraftLayers(prev => ({ ...prev, [layer.id]: !prev[layer.id] }))}
-                  trackColor={{ false: "#333", true: layer.color }}
-                  thumbColor={draftLayers[layer.id] ? "#fff" : "#666"}
-                />
+            <ScrollView
+              style={fs.sheetScroll}
+              contentContainerStyle={fs.sheetScrollContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              <Text style={fs.sectionLabel}>DIFFICULTY</Text>
+              <View style={[fs.gradeDisplay, { borderColor: gradeColor(gradeNum) }]}>
+                <Text style={[fs.gradeNum, { color: gradeColor(gradeNum) }]}>
+                  {gradeNum === 0 ? "All" : gradeNum}
+                </Text>
+                <Text style={[fs.gradeDesc, { color: gradeColor(gradeNum) }]}>
+                  {GRADE_LABELS[gradeNum]}
+                </Text>
               </View>
-            ))}
+              <View style={fs.trackWrap}>
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                  <TouchableOpacity
+                    key={n}
+                    style={[
+                      fs.trackCell,
+                      n > 0 && n <= gradeNum && { backgroundColor: gradeColor(n), borderColor: gradeColor(n) },
+                      n === gradeNum && { borderColor: gradeColor(n), borderWidth: 2 },
+                    ]}
+                    onPress={() => setGradeNum(n)}
+                  >
+                    <Text style={[fs.trackCellTxt, n > 0 && n <= gradeNum && { color: "#000" }]}>
+                      {n === 0 ? "★" : n}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
 
-            {/* ── Actions ───────────────────────────────────────── */}
+              <Text style={fs.sectionLabel}>BIKE TYPE</Text>
+              <View style={fs.bikeRow}>
+                {(["all", "adventure", "trail", "enduro"] as BikeFilter[]).map(b => (
+                  <TouchableOpacity
+                    key={b}
+                    style={[fs.bikeChip, draftBike === b && fs.bikeChipActive]}
+                    onPress={() => handleBike(b)}
+                  >
+                    <Text style={[fs.bikeChipTxt, draftBike === b && fs.bikeChipTxtActive]}>
+                      {b === "all" ? "Any" : b.charAt(0).toUpperCase() + b.slice(1)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={fs.sectionLabel}>MAP LAYERS</Text>
+              {LAYER_DEFS.map(layer => (
+                <View key={layer.id} style={fs.layerRow}>
+                  <View style={[fs.layerDot, { backgroundColor: layer.color }]} />
+                  <Text style={fs.layerLabel}>{layer.label}</Text>
+                  <Switch
+                    value={draftLayers[layer.id]}
+                    onValueChange={() => setDraftLayers(prev => ({ ...prev, [layer.id]: !prev[layer.id] }))}
+                    trackColor={{ false: "#333", true: layer.color }}
+                    thumbColor={draftLayers[layer.id] ? "#fff" : "#666"}
+                  />
+                </View>
+              ))}
+            </ScrollView>
+
             <TouchableOpacity style={fs.applyBtn} onPress={apply}>
               <Text style={fs.applyBtnTxt}>APPLY FILTERS</Text>
             </TouchableOpacity>
@@ -365,27 +367,40 @@ function FiltersSheet({
 }
 
 const fs = StyleSheet.create({
-  // Floating button
-  floatBtn: {
-    position: "absolute",
-    bottom: 24,
-    right: 16,
+  topBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 7,
+    gap: 5,
     backgroundColor: AMBER,
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 999,
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 6,
   },
-  floatBtnTxt: { color: "#000", fontSize: 13, fontWeight: "900", letterSpacing: 1 },
+  topBtnTxt: { color: "#000", fontSize: 11, fontWeight: "900", letterSpacing: 0.8 },
+  topBtnOutline: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: "#1A1A1A",
+    borderColor: AMBER,
+    borderWidth: 1.5,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  topBtnOutlineTxt: { color: AMBER, fontSize: 11, fontWeight: "900", letterSpacing: 0.8 },
   activeDot: {
-    width: 8, height: 8, borderRadius: 4,
+    width: 7, height: 7, borderRadius: 4,
     backgroundColor: "#D50000",
     position: "absolute", top: -2, right: -2,
     borderWidth: 1.5, borderColor: AMBER,
@@ -398,7 +413,7 @@ const fs = StyleSheet.create({
     backgroundColor: SHEET_BG,
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
     paddingHorizontal: 20,
-    paddingBottom: 36,
+    paddingBottom: 28,
     paddingTop: 8,
     maxHeight: "85%",
     shadowColor: "#000",
@@ -407,6 +422,8 @@ const fs = StyleSheet.create({
     shadowRadius: 20,
     elevation: 24,
   },
+  sheetScroll: { flexGrow: 0, flexShrink: 1 },
+  sheetScrollContent: { paddingBottom: 8 },
   handle: { alignSelf: "center", width: 44, height: 5, borderRadius: 3, backgroundColor: AMBER, marginBottom: 16 },
   sheetTitle: { fontSize: 15, fontWeight: "900", color: "#FFF", letterSpacing: 1.5, marginBottom: 20 },
 
@@ -450,8 +467,8 @@ const fs = StyleSheet.create({
 
   // Buttons
   applyBtn: {
-    height: 72, borderRadius: 16, backgroundColor: AMBER,
-    alignItems: "center", justifyContent: "center", marginTop: 24,
+    height: 56, borderRadius: 14, backgroundColor: AMBER,
+    alignItems: "center", justifyContent: "center", marginTop: 12,
   },
   applyBtnTxt: { color: "#000", fontSize: 16, fontWeight: "900", letterSpacing: 1 },
   resetBtn: { alignItems: "center", marginTop: 14 },
@@ -463,11 +480,14 @@ const fs = StyleSheet.create({
 // ---------------------------------------------------------------------------
 
 const FALLBACK_REGION: Region = {
-  latitude: 39.7,
-  longitude: -77.5,
-  latitudeDelta: 1.6,
-  longitudeDelta: 1.6,
+  latitude: 54.5,
+  longitude: -2.5,
+  latitudeDelta: 4.5,
+  longitudeDelta: 4.5,
 };
+
+/** UK + Ireland bbox for browsing all public trails without a planned route. */
+const UK_IE_BBOX = formatSearchBbox(49.5, -11.0, 61.0, 2.0);
 
 // ---------------------------------------------------------------------------
 // Component
@@ -480,10 +500,12 @@ export default function MapTab() {
     "unknown" | "granted" | "denied"
   >("unknown");
   const [selected, setSelected] = useState<TrailDetailData | null>(null);
-  const [mapKind, setMapKind] = useState<"standard" | "satellite">("standard");
+  const [mapKind, setMapKind] = useState<"standard" | "satellite">("satellite");
   const [searchText, setSearchText] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchHits, setSearchHits] = useState<NominatimResult[]>([]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [userCoords, setUserCoords] = useState<{ lat: number; lon: number } | null>(null);
 
   // Active filters
   const [gradeFilter, setGradeFilter] = useState<GradeFilter>("all");
@@ -496,9 +518,20 @@ export default function MapTab() {
   const [upgradedFeature, setUpgradedFeature] = useState("");
   const { profile } = useProfile();
   const isPremium = profile.isPremium;
+  const planner = usePlannerStore();
+  const isPlanning = planner.mapMode === "planning";
+  const activeTrailSet = useMemo(
+    () => new Set(planner.activeTrailIds),
+    [planner.activeTrailIds],
+  );
 
   // ── Layer visibility state ────────────────────────────────────────────────
   const [layers, setLayers] = useState<Record<LayerId, boolean>>(defaultLayerState);
+  const hasFiltersActive =
+    gradeFilter !== "all"
+    || bikeFilter !== "all"
+    || visibilityFilter !== "all"
+    || Object.values(layers).some(v => !v);
 
   // Persist and rehydrate layer state from AsyncStorage
   useEffect(() => {
@@ -506,7 +539,7 @@ export default function MapTab() {
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as Partial<Record<LayerId, boolean>>;
-        setLayers(prev => ({ ...prev, ...parsed }));
+        setLayers({ ...defaultLayerState(), ...parsed });
       } catch { /* ignore */ }
     });
   }, []);
@@ -569,13 +602,30 @@ export default function MapTab() {
     Keyboard.dismiss();
     setSearching(true);
     try {
-      const results = await geocode(q);
+      const bias = userCoords ?? { lat: region.latitude, lon: region.longitude };
+      const results = await geocode(q, bias);
       setSearchHits(results);
       if (results[0]) flyTo(results[0]);
     } finally {
       setSearching(false);
     }
   }
+
+  useEffect(() => {
+    const q = searchText.trim();
+    if (q.length < 2) {
+      setSearchHits([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      setSearching(true);
+      const bias = userCoords ?? { lat: region.latitude, lon: region.longitude };
+      void geocode(q, bias)
+        .then(setSearchHits)
+        .finally(() => setSearching(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchText, userCoords, region.latitude, region.longitude]);
 
   function flyTo(hit: NominatimResult): void {
     const lat = Number(hit.lat);
@@ -596,17 +646,54 @@ export default function MapTab() {
   // Trail data
   // -------------------------------------------------------------------------
 
-  const bbox = bboxFromRegion(region);
+  const useWideFetch = !isPlanning;
+  const bbox = useMemo(() => {
+    if (useWideFetch) return UK_IE_BBOX;
+    const lats = [region.latitude - region.latitudeDelta / 2, region.latitude + region.latitudeDelta / 2];
+    const lngs = [region.longitude - region.longitudeDelta / 2, region.longitude + region.longitudeDelta / 2];
+    if (planner.from) {
+      lats.push(planner.from.lat);
+      lngs.push(planner.from.lon);
+    }
+    if (planner.to) {
+      lats.push(planner.to.lat);
+      lngs.push(planner.to.lon);
+    }
+    for (const p of planner.roadPolyline ?? []) {
+      lats.push(p.latitude);
+      lngs.push(p.longitude);
+    }
+    const pad = 0.15;
+    const latSpan = Math.max(0.08, Math.max(...lats) - Math.min(...lats));
+    const lngSpan = Math.max(0.08, Math.max(...lngs) - Math.min(...lngs));
+    return formatSearchBbox(
+      Math.min(...lats) - latSpan * pad,
+      Math.min(...lngs) - lngSpan * pad,
+      Math.max(...lats) + latSpan * pad,
+      Math.max(...lngs) + lngSpan * pad,
+    );
+  }, [useWideFetch, region, planner.from, planner.to, planner.roadPolyline]);
+  const trailLimit = useWideFetch ? 500 : 300;
   const trailsQ = useQuery({
-    queryKey: ["trails-bbox", bbox],
-    queryFn: () => searchTrailsByBbox({ bbox, limit: 200 }),
+    queryKey: ["trails-bbox", bbox, trailLimit],
+    queryFn: () => searchTrailsByBbox({ bbox, limit: trailLimit }),
     staleTime: 60_000,
+    retry: 2,
   });
+
+  useFocusEffect(
+    useCallback(() => {
+      void trailsQ.refetch();
+    }, [trailsQ.refetch]),
+  );
 
   // Separate road liaison connectors (terrain="road") from rideable trail sections.
   // Split trail sections by layer for colour-coded rendering.
   const { trailData, roadData, layeredTrails } = useMemo(() => {
-    const all = trailsQ.data?.trails ?? [];
+    const byId = new Map<string, ApiTrail>();
+    for (const t of trailsQ.data?.trails ?? []) byId.set(t.id, t);
+    for (const t of isPlanning ? planner.trailDetails : []) byId.set(t.id, t);
+    const all = [...byId.values()];
     const trailData: ApiTrail[] = [];
     const roadData: ApiTrail[] = [];
     const layerMap: Record<LayerId, ApiTrail[]> = {
@@ -643,10 +730,12 @@ export default function MapTab() {
     }
 
     return { trailData, roadData, layeredTrails };
-  }, [trailsQ.data, layers, gradeFilter, bikeFilter, visibilityFilter]);
+  }, [trailsQ.data, isPlanning, planner.trailDetails, layers, gradeFilter, bikeFilter, visibilityFilter]);
 
   // Flat list of trail sections (for markers, completions lookup, etc.)
   const trails: ApiTrail[] = useMemo(() => layeredTrails.map(l => l.trail), [layeredTrails]);
+  const showTrailMarkers = region.latitudeDelta < 0.75 && trails.length <= 120;
+  const rawTrailCount = trailsQ.data?.trails?.length ?? 0;
 
   const completionsQ = useQuery({
     queryKey: ["my-completions"],
@@ -661,14 +750,14 @@ export default function MapTab() {
     return set;
   }, [completionsQ.data]);
 
-  // Pre-compute polyline coordinates so extractCoords is not called per render.
+  // Pre-compute polyline coordinates for rendering.
   const trailPolylines = useMemo(
     () =>
       layeredTrails
         .map(({ trail: t, layerColor, isOsm }) => ({
           id: t.id,
           trail: t,
-          coords: extractCoords(t.path),
+          coords: trailMapCoordinates(t),
           layerColor,
           isOsm,
           isSeasonal: !!((t as unknown as Record<string, unknown>)["is_seasonal"]),
@@ -677,11 +766,22 @@ export default function MapTab() {
     [layeredTrails],
   );
 
+  useEffect(() => {
+    if (!__DEV__) return;
+    if (trailsQ.isError) {
+      console.warn("[Map] trails fetch failed:", trailsQ.error);
+    } else if (trailsQ.data) {
+      console.log(
+        `[Map] API trails=${rawTrailCount} rendered=${trailPolylines.length} polylines`,
+      );
+    }
+  }, [trailsQ.isError, trailsQ.error, trailsQ.data, rawTrailCount, trailPolylines.length]);
+
   // Road liaison connectors — always shown regardless of filters; never tappable.
   const roadPolylines = useMemo(
     () =>
       roadData
-        .map((t) => ({ id: t.id, coords: extractCoords(t.path) }))
+        .map((t) => ({ id: t.id, coords: trailMapCoordinates(t) }))
         .filter((p) => p.coords.length >= 2),
     [roadData],
   );
@@ -707,25 +807,36 @@ export default function MapTab() {
       }
       setPermission("granted");
       try {
-        const here = await Location.getLastKnownPositionAsync();
-        const pos =
-          here ??
-          (await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced,
-          }));
-        const next: Region = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          latitudeDelta: 0.08,
-          longitudeDelta: 0.08,
-        };
-        setRegion(next);
-        mapRef.current?.animateToRegion(next, 600);
+        const pos = await getAccuratePosition();
+        setUserCoords({ lat: pos.coords.latitude, lon: pos.coords.longitude });
       } catch {
         // keep fallback region
       }
     })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!isPlanning || !planner.from || !planner.to) return;
+    const lats = [planner.from.lat, planner.to.lat];
+    const lons = [planner.from.lon, planner.to.lon];
+    for (const p of planner.roadPolyline ?? []) {
+      lats.push(p.latitude);
+      lons.push(p.longitude);
+    }
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
+    const next: Region = {
+      latitude: (minLat + maxLat) / 2,
+      longitude: (minLon + maxLon) / 2,
+      latitudeDelta: Math.max(0.08, (maxLat - minLat) * 1.5),
+      longitudeDelta: Math.max(0.08, (maxLon - minLon) * 1.5),
+    };
+    setRegion(next);
+    mapRef.current?.animateToRegion(next, 800);
+  }, [isPlanning, planner.from, planner.to, planner.roadPolyline]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -733,11 +844,13 @@ export default function MapTab() {
 
   return (
     <View style={styles.container}>
+      <AppShellHeader />
+      <View style={styles.mapArea}>
       <ClusterMapView
         ref={mapRef}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
         mapType={mapKind}
-        style={StyleSheet.absoluteFill}
+        style={{ flex: 1 }}
         initialRegion={FALLBACK_REGION}
         showsUserLocation={permission === "granted"}
         showsMyLocationButton={false}
@@ -748,20 +861,41 @@ export default function MapTab() {
         clusterColor={colors.light.primary}
         clusterTextColor={colors.light.primaryForeground}
       >
-        {trails.map((t) => {
-          const lat = t.centroid_lat;
-          const lon = t.centroid_lon;
-          if (typeof lat !== "number" || typeof lon !== "number") return null;
+        {planner.from && isPlanning ? (
+          <Marker
+            coordinate={{ latitude: planner.from.lat, longitude: planner.from.lon }}
+            pinColor="#22c55e"
+            title="Start"
+          />
+        ) : null}
+        {planner.to && isPlanning ? (
+          <Marker
+            coordinate={{ latitude: planner.to.lat, longitude: planner.to.lon }}
+            pinColor={colors.light.primary}
+            title="Destination"
+          />
+        ) : null}
+        {planner.roadPolyline && planner.roadPolyline.length >= 2 && isPlanning ? (
+          <Polyline
+            coordinates={planner.roadPolyline}
+            strokeColor="#3b82f6"
+            strokeWidth={5}
+            zIndex={2}
+          />
+        ) : null}
+        {showTrailMarkers ? trails.map((t) => {
+          const center = trailCentroid(t);
+          if (!center) return null;
           return (
             <Marker
               key={`m-${t.id}`}
-              coordinate={{ latitude: lat, longitude: lon }}
+              coordinate={center}
               tracksViewChanges={false}
               pinColor={difficultyColor(t.difficulty)}
               onPress={() => setSelected(trailDetailData(t))}
             />
           );
-        })}
+        }) : null}
         {/* Road liaison connectors — thin grey dashed lines, never interactive */}
         {roadPolylines.map(({ id, coords }) => (
           <Polyline
@@ -778,22 +912,54 @@ export default function MapTab() {
             OSM trails use difficulty colour; other layers use their layer colour.
             Seasonal trails render as dashed lines. */}
         {trailPolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
-          const color = isPremium
-            ? (isOsm ? difficultyColor(trail.difficulty) : layerColor)
-            : "#888888";
+          const isActive = activeTrailSet.has(id);
+          const color = isActive
+            ? colors.light.primary
+            : isPremium
+              ? (isOsm ? difficultyColor(trail.difficulty) : layerColor)
+              : "#888888";
           return (
             <Polyline
               key={id}
               coordinates={coords}
               strokeColor={color}
-              strokeWidth={isPremium ? 4 : 3}
+              strokeWidth={isActive ? 7 : isPremium ? 4 : 3}
               lineDashPattern={isSeasonal ? [8, 6] : undefined}
               tappable
-              onPress={() => setSelected(trailDetailData(trail))}
+              onPress={() => {
+                if (isPlanning) {
+                  void toggleTrailOnRoute(trail);
+                } else {
+                  setSelected(trailDetailData(trail));
+                }
+              }}
             />
           );
         })}
       </ClusterMapView>
+
+      {/* ── Top actions: Filters + Add trail ───────────────────────────── */}
+      <View style={styles.topActions} pointerEvents="box-none">
+        <TouchableOpacity
+          style={fs.topBtnOutline}
+          onPress={() => setFiltersOpen(true)}
+          activeOpacity={0.85}
+        >
+          <Feather name="sliders" size={14} color={AMBER} />
+          <Text style={fs.topBtnOutlineTxt}>FILTERS</Text>
+          {hasFiltersActive ? <View style={fs.activeDot} /> : null}
+        </TouchableOpacity>
+        {!isPlanning ? (
+          <TouchableOpacity
+            style={fs.topBtn}
+            onPress={() => router.push("/add-trail")}
+            activeOpacity={0.85}
+          >
+            <Feather name="plus" size={14} color="#000" />
+            <Text style={fs.topBtnTxt}>ADD TRAIL</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
 
       {/* ── Search bar ─────────────────────────────────────────────────── */}
       <View style={styles.searchRow} pointerEvents="box-none">
@@ -836,7 +1002,7 @@ export default function MapTab() {
                   color={colors.light.mutedForeground}
                 />
                 <Text numberOfLines={2} style={styles.searchHitText}>
-                  {h.display_name}
+                  {shortLabel(h.display_name)}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -853,9 +1019,21 @@ export default function MapTab() {
             <Feather name="map" size={14} color={colors.light.primary} />
           )}
           <Text style={styles.statusText}>
-            {trails.length} trail{trails.length === 1 ? "" : "s"} in view
+            {trailsQ.isError
+              ? "Couldn't load trails"
+              : `${trails.length} trail${trails.length === 1 ? "" : "s"} in view`}
           </Text>
         </View>
+
+        {trailsQ.isError ? (
+          <TouchableOpacity
+            style={styles.retryPill}
+            onPress={() => void trailsQ.refetch()}
+          >
+            <Feather name="refresh-cw" size={13} color="#fff" />
+            <Text style={styles.retryText}>Retry</Text>
+          </TouchableOpacity>
+        ) : null}
 
         <View style={{ flexDirection: "row", gap: 6 }}>
           <TouchableOpacity
@@ -875,9 +1053,7 @@ export default function MapTab() {
             onPress={() => {
               void (async () => {
                 try {
-                  const pos = await Location.getCurrentPositionAsync({
-                    accuracy: Location.Accuracy.Balanced,
-                  });
+                  const pos = await getAccuratePosition();
                   const next: Region = {
                     latitude: pos.coords.latitude,
                     longitude: pos.coords.longitude,
@@ -905,6 +1081,8 @@ export default function MapTab() {
         </View>
       ) : null}
 
+      <PlannerMapChrome />
+
       {/* ── Trail detail sheet ──────────────────────────────────────────── */}
       <TrailDetailSheet
         visible={!!selected}
@@ -914,31 +1092,15 @@ export default function MapTab() {
         onMarkRiddenChange={() => void completionsQ.refetch()}
       />
 
-      {/* ── Plan a Ride floating button ──────────────────────────────────── */}
-      <TouchableOpacity
-        style={{
-          position: "absolute", bottom: 100, alignSelf: "center",
-          flexDirection: "row", alignItems: "center", gap: 8,
-          backgroundColor: colors.light.primary, borderRadius: 28,
-          paddingHorizontal: 24, height: 52,
-          shadowColor: "#000", shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.4, shadowRadius: 10, elevation: 12,
-        }}
-        onPress={() => router.push("/(tabs)/index" as Parameters<typeof router.push>[0])}
-        activeOpacity={0.85}
-      >
-        <Text style={{ fontSize: 16 }}>🗺️</Text>
-        <Text style={{ color: "#000", fontWeight: "900", fontSize: 15, letterSpacing: 0.5 }}>PLAN A RIDE</Text>
-      </TouchableOpacity>
 
-      {/* ── Filters button + bottom sheet ───────────────────────────────── */}
       <FiltersSheet
+        open={filtersOpen}
+        onClose={() => setFiltersOpen(false)}
         gradeFilter={gradeFilter}
         bikeFilter={bikeFilter}
         visibilityFilter={visibilityFilter}
         layers={layers}
         isPremium={isPremium}
-        hasFiltersActive={gradeFilter !== "all" || bikeFilter !== "all" || visibilityFilter !== "all" || Object.values(layers).some(v => !v)}
         onApply={(g, b, v, l) => {
           setGradeFilter(g);
           setBikeFilter(b);
@@ -956,6 +1118,7 @@ export default function MapTab() {
         featureName={upgradedFeature}
         onDismiss={() => setUpgradeVisible(false)}
       />
+      </View>
     </View>
   );
 }
@@ -979,70 +1142,30 @@ function trailDetailData(t: ApiTrail): TrailDetailData {
   };
 }
 
-function bboxFromRegion(r: Region): string {
-  const minLon = (r.longitude - r.longitudeDelta / 2).toFixed(4);
-  const maxLon = (r.longitude + r.longitudeDelta / 2).toFixed(4);
-  const minLat = (r.latitude - r.latitudeDelta / 2).toFixed(4);
-  const maxLat = (r.latitude + r.latitudeDelta / 2).toFixed(4);
-  return `${minLon},${minLat},${maxLon},${maxLat}`;
-}
-
-/**
- * Coerce trail.path (GeoJSON `[lon,lat]` arrays OR legacy `{lat,lon}` objects)
- * into react-native-maps `{latitude, longitude}` shape.
- *
- * The GeoJSON array case is handled by `parseGeoJsonPath` from lib/geo.
- * The object case exists for defensive backward-compatibility with any legacy
- * data that might use `{lat, lon}` or `{latitude, longitude}` objects.
- */
-function extractCoords(
-  path: unknown,
-): Array<{ latitude: number; longitude: number }> {
-  if (!Array.isArray(path)) return [];
-
-  // Fast path: all elements are [lon, lat] arrays (standard API format).
-  if (path.length > 0 && Array.isArray(path[0])) {
-    return parseGeoJsonPath(path);
-  }
-
-  // Slow path: elements are objects with lat/lon fields (legacy).
-  const out: Array<{ latitude: number; longitude: number }> = [];
-  for (const pt of path) {
-    if (pt && typeof pt === "object") {
-      const o = pt as Record<string, unknown>;
-      const lat =
-        typeof o.lat === "number"
-          ? o.lat
-          : typeof o.latitude === "number"
-            ? o.latitude
-            : null;
-      const lon =
-        typeof o.lon === "number"
-          ? o.lon
-          : typeof o.lng === "number"
-            ? o.lng
-            : typeof o.longitude === "number"
-              ? o.longitude
-              : null;
-      if (lat != null && lon != null) {
-        out.push({ latitude: lat, longitude: lon });
-      }
-    }
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Styles
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0D0D0D" },
+  mapArea: { flex: 1, position: "relative" },
+
+  topActions: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    right: 12,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: 8,
+    zIndex: 20,
+  },
 
   // Search — premium pill
   searchRow: {
     position: "absolute",
-    top: 12,
+    top: 56,
     left: 12,
     right: 12,
   },
@@ -1096,7 +1219,7 @@ const styles = StyleSheet.create({
   // Header (status + controls)
   headerCard: {
     position: "absolute",
-    top: 82,
+    top: 126,
     left: 12,
     right: 12,
     flexDirection: "row",
@@ -1117,6 +1240,22 @@ const styles = StyleSheet.create({
   statusText: {
     color: "#FFFFFF",
     fontSize: 13,
+    fontWeight: "700",
+  },
+  retryPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#7f1d1d",
+    borderColor: "#ef4444",
+    borderWidth: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+  },
+  retryText: {
+    color: "#FFFFFF",
+    fontSize: 12,
     fontWeight: "700",
   },
   mapBtn: {

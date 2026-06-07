@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { getAuth } from "@clerk/express";
 import { HealthCheckResponse } from "@workspace/api-zod";
+import { resolveUserId } from "../lib/clerkAuth";
 
 const router: IRouter = Router();
 
@@ -46,26 +47,36 @@ router.get("/auth-check", (req, res) => {
  * Returns the authenticated userId so the mobile app can confirm
  * the full auth round-trip is working.
  */
-router.get("/auth-test", (req, res) => {
-  const auth = getAuth(req);
+router.get("/auth-test", async (req, res) => {
   const authHeader = req.headers.authorization;
   const hasHeader = Boolean(authHeader);
   const headerPrefix = authHeader ? authHeader.slice(0, 40) + "…" : null;
 
-  if (!auth.userId) {
+  const result = await resolveUserId(req);
+
+  if (!result.userId) {
     res.status(401).json({
       error:        "Not authenticated",
       hasHeader,
       headerPrefix,
-      hint:         hasHeader
-        ? "Token received but Clerk could not verify it. Check authorizedParties, secretKey, and clock skew."
-        : "No Authorization header received.",
+      code:         result.mismatch?.code,
+      hint:         result.mismatch?.hint
+        ?? (hasHeader
+          ? "Token received but Clerk could not verify it."
+          : "No Authorization header received."),
       clerkPublishableKeyPrefix: process.env.CLERK_PUBLISHABLE_KEY?.slice(0, 30) ?? "MISSING",
       secretKeyPresent: Boolean(process.env.CLERK_SECRET_KEY),
+      ...(result.mismatch && {
+        tokenKid:  result.mismatch.tokenKid,
+        serverKid: result.mismatch.serverKid,
+      }),
+      ...(process.env.NODE_ENV !== "production" && result.verifyError && {
+        verifyError: result.verifyError,
+      }),
     });
     return;
   }
-  res.json({ status: "authenticated", userId: auth.userId });
+  res.json({ status: "authenticated", userId: result.userId });
 });
 
 export default router;

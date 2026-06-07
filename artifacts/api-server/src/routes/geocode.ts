@@ -13,20 +13,23 @@ const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
 const USER_AGENT = "TrailForge/1.0 (https://trailforge.app)";
 
 router.get("/geocode/search", async (req, res) => {
-  const auth = getAuth(req);
-  if (!auth.userId) {
-    res.status(401).json({ error: "Sign in required" });
-    return;
-  }
   const q = String(req.query.q ?? "").trim();
   if (!q) {
     res.json({ results: [] });
     return;
   }
   const limit = Math.min(Math.max(Number(req.query.limit ?? 5) || 5, 1), 10);
-  const url =
+  const lat = Number(req.query.lat);
+  const lon = Number(req.query.lon);
+  let url =
     `${NOMINATIM_BASE}/search?format=jsonv2&limit=${limit}` +
-    `&q=${encodeURIComponent(q)}`;
+    `&countrycodes=gb,ie&q=${encodeURIComponent(q)}`;
+  // Bias results toward a point by sorting client-side; also pass viewbox when available.
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    const pad = 0.5;
+    const viewbox = `${(lon - pad).toFixed(4)},${(lat + pad).toFixed(4)},${(lon + pad).toFixed(4)},${(lat - pad).toFixed(4)}`;
+    url += `&viewbox=${viewbox}&bounded=0`;
+  }
   try {
     const r = await fetch(url, {
       headers: { "user-agent": USER_AGENT, accept: "application/json" },

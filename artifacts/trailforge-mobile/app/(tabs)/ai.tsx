@@ -22,6 +22,7 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+import { AppShellHeader } from "@/components/shell/AppShellHeader";
 import { askAi, type AiChatTurn } from "@/lib/api";
 import { useVisibleTrails } from "@/lib/visibleTrails";
 
@@ -89,6 +90,8 @@ export default function AiTab() {
     groundOnVisible && visible.bbox && visible.trailIds.length > 0;
 
   return (
+    <View style={{ flex: 1, backgroundColor: colors.light.background }}>
+      <AppShellHeader />
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
@@ -189,6 +192,7 @@ export default function AiTab() {
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
+    </View>
   );
 }
 

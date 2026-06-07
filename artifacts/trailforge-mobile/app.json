@@ -81,7 +81,8 @@
           "cameraPermission": "TrailForge needs the camera to capture trail photos."
         }
       ],
-      "expo-font"
+      "expo-font",
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true

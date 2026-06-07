@@ -48,6 +48,12 @@ import {
 
 type Visibility = "private" | "public" | "group";
 
+const VISIBILITY_LABELS: Record<Visibility, string> = {
+  private: "Personal only",
+  public: "Public",
+  group: "Private group",
+};
+
 // Grade options for the save panel.
 const GRADE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
@@ -464,7 +470,7 @@ function SaveRidePanel({
             style={[styles.chip, visibility === v && styles.chipActive]}
           >
             <Text style={[styles.chipText, visibility === v && styles.chipTextActive]}>
-              {v}
+              {VISIBILITY_LABELS[v]}
             </Text>
           </Pressable>
         ))}

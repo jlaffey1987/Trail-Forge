@@ -1,6 +1,10 @@
 /**
  * Trans Northern Trail (TNT) KML import.
  *
+ * Imports each named trail LineString from TNT folders as its own section,
+ * preserving original KML names. The Enduro master line is stored as a
+ * collection overview polyline only — not imported as trail sections.
+ *
  * Usage:
  *   pnpm --filter @workspace/scripts run import:tnt -- [--dry-run] [path/to/file.kml]
  */
@@ -10,8 +14,19 @@ import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 
 import { assertServiceRoleKey, getEnv, loadEnvLocal } from "./env.js";
-import { buildGpx, processRoutePoints, type ParsedSection } from "./geometry.js";
-import { parseKmlFile, selectRoutePoints, summarizePlacemarks } from "./kml.js";
+import {
+  buildGpx,
+  polylineDistanceKm,
+  processAllTrailLines,
+  type ParsedSection,
+  type TrackPoint,
+} from "./geometry.js";
+import {
+  parseKmlFile,
+  selectMasterOverview,
+  selectTrailLineStrings,
+  summarizePlacemarks,
+} from "./kml.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_KML = path.resolve(__dirname, "..", "..", "..", "Trans Northern Trail March.kml");
@@ -24,6 +39,12 @@ const COLLECTION_REGION = "England North / Scotland";
 interface CliArgs {
   dryRun: boolean;
   kmlPath: string;
+}
+
+interface InsertResult {
+  trailIds: string[];
+  /** Trail-section IDs only, in import order — for collection linking. */
+  collectionTrailIds: string[];
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -40,36 +61,64 @@ function parseArgs(argv: string[]): CliArgs {
   return { dryRun, kmlPath };
 }
 
-function printDryRunReport(sections: ParsedSection[], routeSource: string): void {
+function overviewGeojson(points: TrackPoint[]) {
+  return {
+    type: "LineString" as const,
+    coordinates: points.map((p) => [p.lon, p.lat]),
+  };
+}
+
+function printDryRunReport(
+  sections: ParsedSection[],
+  namedTrailLines: number,
+  overviewPoints: number | null,
+): void {
   const trailSections = sections.filter((s) => s.terrain === "trail");
   const roadSections = sections.filter((s) => s.terrain === "road");
   const trailKm = trailSections.reduce((s, x) => s + x.distanceKm, 0);
   const roadKm = roadSections.reduce((s, x) => s + x.distanceKm, 0);
-  const avgLen = sections.length
-    ? sections.reduce((s, x) => s + x.distanceKm, 0) / sections.length
+  const avgLen = trailSections.length
+    ? trailKm / trailSections.length
     : 0;
+  const maxTrailKm = trailSections.reduce((m, s) => Math.max(m, s.distanceKm), 0);
+  const over15 = trailSections.filter((s) => s.distanceKm > 15).length;
 
   console.log("\n📊 DRY RUN SUMMARY");
   console.log("==================");
-  console.log(`Route source:        ${routeSource}`);
+  console.log(`Named trail lines:   ${namedTrailLines}`);
+  console.log(`Overview polyline:   ${overviewPoints ?? 0} points (master line, not imported as sections)`);
   console.log(`Total sections:      ${sections.length}`);
   console.log(`Trail sections:      ${trailSections.length} (${trailKm.toFixed(1)} km)`);
   console.log(`Road sections:       ${roadSections.length} (${roadKm.toFixed(1)} km)`);
-  console.log(`Average section len: ${avgLen.toFixed(2)} km`);
+  console.log(`Average trail len:   ${avgLen.toFixed(2)} km`);
+  console.log(`Longest trail sect:  ${maxTrailKm.toFixed(1)} km`);
+  console.log(`Sections over 15 km: ${over15}`);
+
+  const samples = [
+    ...trailSections.filter((s) => /Rudland Rigg|Cam Rd/i.test(s.name)),
+    ...trailSections.filter((s) => !/Rudland Rigg|Cam Rd/i.test(s.name)),
+  ].slice(0, 12);
+
   console.log("\nSample section names:");
-  for (const s of sections.slice(0, 8)) {
+  for (const s of samples) {
     console.log(`  • ${s.name} (${s.distanceKm} km, ${s.terrain})`);
   }
-  if (sections.length > 8) {
-    console.log(`  … and ${sections.length - 8} more`);
+  if (trailSections.length > samples.length) {
+    console.log(`  … and ${trailSections.length - samples.length} more trail sections`);
   }
+
+  const okCount = trailSections.length >= 350 && trailSections.length <= 430;
+  const okMax = over15 === 0;
+  console.log("\n✅ Checks:");
+  console.log(`  Section count ~387:  ${okCount ? "PASS" : "REVIEW"} (${trailSections.length} trail sections)`);
+  console.log(`  None over 15 km:     ${okMax ? "PASS" : "FAIL"}`);
+  console.log(`  Named trails kept:   ${samples.some((s) => s.name.includes("Rudland Rigg")) ? "PASS" : "REVIEW"}`);
 }
 
-async function insertSections(
-  sections: ParsedSection[],
-): Promise<string[]> {
+async function insertSections(sections: ParsedSection[]): Promise<InsertResult> {
   const supabase = createClient(getEnv("SUPABASE_URL"), getEnv("SUPABASE_SERVICE_ROLE_KEY"));
-  const ids: string[] = [];
+  const trailIds: string[] = [];
+  const collectionTrailIds: string[] = [];
 
   for (const sec of sections) {
     const coords = sec.points.map((p) => [p.lon, p.lat]);
@@ -106,20 +155,29 @@ async function insertSections(
       console.error(`  ❌ Failed "${sec.name}": ${error.message}`);
       continue;
     }
-    ids.push(data.id as string);
+    const id = data.id as string;
+    trailIds.push(id);
+    if (sec.terrain === "trail") collectionTrailIds.push(id);
     const icon = sec.terrain === "trail" ? "🏍️" : "🛣️";
     console.log(`  ${icon} ${sec.name} (${sec.distanceKm} km)`);
   }
-  return ids;
+  return { trailIds, collectionTrailIds };
 }
 
-async function upsertCollection(trailIds: string[], sections: ParsedSection[]): Promise<void> {
+async function upsertCollection(
+  collectionTrailIds: string[],
+  sections: ParsedSection[],
+  overviewPoints: TrackPoint[] | null,
+): Promise<void> {
   const supabase = createClient(getEnv("SUPABASE_URL"), getEnv("SUPABASE_SERVICE_ROLE_KEY"));
 
   const trailKm = sections.filter((s) => s.terrain === "trail").reduce((a, s) => a + s.distanceKm, 0);
   const grades = sections.filter((s) => s.terrain === "trail").map(() => 5);
   const difficultyMin = grades.length ? Math.min(...grades) : null;
   const difficultyMax = grades.length ? Math.max(...grades) : null;
+  const overviewPath = overviewPoints && overviewPoints.length >= 2
+    ? overviewGeojson(overviewPoints)
+    : null;
 
   const { data: existing } = await supabase
     .from("trail_collections")
@@ -128,43 +186,45 @@ async function upsertCollection(trailIds: string[], sections: ParsedSection[]): 
     .maybeSingle();
 
   let collectionId: string;
+  const collectionRow = {
+    description: COLLECTION_DESCRIPTION,
+    region: COLLECTION_REGION,
+    is_featured: true,
+    is_official: false,
+    total_distance_km: Math.round(trailKm * 10) / 10,
+    difficulty_min: difficultyMin,
+    difficulty_max: difficultyMax,
+    overview_path_geojson: overviewPath,
+  };
+
   if (existing?.id) {
     collectionId = existing.id as string;
-    await supabase.from("trail_collections").update({
-      description: COLLECTION_DESCRIPTION,
-      region: COLLECTION_REGION,
-      is_featured: true,
-      is_official: false,
-      total_distance_km: Math.round(trailKm * 10) / 10,
-      difficulty_min: difficultyMin,
-      difficulty_max: difficultyMax,
-    }).eq("id", collectionId);
+    await supabase.from("trail_collections").update(collectionRow).eq("id", collectionId);
     await supabase.from("trail_collection_sections").delete().eq("collection_id", collectionId);
     console.log(`♻️  Updated existing collection (${collectionId})`);
   } else {
     const { data, error } = await supabase.from("trail_collections").insert({
       name: COLLECTION_NAME,
-      description: COLLECTION_DESCRIPTION,
-      region: COLLECTION_REGION,
-      is_featured: true,
-      is_official: false,
-      total_distance_km: Math.round(trailKm * 10) / 10,
-      difficulty_min: difficultyMin,
-      difficulty_max: difficultyMax,
+      ...collectionRow,
     }).select("id").single();
     if (error) throw new Error(`Collection insert failed: ${error.message}`);
     collectionId = data.id as string;
     console.log(`✅ Created collection (${collectionId})`);
   }
 
-  const links = trailIds.map((trailId, order_index) => ({
+  if (overviewPath) {
+    const overviewKm = Math.round(polylineDistanceKm(overviewPoints!) * 10) / 10;
+    console.log(`🗺️  Stored overview polyline (${overviewPoints!.length} pts, ${overviewKm} km)`);
+  }
+
+  const links = collectionTrailIds.map((trailId, order_index) => ({
     collection_id: collectionId,
     trail_id: trailId,
     order_index,
   }));
   const { error: linkErr } = await supabase.from("trail_collection_sections").insert(links);
   if (linkErr) throw new Error(`Collection link failed: ${linkErr.message}`);
-  console.log(`🔗 Linked ${links.length} sections to collection`);
+  console.log(`🔗 Linked ${links.length} trail sections to collection`);
 }
 
 async function main(): Promise<void> {
@@ -187,15 +247,21 @@ async function main(): Promise<void> {
     `📍 Placemarks: ${summary.total} total (${summary.lineStrings} LineStrings, ${summary.points} Points)`,
   );
 
-  const { points, source } = selectRoutePoints(placemarks);
-  console.log(`🧭 Route points: ${points.length} (source: ${source})`);
+  const trailLines = selectTrailLineStrings(placemarks);
+  const overviewPoints = selectMasterOverview(placemarks);
+  console.log(`📂 Named trail lines: ${trailLines.length}`);
+  if (overviewPoints) {
+    console.log(`🗺️  Master overview: ${overviewPoints.length} points (stored on collection only)`);
+  } else {
+    console.warn("⚠️  No master overview line found — collection overview will be empty");
+  }
 
-  const { sections, stats } = processRoutePoints(points);
+  const { sections, stats } = processAllTrailLines(trailLines);
   console.log(
     `✂️  Gaps: ${stats.gapsFound}, merged: ${stats.mergeCount}, discarded: ${stats.discardCount}, deduped: ${stats.duplicatePointsRemoved}`,
   );
 
-  printDryRunReport(sections, source);
+  printDryRunReport(sections, trailLines.length, overviewPoints?.length ?? null);
 
   if (dryRun) {
     console.log("\n✅ Dry run complete — no data imported.");
@@ -204,13 +270,13 @@ async function main(): Promise<void> {
 
   assertServiceRoleKey(getEnv("SUPABASE_SERVICE_ROLE_KEY"));
   console.log("\n💾 Importing sections…");
-  const trailIds = await insertSections(sections);
-  if (trailIds.length === 0) {
-    console.error("❌ No trails inserted — aborting collection link");
+  const { trailIds, collectionTrailIds } = await insertSections(sections);
+  if (collectionTrailIds.length === 0) {
+    console.error("❌ No trail sections inserted — aborting collection link");
     process.exit(1);
   }
-  await upsertCollection(trailIds, sections);
-  console.log("\n✅ Import complete.");
+  await upsertCollection(collectionTrailIds, sections, overviewPoints);
+  console.log(`\n✅ Import complete (${trailIds.length} rows, ${collectionTrailIds.length} in collection).`);
 }
 
 main().catch((err) => {

@@ -26,15 +26,21 @@ const PrivacyEnum = z.enum(["private", "public", "group"]);
 const ExtraTrailFields = z.object({
   description: z.string().max(5000).nullish(),
   privacy: PrivacyEnum.optional(),
-  // Object-storage path for the original GPX artifact, e.g.
-  // "/objects/trails/source/<uuid>.gpx" (returned by
-  // POST /trails/gpx/upload-url).
   gpx_object_path: z.string().min(1).max(512).nullish(),
-  // Optional group ids to share the new trail into. When privacy=group, the
-  // server creates the matching `trail_shares` rows in the same handler — if
-  // the share insert fails, the trail row is rolled back so the user never
-  // ends up with a private trail they thought they shared. See POST /trails.
   group_ids: z.array(z.string().uuid()).max(50).optional(),
+});
+
+/** Geometry + source fields for mobile draw / GPS recordings. */
+const GeometryFields = z.object({
+  path_geojson: z.object({
+    type: z.literal("LineString"),
+    coordinates: z.array(z.tuple([z.number(), z.number()])).min(2),
+  }).optional(),
+  /** Legacy mobile alias — [lon, lat][] */
+  path: z.array(z.tuple([z.number(), z.number()])).min(2).optional(),
+  gpx_data: z.unknown().optional(),
+  source: z.string().min(1).max(64).optional(),
+  altitudes: z.array(z.number()).optional(),
 });
 
 const PatchTrailBody = z.object({
@@ -520,6 +526,11 @@ router.post("/trails", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Invalid description / privacy" });
     return;
   }
+  const geometry = GeometryFields.safeParse(req.body);
+  if (!geometry.success) {
+    res.status(400).json({ error: "Invalid trail geometry" });
+    return;
+  }
 
   // Privacy selector takes precedence over is_public, defaulting to PRIVATE
   // for safety. "group" privacy keeps the trail row itself private
@@ -561,6 +572,16 @@ router.post("/trails", async (req: Request, res: Response) => {
     if (extras.data.description != null) {
       insert.description = extras.data.description;
     }
+
+    const geom = geometry.data;
+    if (geom.path_geojson) {
+      insert.path_geojson = geom.path_geojson;
+    } else if (geom.path && geom.path.length >= 2) {
+      insert.path_geojson = { type: "LineString", coordinates: geom.path };
+    }
+    if (geom.gpx_data != null) insert.gpx_data = geom.gpx_data;
+    if (geom.source) insert.source = geom.source;
+    if (geom.altitudes?.length) insert.altitudes = geom.altitudes;
 
     // If the client uploaded the original GPX to object storage and passed
     // back the objectPath, finalize the ACL (private; owner = caller) and

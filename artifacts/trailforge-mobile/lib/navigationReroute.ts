@@ -175,7 +175,17 @@ export async function fetchRoadRoute(
   to: NavLatLng,
   signal?: AbortSignal,
 ): Promise<RoadRouteResponse> {
-  const coords = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
+  return fetchRoadRouteViaWaypoints([from, to], signal);
+}
+
+export async function fetchRoadRouteViaWaypoints(
+  points: NavLatLng[],
+  signal?: AbortSignal,
+): Promise<RoadRouteResponse> {
+  if (points.length < 2) {
+    return { ok: false, error: "Need at least two points" };
+  }
+  const coords = points.map((p) => `${p.longitude},${p.latitude}`).join(";");
   const url = `${OSRM_BASE}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
 
   try {

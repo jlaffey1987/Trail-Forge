@@ -15,7 +15,7 @@
 
 import { haversineM, bearingDeg, type NavLatLng } from "./navigationReroute";
 import { gradeFromDifficulty } from "./trailColors";
-import { parseGeoJsonPath } from "./geo";
+import { trailMapCoordinates, type TrailPathSource } from "./geo";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -26,8 +26,10 @@ export interface NavTrailInput {
   name: string;
   difficulty: string | null;
   distance_km: number | null;
-  /** GeoJSON [lon, lat] pairs from the API. */
-  path: Array<[number, number]> | unknown;
+  /** GeoJSON [lon, lat] pairs, path_geojson, or simplified_path from the API. */
+  path?: unknown;
+  path_geojson?: { type: string; coordinates: Array<[number, number]> } | null;
+  simplified_path?: string | null;
 }
 
 export interface NavRouteInput {
@@ -108,8 +110,8 @@ export interface NavProgress {
 // Route builder
 // ---------------------------------------------------------------------------
 
-function parseTrailPath(path: unknown): NavLatLng[] {
-  return parseGeoJsonPath(path);
+function parseTrailPath(trail: TrailPathSource): NavLatLng[] {
+  return trailMapCoordinates(trail);
 }
 
 function polylineLength(pts: NavLatLng[]): number {
@@ -145,7 +147,7 @@ export function buildNavRoute(input: NavRouteInput): NavRoute {
 
   // Helper: trail section from path data.
   function addTrailSection(trail: NavTrailInput) {
-    const path = parseTrailPath(trail.path);
+    const path = parseTrailPath(trail);
     if (path.length < 2) {
       // Trail has no path data — treat as a road connector between its
       // implied start/end (same point if no coords).
@@ -168,7 +170,7 @@ export function buildNavRoute(input: NavRouteInput): NavRoute {
   if (input.trails.length === 0) {
     addRoadSection("road-direct", "Proceed to destination", input.from, input.to);
   } else {
-    const firstPath = parseTrailPath(input.trails[0].path);
+    const firstPath = parseTrailPath(input.trails[0]);
     const firstEntry = firstPath[0] ?? input.to;
     addRoadSection("road-0", `Head to ${input.trails[0].name}`, input.from, firstEntry);
 
@@ -177,8 +179,8 @@ export function buildNavRoute(input: NavRouteInput): NavRoute {
 
       // Inter-trail connector: exit of trail[i] → entry of trail[i+1]
       if (i < input.trails.length - 1) {
-        const currPath = parseTrailPath(input.trails[i].path);
-        const nextPath = parseTrailPath(input.trails[i + 1].path);
+        const currPath = parseTrailPath(input.trails[i]);
+        const nextPath = parseTrailPath(input.trails[i + 1]);
         const from_ = currPath[currPath.length - 1] ?? input.from;
         const to_ = nextPath[0] ?? input.to;
         addRoadSection(
@@ -191,7 +193,7 @@ export function buildNavRoute(input: NavRouteInput): NavRoute {
     }
 
     // Last trail → destination.
-    const lastPath = parseTrailPath(input.trails[input.trails.length - 1].path);
+    const lastPath = parseTrailPath(input.trails[input.trails.length - 1]);
     const lastExit = lastPath[lastPath.length - 1] ?? input.from;
     addRoadSection("road-final", "Continue to destination", lastExit, input.to);
   }

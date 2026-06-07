@@ -96,6 +96,15 @@ export default function TransNorthernTrailScreen() {
     return fallbackTrailsQ.data ?? [];
   }, [sectionsQ.data, fallbackTrailsQ.data]);
 
+  const overviewCoords = useMemo(() => {
+    const geo = collection?.overview_path_geojson;
+    if (!geo?.coordinates?.length) return [];
+    return geo.coordinates.map(([lon, lat]) => ({
+      latitude: lat,
+      longitude: lon,
+    }));
+  }, [collection?.overview_path_geojson]);
+
   const polylines = useMemo(
     () =>
       trails
@@ -139,6 +148,10 @@ export default function TransNorthernTrailScreen() {
         lons.push(c.longitude);
       }
     }
+    for (const c of overviewCoords) {
+      lats.push(c.latitude);
+      lons.push(c.longitude);
+    }
     if (!lats.length) {
       return { latitude: 54.5, longitude: -2.5, latitudeDelta: 4, longitudeDelta: 4 };
     }
@@ -152,7 +165,7 @@ export default function TransNorthernTrailScreen() {
       latitudeDelta: Math.max(0.4, (maxLat - minLat) * 1.35),
       longitudeDelta: Math.max(0.4, (maxLon - minLon) * 1.35),
     };
-  }, [polylines]);
+  }, [polylines, overviewCoords]);
 
   const loading =
     collectionsQ.isLoading
@@ -264,6 +277,15 @@ export default function TransNorthernTrailScreen() {
             scrollEnabled
             zoomEnabled
           >
+            {overviewCoords.length >= 2 ? (
+              <Polyline
+                coordinates={overviewCoords}
+                strokeColor="rgba(255,255,255,0.35)"
+                strokeWidth={3}
+                lineDashPattern={[0]}
+                zIndex={0}
+              />
+            ) : null}
             {polylines.map(({ id, trail, coords, isRoad }) => (
               <Polyline
                 key={id}

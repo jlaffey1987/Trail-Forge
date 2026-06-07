@@ -92,31 +92,47 @@ export function parseKmlFile(filePath: string): KmlPlacemark[] {
   return walkNode(document, []);
 }
 
+export interface TrailLineString {
+  name: string;
+  points: TrackPoint[];
+  folderPath: string[];
+}
+
+export function selectMasterOverview(placemarks: KmlPlacemark[]): TrackPoint[] | null {
+  const master = placemarks.find(
+    (p) => p.linePoints && p.name.toLowerCase().includes("master copy"),
+  );
+  if (!master?.linePoints || master.linePoints.length < 2) return null;
+  return master.linePoints;
+}
+
+/** Individual named trails from TNT folders — excludes the Enduro master overview line. */
+export function selectTrailLineStrings(placemarks: KmlPlacemark[]): TrailLineString[] {
+  return placemarks
+    .filter((p) => {
+      if (!p.linePoints || p.linePoints.length < 2) return false;
+      if (p.name.toLowerCase().includes("master copy")) return false;
+      if (p.folderPath.some((f) => EXCLUDE_FOLDER.test(f))) return false;
+      return p.folderPath.some((f) => TRAIL_FOLDER.test(f));
+    })
+    .map((p) => ({
+      name: p.name,
+      points: p.linePoints!,
+      folderPath: p.folderPath,
+    }));
+}
+
+/** @deprecated Use selectTrailLineStrings + selectMasterOverview */
 export function selectRoutePoints(placemarks: KmlPlacemark[]): {
   points: TrackPoint[];
   source: "master" | "trail-folders";
 } {
-  const master = placemarks.find(
-    (p) => p.linePoints && p.name.toLowerCase().includes("master copy"),
-  );
-  if (master?.linePoints && master.linePoints.length >= 2) {
-    return { points: master.linePoints, source: "master" };
-  }
-
-  const lines = placemarks.filter((p) => {
-    if (!p.linePoints || p.linePoints.length < 2) return false;
-    if (p.folderPath.some((f) => EXCLUDE_FOLDER.test(f))) return false;
-    return p.folderPath.some((f) => TRAIL_FOLDER.test(f));
-  });
-
-  const points: TrackPoint[] = [];
-  for (const line of lines) {
-    points.push(...line.linePoints!);
-  }
+  const lines = selectTrailLineStrings(placemarks);
+  const points = lines.flatMap((l) => l.points);
   if (points.length < 2) {
-    throw new Error(
-      "No route LineString found — expected Master Copy line or TNT trail folders",
-    );
+    const master = selectMasterOverview(placemarks);
+    if (master) return { points: master, source: "master" };
+    throw new Error("No trail LineStrings found in TNT folders");
   }
   return { points, source: "trail-folders" };
 }

@@ -1,20 +1,14 @@
 /**
  * Intro video screen — shown exactly once on first launch.
  *
- * Behaviour:
- *   - Full-screen video (muted / silent)
- *   - "TrailForge" slides down from above + fades in after 0.6 s
- *   - Amber underline accent animates in beneath the title
- *   - Video pauses/freezes at 80 % of its duration (before bike exits frame)
- *   - Black overlay fades in, then we navigate to onboarding
- *   - Skip button appears at 1.5 s and does the same fade-to-black flow
- *
- * AsyncStorage flag: @trailforge/intro_seen — never shows again after first play.
+ * Uses expo-video (expo-av is deprecated on SDK 54 and often shows a black screen).
+ * Falls back to a static poster if the video fails to load.
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Video, ResizeMode, Audio, type AVPlaybackStatus } from "expo-av";
+import { Image } from "expo-image";
 import { router } from "expo-router";
+import { useVideoPlayer, VideoView } from "expo-video";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
@@ -35,34 +29,39 @@ const AMBER = "#F5A623";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const VIDEO_SOURCE = require("../assets/videos/intro.mp4") as number;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const POSTER_SOURCE = require("../assets/videos/intoimage.jpeg") as number;
 
 /** Stop video at this fraction of total duration and start fade-out. */
 const STOP_AT = 0.80;
+const MAX_INTRO_MS = 12_000;
 
 export default function IntroScreen() {
   const insets = useSafeAreaInsets();
-  const videoRef = useRef<Video>(null);
+  const advancedRef = useRef(false);
+  const frozenRef = useRef(false);
 
-  // Title slide-down + fade
-  const titleY       = useRef(new Animated.Value(-40)).current;
+  const titleY = useRef(new Animated.Value(-40)).current;
   const titleOpacity = useRef(new Animated.Value(0)).current;
-  // Amber underline grows from 0 → 1 (scaleX)
   const underlineScale = useRef(new Animated.Value(0)).current;
-  // Skip button fade
-  const skipOpacity  = useRef(new Animated.Value(0)).current;
-  // Full-screen black fade-out overlay
+  const skipOpacity = useRef(new Animated.Value(0)).current;
   const blackOpacity = useRef(new Animated.Value(0)).current;
 
-  const [advanced, setAdvanced] = useState(false);
-  const totalDurationRef = useRef<number | null>(null);  // ms
-  const frozenRef        = useRef(false);
+  const [showPoster, setShowPoster] = useState(true);
+  const [videoFailed, setVideoFailed] = useState(false);
 
-  // ── Navigate to next screen after fade-to-black ──────────────────────────
+  const player = useVideoPlayer(VIDEO_SOURCE, (p) => {
+    p.loop = false;
+    p.muted = true;
+    p.timeUpdateEventInterval = 0.25;
+    p.play();
+  });
+
   const advance = useCallback(async () => {
-    if (advanced) return;
-    setAdvanced(true);
+    if (advancedRef.current) return;
+    advancedRef.current = true;
+    player.pause();
 
-    // Fade to black over 500 ms, then navigate
     Animated.timing(blackOpacity, {
       toValue: 1,
       duration: 500,
@@ -77,20 +76,9 @@ export default function IntroScreen() {
         router.replace("/onboarding" as unknown as Parameters<typeof router.replace>[0]);
       }
     });
-  }, [advanced, blackOpacity]);
+  }, [blackOpacity, player]);
 
-  // ── Silence audio session ─────────────────────────────────────────────────
   useEffect(() => {
-    void Audio.setAudioModeAsync({
-      playsInSilentModeIOS: false,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: false,
-    });
-  }, []);
-
-  // ── Title + underline + skip animations ──────────────────────────────────
-  useEffect(() => {
-    // Title slides down and fades in at 600 ms
     Animated.sequence([
       Animated.delay(600),
       Animated.parallel([
@@ -105,7 +93,6 @@ export default function IntroScreen() {
       ]),
     ]).start();
 
-    // Amber underline stretches out at 1 s
     Animated.sequence([
       Animated.delay(1000),
       Animated.timing(underlineScale, {
@@ -115,66 +102,79 @@ export default function IntroScreen() {
       }),
     ]).start();
 
-    // Skip button fades in at 1.5 s
     Animated.sequence([
       Animated.delay(1500),
       Animated.timing(skipOpacity, {
         toValue: 1, duration: 400, useNativeDriver: true,
       }),
     ]).start();
-  }, []);
+  }, [titleOpacity, titleY, underlineScale, skipOpacity]);
 
-  // ── Video playback — freeze at 80 % then fade out ─────────────────────────
-  const onPlaybackStatusUpdate = useCallback(
-    (status: AVPlaybackStatus) => {
-      if (!status.isLoaded) return;
-
-      // Capture total duration on first status with it populated
-      if (status.durationMillis && totalDurationRef.current === null) {
-        totalDurationRef.current = status.durationMillis;
+  useEffect(() => {
+    const tick = setInterval(() => {
+      if (frozenRef.current || advancedRef.current) return;
+      if (player.status === "error") {
+        setVideoFailed(true);
+        setShowPoster(true);
+        return;
       }
-
-      // Check if we should freeze
-      if (!frozenRef.current && totalDurationRef.current) {
-        const fraction = status.positionMillis / totalDurationRef.current;
-        if (fraction >= STOP_AT) {
-          frozenRef.current = true;
-          videoRef.current?.pauseAsync().catch(() => undefined);
-          void advance();
-          return;
-        }
-      }
-
-      // Also advance if the video finishes naturally (e.g. short video)
-      if (status.didJustFinish && !frozenRef.current) {
+      const duration = player.duration;
+      if (!duration || duration <= 0) return;
+      if (player.currentTime / duration >= STOP_AT) {
         frozenRef.current = true;
         void advance();
       }
-    },
-    [advance],
-  );
+    }, 200);
+    return () => clearInterval(tick);
+  }, [player, advance]);
+
+  useEffect(() => {
+    const failTimer = setTimeout(() => {
+      if (player.status !== "readyToPlay" && player.status !== "loading" && !advancedRef.current) {
+        if (__DEV__) console.warn("[Intro] video slow to start — showing poster");
+        setShowPoster(true);
+      }
+    }, 3000);
+    return () => clearTimeout(failTimer);
+  }, [player]);
+
+  useEffect(() => {
+    const maxTimer = setTimeout(() => {
+      void advance();
+    }, MAX_INTRO_MS);
+    return () => clearTimeout(maxTimer);
+  }, [advance]);
+
+  useEffect(() => {
+    if (!videoFailed) return;
+    const t = setTimeout(() => void advance(), 2500);
+    return () => clearTimeout(t);
+  }, [videoFailed, advance]);
 
   return (
     <View style={s.root}>
       <StatusBar hidden />
 
-      {/* Full-screen video */}
-      <Video
-        ref={videoRef}
-        source={VIDEO_SOURCE}
-        style={StyleSheet.absoluteFill}
-        resizeMode={ResizeMode.COVER}
-        shouldPlay
-        isLooping={false}
-        isMuted={true}
-        volume={0}
-        onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-      />
+      {(showPoster || videoFailed) ? (
+        <Image
+          source={POSTER_SOURCE}
+          style={StyleSheet.absoluteFill}
+          contentFit="cover"
+        />
+      ) : null}
 
-      {/* Dark vignette edges */}
+      {!videoFailed ? (
+        <VideoView
+          player={player}
+          style={StyleSheet.absoluteFill}
+          contentFit="cover"
+          nativeControls={false}
+          onFirstFrameRender={() => setShowPoster(false)}
+        />
+      ) : null}
+
       <View style={s.vignette} pointerEvents="none" />
 
-      {/* "TrailForge" title — slides down from above */}
       <Animated.View
         style={[
           s.titleWrap,
@@ -184,13 +184,11 @@ export default function IntroScreen() {
         pointerEvents="none"
       >
         <Text style={s.title}>TrailForge</Text>
-        {/* Amber underline scales in from left */}
         <Animated.View
           style={[s.underline, { transform: [{ scaleX: underlineScale }] }]}
         />
       </Animated.View>
 
-      {/* Skip button */}
       <Animated.View style={[s.skipWrap, { top: insets.top + 14, opacity: skipOpacity }]}>
         <TouchableOpacity
           style={s.skipBtn}
@@ -204,7 +202,6 @@ export default function IntroScreen() {
         </TouchableOpacity>
       </Animated.View>
 
-      {/* Black fade-out overlay — starts transparent, animates to opaque */}
       <Animated.View
         style={[StyleSheet.absoluteFill, s.blackOverlay, { opacity: blackOpacity }]}
         pointerEvents="none"
@@ -222,7 +219,6 @@ const s = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.5)",
   },
 
-  // Title — centred horizontally, positioned near top
   titleWrap: {
     position: "absolute",
     left: 0,
@@ -244,11 +240,8 @@ const s = StyleSheet.create({
     width: 140,
     borderRadius: 2,
     backgroundColor: AMBER,
-    // scaleX animated from 0 → 1, originates from centre
-    transformOrigin: "center",
   },
 
-  // Skip button — top-right (positioned in JSX, opacity animated)
   skipWrap: { position: "absolute", right: 16, zIndex: 100 },
   skipBtn: {
     paddingHorizontal: 18,
@@ -260,6 +253,5 @@ const s = StyleSheet.create({
   },
   skipTxt: { color: "#FFFFFF", fontSize: 14, fontWeight: "700", letterSpacing: 0.3 },
 
-  // Fade-to-black overlay
   blackOverlay: { backgroundColor: "#000" },
 });

@@ -127,7 +127,7 @@ router.get("/api/collections", async (req: Request, res: Response) => {
   const supa = getSupabaseAdmin();
   const { data, error } = await supa
     .from("trail_collections")
-    .select("id, name, description, region, difficulty_min, difficulty_max, total_distance_km, is_featured, is_official, cover_image_url")
+    .select("id, name, description, region, difficulty_min, difficulty_max, total_distance_km, is_featured, is_official, cover_image_url, overview_path_geojson")
     .order("is_featured", { ascending: false })
     .order("is_official", { ascending: false })
     .order("name");

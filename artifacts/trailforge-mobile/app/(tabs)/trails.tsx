@@ -27,6 +27,8 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+import { AppShellHeader } from "@/components/shell/AppShellHeader";
+import { TabHero } from "@/components/shell/TabHero";
 import { listRecentlyRidden, type RecentlyRiddenTrail } from "@/lib/api";
 import {
   clearAllOffline,
@@ -132,10 +134,20 @@ export default function TrailsTab() {
     [filteredSavedTrails],
   );
 
+  const allSaved =
+    (savedTrails.data as { trails?: SavedTrail[] } | undefined)?.trails ?? [];
+  const ownedKm = allSaved
+    .reduce((sum, t) => sum + (t.distance_km ?? 0), 0)
+    .toFixed(1);
+  const routeCount =
+    (savedRoutes.data as { routes?: SavedRoute[] } | undefined)?.routes?.length ?? 0;
+
   return (
-    <ScrollView
+    <View style={{ flex: 1, backgroundColor: colors.light.background }}>
+      <AppShellHeader />
+      <ScrollView
       style={styles.container}
-      contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
+      contentContainerStyle={{ paddingBottom: 100 }}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -144,6 +156,28 @@ export default function TrailsTab() {
         />
       }
     >
+      <TabHero
+        title="My"
+        titleAccent="Trails"
+        subtitle="Synced with Supabase"
+        rightAction={
+          <TouchableOpacity
+            style={heroStyles.addBtn}
+            onPress={() => router.push("/add-trail")}
+          >
+            <Feather name="plus" size={14} color="#1a0e05" />
+            <Text style={heroStyles.addText}>Add Trail</Text>
+          </TouchableOpacity>
+        }
+      />
+
+      <View style={heroStyles.statsBar}>
+        <StatCell label="Owned km" value={ownedKm} />
+        <StatCell label="My trails" value={String(allSaved.length)} />
+        <StatCell label="Saved" value={String(routeCount)} />
+      </View>
+
+      <View style={{ paddingHorizontal: 16 }}>
       <Section
         title="Saved trails"
         loading={savedTrails.isLoading}
@@ -290,9 +324,63 @@ export default function TrailsTab() {
           ))
         )}
       </View>
+      </View>
     </ScrollView>
+    </View>
   );
 }
+
+function StatCell({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={heroStyles.statCell}>
+      <Text style={heroStyles.statValue}>{value}</Text>
+      <Text style={heroStyles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+const heroStyles = StyleSheet.create({
+  addBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: colors.light.primary,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  addText: {
+    color: "#1a0e05",
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  statsBar: {
+    flexDirection: "row",
+    marginHorizontal: 16,
+    marginBottom: 16,
+    backgroundColor: colors.light.card,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    paddingVertical: 14,
+  },
+  statCell: { flex: 1, alignItems: "center" },
+  statValue: {
+    color: colors.light.primary,
+    fontSize: 22,
+    fontWeight: "900",
+  },
+  statLabel: {
+    color: colors.light.mutedForeground,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    marginTop: 2,
+  },
+});
 
 function StorageStat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (

@@ -678,6 +678,7 @@ export interface TrailCollection {
   is_featured: boolean;
   is_official: boolean;
   cover_image_url: string | null;
+  overview_path_geojson?: { type: string; coordinates: Array<[number, number]> } | null;
 }
 
 export interface CollectionSectionRow {
