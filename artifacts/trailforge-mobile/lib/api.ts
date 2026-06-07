@@ -553,29 +553,82 @@ export function getUnreadCount(): Promise<{ unread: number }> {
 
 export interface CreateTrailFromRideInput {
   name: string;
-  /** GeoJSON-style [lon, lat] samples taken during the ride. */
+  /** GeoJSON-style [lon, lat] samples. */
   path: Array<[number, number]>;
   altitudes?: number[];
   visibility?: "private" | "public" | "group";
   groupId?: string;
   region?: string | null;
-  difficulty?: string | null;
+  difficulty?: string | number | null;
+  terrain?: string;
+  type?: string;
+  source?: string;
+}
+
+function bboxFromPath(path: Array<[number, number]>) {
+  const lats = path.map((c) => c[1]);
+  const lngs = path.map((c) => c[0]);
+  return {
+    bbox_min_lat: Math.min(...lats),
+    bbox_max_lat: Math.max(...lats),
+    bbox_min_lng: Math.min(...lngs),
+    bbox_max_lng: Math.max(...lngs),
+  };
+}
+
+function pathDistanceKm(path: Array<[number, number]>): number {
+  const R = 6371000;
+  let m = 0;
+  for (let i = 1; i < path.length; i++) {
+    const [lon1, lat1] = path[i - 1];
+    const [lon2, lat2] = path[i];
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2
+      + Math.cos((lat1 * Math.PI) / 180)
+      * Math.cos((lat2 * Math.PI) / 180)
+      * Math.sin(dLon / 2) ** 2;
+    m += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+  return Math.round((m / 1000) * 100) / 100;
 }
 
 export async function createTrailFromRide(
   input: CreateTrailFromRideInput,
 ): Promise<{ id: string }> {
+  const privacy = input.visibility ?? "private";
+  const path = input.path;
+  const path_geojson = { type: "LineString" as const, coordinates: path };
+  const gpxPoints = path.map(([lon, lat], i) => ({
+    lat,
+    lon,
+    ele: input.altitudes?.[i],
+  }));
+  const difficultyNum =
+    input.difficulty == null
+      ? null
+      : typeof input.difficulty === "number"
+        ? input.difficulty
+        : Number.parseInt(String(input.difficulty), 10);
+
   return apiJson<{ id: string }>("/api/trails", {
     method: "POST",
     body: JSON.stringify({
       name: input.name,
-      visibility: input.visibility ?? "private",
-      group_id: input.groupId ?? null,
-      region: input.region ?? null,
-      difficulty: input.difficulty ?? null,
-      path: input.path,
+      type: input.type ?? "green-lane",
+      terrain: input.terrain ?? "trail",
+      difficulty: Number.isFinite(difficultyNum) ? difficultyNum : null,
+      distance_km: pathDistanceKm(path),
+      ...bboxFromPath(path),
+      path_geojson,
+      gpx_data: buildGpx(input.name, gpxPoints),
+      privacy,
+      is_public: privacy === "public",
+      ...(privacy === "group" && input.groupId ? { group_ids: [input.groupId] } : {}),
       altitudes: input.altitudes ?? [],
-      source: "mobile-recording",
+      source: input.source ?? "mobile-recording",
+      region: input.region ?? null,
     }),
   });
 }
@@ -611,6 +664,58 @@ ${trkpts}
 }
 
 // ---------------------------------------------------------------------------
+// Featured trail collections
+// ---------------------------------------------------------------------------
+
+export interface TrailCollection {
+  id: string;
+  name: string;
+  description: string | null;
+  region: string | null;
+  difficulty_min: number | null;
+  difficulty_max: number | null;
+  total_distance_km: number | null;
+  is_featured: boolean;
+  is_official: boolean;
+  cover_image_url: string | null;
+}
+
+export interface CollectionSectionRow {
+  order_index: number;
+  is_optional: boolean;
+  trail: MapTrail;
+}
+
+export async function fetchTrailCollections(): Promise<TrailCollection[]> {
+  const res = await apiFetch("/api/collections", { allowAnonymous: true });
+  if (!res.ok) throw new Error("Failed to load collections");
+  return (res.json() as Promise<{ collections: TrailCollection[] }>).then((d) => d.collections ?? []);
+}
+
+export async function fetchCollectionSections(
+  collectionId: string,
+): Promise<CollectionSectionRow[]> {
+  const res = await apiFetch(
+    `/api/collections/${encodeURIComponent(collectionId)}/sections`,
+    { allowAnonymous: true },
+  );
+  if (!res.ok) throw new Error("Failed to load collection sections");
+  return (res.json() as Promise<{ sections: CollectionSectionRow[] }>).then((d) => d.sections ?? []);
+}
+
+/** UK + Ireland bbox for community route searches. */
+export const UK_IE_SEARCH_BBOX = "49.5000,-11.0000,61.0000,2.0000";
+
+export async function fetchTntTrails(limit = 500): Promise<MapTrail[]> {
+  const res = await searchTrailsByBbox({
+    bbox: UK_IE_SEARCH_BBOX,
+    source: "TNT",
+    limit,
+  });
+  return res.trails ?? [];
+}
+
+// ---------------------------------------------------------------------------
 // Planner suggestions (Task #214 not yet merged — direct fetch fallback)
 // ---------------------------------------------------------------------------
 
@@ -632,6 +737,12 @@ export interface MapTrail {
   elevation_gain_m?: number | null;
   /** GPX path samples — array of [lon, lat] pairs (GeoJSON convention). */
   path?: unknown;
+  path_geojson?: { type: string; coordinates: Array<[number, number]> } | null;
+  simplified_path?: string | null;
+  bbox_min_lat?: number | null;
+  bbox_max_lat?: number | null;
+  bbox_min_lng?: number | null;
+  bbox_max_lng?: number | null;
   altitudes?: number[];
   photo_urls?: string[];
   /** UK access taxonomy: "BOAT", "Green Lane", "UCR", etc. Drives the
@@ -649,22 +760,22 @@ export interface TrailSearchResponseBbox {
 
 /**
  * Bbox + id-filter trail search. The server's `/api/trails/search` route
- * accepts `bbox` and `ids` params that the OpenAPI spec doesn't yet
- * advertise, so we call it directly instead of through the generated
- * `useSearchTrails` hook (which would require the spec to grow those
- * fields and a regen step).
+ * accepts `bbox` as `minLat,minLng,maxLat,maxLng` and/or `ids` params.
  */
 export async function searchTrailsByBbox(params: {
   bbox?: string;
   ids?: string;
+  source?: string;
   limit?: number;
 }): Promise<TrailSearchResponseBbox> {
   const qs = new URLSearchParams();
   if (params.bbox) qs.set("bbox", params.bbox);
   if (params.ids) qs.set("ids", params.ids);
+  if (params.source) qs.set("source", params.source);
   if (typeof params.limit === "number") qs.set("limit", String(params.limit));
   return apiJson<TrailSearchResponseBbox>(
     `/api/trails/search?${qs.toString()}`,
+    { allowAnonymous: true },
   );
 }
 
@@ -674,6 +785,7 @@ export async function getPlannerSuggestions(req: {
   toLat: number;
   toLon: number;
   corridorKm?: number;
+  maxTrails?: number;
 }): Promise<{ suggestions: PlannerSuggestion[] }> {
   // Surface real errors. Previously this swallowed every failure and
   // returned `[]`, which masked auth / 5xx issues from the user. The

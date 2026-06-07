@@ -27,6 +27,7 @@ import { haversineKm } from "@/lib/geo";
 import {
   createGroup,
   fetchCommunityTrails,
+  fetchTrailCollections,
   leaveGroup,
   listDiscoverableGroups,
   listMyGroups,
@@ -34,6 +35,7 @@ import {
   type DiscoverableGroup,
   type Group,
   type MapTrail,
+  type TrailCollection,
 } from "@/lib/api";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
 
@@ -140,6 +142,11 @@ export default function DiscoverTab() {
     queryFn: fetchCommunityTrails,
     staleTime: 60_000,
   });
+  const collectionsQ = useQuery({
+    queryKey: ["trail-collections"],
+    queryFn: fetchTrailCollections,
+    staleTime: 60_000,
+  });
   const [trailCategory, setTrailCategory] = useState<TrailCategory>("All");
 
   // Lightweight one-shot location fetch for "Nearby". We don't hold a
@@ -172,6 +179,18 @@ export default function DiscoverTab() {
   const groups = groupsQ.data?.groups ?? [];
   const discoverable = (discoverQ.data?.items ?? []).filter(
     (g) => !g.is_member,
+  );
+
+  const tntCollection = useMemo(
+    () => collectionsQ.data?.find((c) => c.name === "Trans Northern Trail") ?? null,
+    [collectionsQ.data],
+  );
+  const otherFeatured = useMemo(
+    () =>
+      (collectionsQ.data ?? []).filter(
+        (c) => c.is_featured && c.name !== "Trans Northern Trail",
+      ),
+    [collectionsQ.data],
   );
 
   function confirmLeave(g: Group) {
@@ -215,6 +234,7 @@ export default function DiscoverTab() {
           onRefresh={() => {
             void routesQ.refetch();
             void groupsQ.refetch();
+            void collectionsQ.refetch();
           }}
           tintColor={colors.light.primary}
         />
@@ -223,7 +243,27 @@ export default function DiscoverTab() {
         <View style={{ marginBottom: 22 }}>
           <Text style={styles.h1}>Discover</Text>
 
-          <Text style={styles.sectionTitle}>Community trails</Text>
+          <Text style={styles.sectionTitle}>Featured routes</Text>
+          <FeaturedRouteCard
+            collection={tntCollection}
+            fallback={{
+              name: "Trans Northern Trail",
+              region: "England North / Scotland",
+              total_distance_km: null,
+              difficulty_min: 3,
+              difficulty_max: 8,
+            }}
+            onPress={() => router.push("/routes/tnt" as never)}
+          />
+          {otherFeatured.map((c) => (
+            <FeaturedRouteCard
+              key={c.id}
+              collection={c}
+              onPress={() => router.push("/(tabs)/map" as never)}
+            />
+          ))}
+
+          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>Community trails</Text>
           <View style={styles.categoryRibbon}>
             {TRAIL_FILTERS.map((f) => {
               const active = f === trailCategory;
@@ -435,6 +475,53 @@ export default function DiscoverTab() {
   );
 }
 
+function FeaturedRouteCard({
+  collection,
+  fallback,
+  onPress,
+}: {
+  collection: TrailCollection | null;
+  fallback?: {
+    name: string;
+    region: string;
+    total_distance_km: number | null;
+    difficulty_min: number;
+    difficulty_max: number;
+  };
+  onPress: () => void;
+}) {
+  const name = collection?.name ?? fallback?.name ?? "Community route";
+  const region = collection?.region ?? fallback?.region;
+  const km = collection?.total_distance_km ?? fallback?.total_distance_km;
+  const dMin = collection?.difficulty_min ?? fallback?.difficulty_min;
+  const dMax = collection?.difficulty_max ?? fallback?.difficulty_max;
+
+  return (
+    <TouchableOpacity style={styles.featuredCard} onPress={onPress} activeOpacity={0.85}>
+      <View style={styles.featuredTop}>
+        <Text style={styles.featuredTitle} numberOfLines={1}>{name}</Text>
+        <View style={styles.communityBadge}>
+          <Text style={styles.communityBadgeText}>Community Route</Text>
+        </View>
+      </View>
+      {region ? <Text style={styles.featuredRegion}>{region}</Text> : null}
+      <View style={styles.featuredMeta}>
+        {km != null ? (
+          <Text style={styles.featuredMetaText}>{Math.round(km)} km total</Text>
+        ) : (
+          <Text style={styles.featuredMetaText}>Distance after import</Text>
+        )}
+        {dMin != null && dMax != null ? (
+          <Text style={styles.featuredMetaText}>Grade {dMin}–{dMax}</Text>
+        ) : null}
+      </View>
+      <Text style={styles.featuredHint}>
+        Trails associated with the {name}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
 function GroupRow({ group, onLeave }: { group: Group; onLeave: () => void }) {
   return (
     <Pressable
@@ -520,6 +607,58 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontSize: 14,
     marginBottom: 8,
+  },
+  featuredCard: {
+    backgroundColor: colors.light.card,
+    borderRadius: 14,
+    borderColor: colors.light.border,
+    borderWidth: 1,
+    padding: 16,
+    marginBottom: 10,
+  },
+  featuredTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginBottom: 6,
+  },
+  featuredTitle: {
+    flex: 1,
+    color: colors.light.foreground,
+    fontWeight: "800",
+    fontSize: 16,
+  },
+  communityBadge: {
+    backgroundColor: colors.light.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  communityBadgeText: {
+    color: colors.light.primaryForeground,
+    fontWeight: "700",
+    fontSize: 10,
+  },
+  featuredRegion: {
+    color: colors.light.mutedForeground,
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  featuredMeta: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 6,
+  },
+  featuredMetaText: {
+    color: colors.light.foreground,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  featuredHint: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    fontStyle: "italic",
   },
   groupRow: {
     flexDirection: "row",

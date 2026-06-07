@@ -144,4 +144,43 @@ router.get("/api/collections", async (req: Request, res: Response) => {
   res.json({ collections: data ?? [] });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/collections/:id/sections
+// ---------------------------------------------------------------------------
+
+router.get("/api/collections/:id/sections", async (req: Request, res: Response) => {
+  const collectionId = String(req.params.id ?? "").trim();
+  if (!collectionId) {
+    res.status(400).json({ error: "Missing collection id" });
+    return;
+  }
+
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from("trail_collection_sections")
+    .select(`
+      order_index,
+      is_optional,
+      trail:trails (
+        id, name, difficulty, ai_difficulty, terrain, distance_km,
+        elevation_gain_m, elevation_loss_m, source, legal_status,
+        path_geojson, simplified_path, bbox_min_lat, bbox_max_lat,
+        bbox_min_lng, bbox_max_lng, centroid_lat, centroid_lon
+      )
+    `)
+    .eq("collection_id", collectionId)
+    .order("order_index", { ascending: true });
+
+  if (error) {
+    if (isMissingTableError(error)) {
+      res.json({ sections: [] });
+      return;
+    }
+    res.status(500).json({ error: "Failed to load collection sections" });
+    return;
+  }
+
+  res.json({ sections: data ?? [] });
+});
+
 export default router;

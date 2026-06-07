@@ -7,6 +7,7 @@
     "hello": "tsx ./src/hello.ts",
     "import:act": "tsx ./src/importACT/index.ts",
     "import:tet": "tsx ./tet-import.ts",
+    "import:tnt": "tsx ./src/importKML/index.ts",
     "import:osm": "tsx ./src/importOSM/index.ts",
     "import:osm:scotland": "tsx ./src/importOSM/index.ts --region scotland",
     "import:osm:wales": "tsx ./src/importOSM/index.ts --region wales",
@@ -20,7 +21,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.104.0",
-    "@workspace/integrations-anthropic-ai": "workspace:*"
+    "@workspace/integrations-anthropic-ai": "workspace:*",
+    "fast-xml-parser": "^5.7.2"
   },
   "devDependencies": {
     "@types/node": "catalog:",
