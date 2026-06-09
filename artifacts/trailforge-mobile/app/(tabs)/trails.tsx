@@ -27,6 +27,7 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+import { PageLoadingCover } from "@/components/PageLoadingCover";
 import { AppShellHeader } from "@/components/shell/AppShellHeader";
 import { TabHero } from "@/components/shell/TabHero";
 import { listRecentlyRidden, type RecentlyRiddenTrail } from "@/lib/api";
@@ -37,12 +38,12 @@ import {
   removeOfflineTrail,
   type OfflineTrail,
 } from "@/lib/offlineStore";
-import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
+import { difficultyColor, difficultyLabel, gradeFromDifficulty } from "@/lib/trailColors";
 
 interface SavedTrail {
   id: string;
   name: string;
-  difficulty: string | null;
+  difficulty: string | number | null;
   distance_km: number | null;
   elevation_gain_m?: number | null;
 }
@@ -59,7 +60,14 @@ type DiffFilter = "all" | "green" | "blue" | "black" | "double-black";
 
 function difficultyMatches(t: SavedTrail, f: DiffFilter): boolean {
   if (f === "all") return true;
-  const raw = (t.difficulty ?? "").toLowerCase();
+  const grade = gradeFromDifficulty(t.difficulty);
+  if (grade != null) {
+    if (f === "green") return grade <= 3;
+    if (f === "blue") return grade >= 4 && grade <= 6;
+    if (f === "black") return grade >= 7 && grade <= 9;
+    if (f === "double-black") return grade >= 10;
+  }
+  const raw = String(t.difficulty ?? "").toLowerCase();
   if (f === "green") return raw.includes("green") || raw.includes("easy");
   if (f === "blue")
     return (
@@ -145,6 +153,10 @@ export default function TrailsTab() {
   return (
     <View style={{ flex: 1, backgroundColor: colors.light.background }}>
       <AppShellHeader />
+      <PageLoadingCover
+        loading={savedTrails.isLoading && savedRoutes.isLoading && !savedTrails.data}
+        message="Loading your trails…"
+      >
       <ScrollView
       style={styles.container}
       contentContainerStyle={{ paddingBottom: 100 }}
@@ -326,6 +338,7 @@ export default function TrailsTab() {
       </View>
       </View>
     </ScrollView>
+      </PageLoadingCover>
     </View>
   );
 }
@@ -476,7 +489,7 @@ function TrailRow({
 }: {
   id: string;
   name: string;
-  difficulty: string | null;
+  difficulty: string | number | null;
   meta: string;
   siblingIds?: string;
 }) {

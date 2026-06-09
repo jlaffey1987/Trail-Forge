@@ -25,7 +25,9 @@ import {
   TrailDetailSheet,
   type TrailDetailData,
 } from "@/components/TrailDetailSheet";
+import { PageLoadingCover } from "@/components/PageLoadingCover";
 import colors from "@/constants/colors";
+import { RIDE_POV_BANNER } from "@/constants/brandImages";
 import {
   fetchCollectionSections,
   fetchTntTrails,
@@ -41,7 +43,6 @@ import {
 } from "@/lib/trailColors";
 
 const AMBER = colors.light.primary;
-const HERO = require("@/assets/videos/intoimage.jpeg");
 const OFFLINE_KEY = "@trailforge/tnt-offline-v1";
 const { width: W } = Dimensions.get("window");
 
@@ -232,11 +233,12 @@ export default function TransNorthernTrailScreen() {
   }
 
   return (
+    <PageLoadingCover loading={loading} message="Loading route…">
     <View style={styles.root}>
       <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
         {/* Hero */}
         <View style={styles.heroWrap}>
-          <Image source={HERO} style={StyleSheet.absoluteFill} contentFit="cover" />
+          <Image source={RIDE_POV_BANNER} style={StyleSheet.absoluteFill} contentFit="cover" />
           <View style={styles.heroScrim} />
           <TouchableOpacity
             style={[styles.backBtn, { top: insets.top + 8 }]}
@@ -262,10 +264,6 @@ export default function TransNorthernTrailScreen() {
         </View>
 
         <Text style={styles.credit}>Route data from community mapping</Text>
-
-        {loading ? (
-          <ActivityIndicator color={AMBER} style={{ marginVertical: 24 }} />
-        ) : null}
 
         {/* Map overview */}
         <Text style={styles.sectionLabel}>Route overview</Text>
@@ -384,6 +382,7 @@ export default function TransNorthernTrailScreen() {
         onMarkRiddenChange={() => undefined}
       />
     </View>
+    </PageLoadingCover>
   );
 }
 

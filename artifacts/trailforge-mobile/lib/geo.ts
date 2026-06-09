@@ -116,16 +116,21 @@ export function formatSearchBbox(
 }
 
 /** Build a search bbox string from a react-native-maps region. */
-export function formatSearchBboxFromRegion(r: {
-  latitude: number;
-  longitude: number;
-  latitudeDelta: number;
-  longitudeDelta: number;
-}): string {
-  const minLat = r.latitude - r.latitudeDelta / 2;
-  const maxLat = r.latitude + r.latitudeDelta / 2;
-  const minLng = r.longitude - r.longitudeDelta / 2;
-  const maxLng = r.longitude + r.longitudeDelta / 2;
+export function formatSearchBboxFromRegion(
+  r: {
+    latitude: number;
+    longitude: number;
+    latitudeDelta: number;
+    longitudeDelta: number;
+  },
+  padFraction = 0,
+): string {
+  const latPad = r.latitudeDelta * padFraction;
+  const lngPad = r.longitudeDelta * padFraction;
+  const minLat = r.latitude - r.latitudeDelta / 2 - latPad;
+  const maxLat = r.latitude + r.latitudeDelta / 2 + latPad;
+  const minLng = r.longitude - r.longitudeDelta / 2 - lngPad;
+  const maxLng = r.longitude + r.longitudeDelta / 2 + lngPad;
   return formatSearchBbox(minLat, minLng, maxLat, maxLng);
 }
 

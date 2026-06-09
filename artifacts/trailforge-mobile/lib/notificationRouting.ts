@@ -1,16 +1,24 @@
 /**
- * Maps Expo notification taps to in-app navigation. The push payload's
- * `data.url` is a path string like `/trail/abc` or `/messages/room-1`
- * which we hand straight to expo-router. Falls back to `/` for unknown
- * payloads so a malformed push never wedges the app on a blank screen.
+ * Maps Expo notification taps to in-app navigation. No-op in Expo Go
+ * (remote push not supported in SDK 53+).
  */
-import * as Notifications from "expo-notifications";
+import Constants from "expo-constants";
 import { router } from "expo-router";
 
 type NotificationData = {
   url?: unknown;
   tag?: unknown;
 };
+
+type NotificationResponse = {
+  notification: {
+    request: { content: { data: unknown } };
+  };
+};
+
+function isExpoGo(): boolean {
+  return Constants.appOwnership === "expo";
+}
 
 function extractUrl(data: unknown): string | null {
   if (!data || typeof data !== "object") return null;
@@ -19,38 +27,38 @@ function extractUrl(data: unknown): string | null {
   return url;
 }
 
-export function handleNotificationResponse(
-  response: Notifications.NotificationResponse,
-): void {
+export function handleNotificationResponse(response: NotificationResponse): void {
   const url = extractUrl(response.notification.request.content.data);
   if (!url) return;
   try {
     router.push(url as never);
   } catch {
-    // Bad route — fall back to home.
     router.push("/" as never);
   }
 }
 
-/**
- * Subscribes to notification taps. Returns an unsubscribe fn for the
- * caller to wire into a useEffect cleanup. Also drains any cold-start
- * notification (the tap that launched the app) so the deep link still
- * fires even when the listener registers after the OS delivers it.
- */
 export function subscribeToNotificationTaps(): () => void {
-  const sub = Notifications.addNotificationResponseReceivedListener(
-    handleNotificationResponse,
-  );
+  if (isExpoGo()) {
+    return () => undefined;
+  }
 
-  // Cold-start: if the app was launched by tapping a push, replay it.
-  Notifications.getLastNotificationResponseAsync()
-    .then((last) => {
-      if (last) handleNotificationResponse(last);
-    })
-    .catch(() => {
-      /* ignore */
-    });
+  let sub: { remove: () => void } | null = null;
+  let cancelled = false;
 
-  return () => sub.remove();
+  void import("expo-notifications").then((Notifications) => {
+    if (cancelled) return;
+    sub = Notifications.addNotificationResponseReceivedListener(
+      handleNotificationResponse,
+    );
+    void Notifications.getLastNotificationResponseAsync()
+      .then((last) => {
+        if (last) handleNotificationResponse(last);
+      })
+      .catch(() => undefined);
+  }).catch(() => undefined);
+
+  return () => {
+    cancelled = true;
+    sub?.remove();
+  };
 }

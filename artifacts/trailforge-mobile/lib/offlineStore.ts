@@ -37,7 +37,7 @@ export interface OfflineTrailPoint {
 export interface OfflineTrail {
   id: string;
   name: string;
-  difficulty: string | null;
+  difficulty: string | number | null;
   distance_km: number | null;
   /** Compressed polyline — array of [lon, lat] pairs. */
   path: Array<[number, number]>;

@@ -23,6 +23,8 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+import { PageLoadingCover } from "@/components/PageLoadingCover";
+import { TabHero } from "@/components/shell/TabHero";
 import { haversineKm } from "@/lib/geo";
 import {
   createGroup,
@@ -181,6 +183,12 @@ export default function DiscoverTab() {
     (g) => !g.is_member,
   );
 
+  const initialLoading =
+    (routesQ.isLoading || groupsQ.isLoading || trailsQ.isLoading)
+    && !routesQ.data
+    && !groupsQ.data
+    && !trailsQ.data;
+
   const tntCollection = useMemo(
     () => collectionsQ.data?.find((c) => c.name === "Trans Northern Trail") ?? null,
     [collectionsQ.data],
@@ -223,6 +231,7 @@ export default function DiscoverTab() {
   }
 
   return (
+    <PageLoadingCover loading={initialLoading} message="Loading discover…">
     <FlatList
       style={styles.container}
       contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
@@ -241,7 +250,11 @@ export default function DiscoverTab() {
       }
       ListHeaderComponent={
         <View style={{ marginBottom: 22 }}>
-          <Text style={styles.h1}>Discover</Text>
+          <TabHero
+            title="Discover"
+            subtitle="Featured routes, community trails, and groups"
+            height={200}
+          />
 
           <Text style={styles.sectionTitle}>Featured routes</Text>
           <FeaturedRouteCard
@@ -472,6 +485,7 @@ export default function DiscoverTab() {
         )
       }
     />
+    </PageLoadingCover>
   );
 }
 

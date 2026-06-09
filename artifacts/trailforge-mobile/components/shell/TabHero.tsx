@@ -8,8 +8,7 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
-
-const HERO_IMAGE = require("@/assets/videos/intoimage.jpeg");
+import { RIDE_POV_BANNER } from "@/constants/brandImages";
 
 interface TabHeroProps {
   title: string;
@@ -31,7 +30,7 @@ export function TabHero({
   return (
     <View style={[{ height }, style]}>
       <ImageBackground
-        source={HERO_IMAGE}
+        source={RIDE_POV_BANNER}
         style={StyleSheet.absoluteFill}
         imageStyle={{ resizeMode: "cover" }}
       />

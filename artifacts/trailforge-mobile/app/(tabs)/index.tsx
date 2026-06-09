@@ -21,6 +21,7 @@ import { AppShellHeader } from "@/components/shell/AppShellHeader";
 import { DifficultyScale } from "@/components/shell/DifficultyScale";
 import { SectionCard } from "@/components/shell/SectionCard";
 import { TabHero } from "@/components/shell/TabHero";
+import { PageLoadingCover } from "@/components/PageLoadingCover";
 import colors from "@/constants/colors";
 import {
   geocode,
@@ -211,6 +212,7 @@ export default function PlannerTab() {
   return (
     <View style={s.root}>
       <AppShellHeader />
+      <PageLoadingCover loading={locating && !startPt} message="Getting your location…">
       <ScrollView
         style={s.scroll}
         contentContainerStyle={s.scrollContent}
@@ -340,6 +342,7 @@ export default function PlannerTab() {
           ) : null}
         </View>
       </ScrollView>
+      </PageLoadingCover>
     </View>
   );
 }

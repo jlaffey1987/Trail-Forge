@@ -3,40 +3,47 @@
  * string, or null if the user denied permissions / the device isn't
  * capable of receiving push (e.g. simulators without a paired Apple ID).
  *
- * The token is then POSTed to the backend's `/me/push/subscribe` route
- * via the additive `kind: "expo"` body shape introduced in T002.
+ * Skipped in Expo Go — remote push was removed from Expo Go in SDK 53+.
  */
 import Constants from "expo-constants";
 import * as Device from "expo-device";
-import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
 import { subscribeExpoPushToken } from "@/lib/api";
 
-// Foreground notification handler — show the alert, play sound, do not
-// auto-bump the badge count (we manage that ourselves from the inbox).
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
-
 export interface PushRegistrationResult {
   token: string | null;
-  reason?: "denied" | "not-device" | "no-project" | "error";
+  reason?: "denied" | "not-device" | "no-project" | "error" | "expo-go";
+}
+
+function isExpoGo(): boolean {
+  return Constants.appOwnership === "expo";
+}
+
+async function getNotificationsModule() {
+  return import("expo-notifications");
 }
 
 export async function registerForPushAndSubscribe(): Promise<PushRegistrationResult> {
+  if (isExpoGo()) {
+    return { token: null, reason: "expo-go" };
+  }
+
   if (!Device.isDevice) {
-    // Push tokens are only issued to real devices; the simulator can still
-    // receive local notifications, just not remote ones.
     return { token: null, reason: "not-device" };
   }
 
-  // Android 13+ requires explicit POST_NOTIFICATIONS at runtime.
+  const Notifications = await getNotificationsModule();
+
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+
   if (Platform.OS === "android") {
     await Notifications.setNotificationChannelAsync("default", {
       name: "default",
@@ -55,21 +62,13 @@ export async function registerForPushAndSubscribe(): Promise<PushRegistrationRes
     return { token: null, reason: "denied" };
   }
 
-  // EAS-provisioned `projectId` is required for production push tokens —
-  // Expo Go can fall back to its own dev project, but standalone EAS
-  // builds need an explicit value. Look it up from app.json's
-  // `extra.eas.projectId` (or the legacy `easConfig.projectId`).
   const easProjectId =
     (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)
-      ?.eas?.projectId ??
-    (Constants as unknown as { easConfig?: { projectId?: string } })
+      ?.eas?.projectId
+    ?? (Constants as unknown as { easConfig?: { projectId?: string } })
       .easConfig?.projectId;
 
   try {
-    // In Expo Go we can call without `projectId` and Expo's dev project
-    // handles token issuance. For standalone / EAS builds we MUST pass
-    // the project's UUID, otherwise `getExpoPushTokenAsync` throws and
-    // the user silently never receives push.
     const tokenResp = await Notifications.getExpoPushTokenAsync(
       easProjectId ? { projectId: easProjectId } : undefined,
     );
@@ -78,8 +77,7 @@ export async function registerForPushAndSubscribe(): Promise<PushRegistrationRes
     try {
       await subscribeExpoPushToken(token);
     } catch {
-      // Don't fail the whole registration if the round-trip to the
-      // backend hits a transient error — the next launch will retry.
+      // Backend subscribe is best-effort; next launch retries.
     }
     return { token };
   } catch {

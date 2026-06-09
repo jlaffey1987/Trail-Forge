@@ -23,6 +23,7 @@ export type TrailDifficulty =
   | "advanced"
   | "expert"
   | string
+  | number
   | null
   | undefined;
 
@@ -34,8 +35,14 @@ export const TRAIL_ORANGE = "#e07828";
  * Returns null when the value is unrecognisable.
  */
 export function gradeFromDifficulty(diff: TrailDifficulty): number | null {
-  if (!diff) return null;
+  if (diff == null) return null;
+  if (typeof diff === "number") {
+    if (Number.isFinite(diff) && diff >= 1 && diff <= 10) return Math.round(diff);
+    return null;
+  }
+  if (typeof diff !== "string") return null;
   const d = diff.trim().toLowerCase();
+  if (!d) return null;
 
   // Numeric string like "7" or "4.5"
   const n = Number(d);

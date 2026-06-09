@@ -249,7 +249,7 @@ export function listCompletions(): Promise<{
 export interface RecentlyRiddenTrail {
   id: string;
   name: string;
-  difficulty: string | null;
+  difficulty: string | number | null;
   distance_km: number | null;
   completedAt: string;
 }
@@ -270,7 +270,7 @@ export async function listRecentlyRidden(): Promise<{
   // If hydration fails, surface stubs so ride history still shows.
   let nameById = new Map<
     string,
-    { name: string; difficulty: string | null; distance_km: number | null }
+    { name: string; difficulty: string | number | null; distance_km: number | null }
   >();
   try {
     const ids = completionRows.map((c) => c.trailId).join(",");
@@ -734,8 +734,9 @@ export interface PlannerSuggestion {
 export interface MapTrail {
   id: string;
   name: string;
-  difficulty: string | null;
-  ai_difficulty?: string | null;
+  /** API stores 1–10 as integer; legacy rows may be string labels. */
+  difficulty: string | number | null;
+  ai_difficulty?: string | number | null;
   terrain?: string | null;
   distance_km?: number | null;
   elevation_gain_m?: number | null;
@@ -753,6 +754,8 @@ export interface MapTrail {
    *  Discover BOATs/Green Lanes filter chips. */
   legal_status?: string | null;
   is_public?: boolean | null;
+  source?: string | null;
+  owner_user_id?: string | null;
   centroid_lat?: number | null;
   centroid_lon?: number | null;
   created_at?: string | null;
@@ -771,16 +774,85 @@ export async function searchTrailsByBbox(params: {
   ids?: string;
   source?: string;
   limit?: number;
+  offset?: number;
+  /** When true, omit path_geojson / simplified_path for faster map loads. */
+  map?: boolean;
 }): Promise<TrailSearchResponseBbox> {
   const qs = new URLSearchParams();
   if (params.bbox) qs.set("bbox", params.bbox);
   if (params.ids) qs.set("ids", params.ids);
   if (params.source) qs.set("source", params.source);
   if (typeof params.limit === "number") qs.set("limit", String(params.limit));
+  if (typeof params.offset === "number" && params.offset > 0) {
+    qs.set("offset", String(params.offset));
+  }
+  if (params.map) qs.set("map", "1");
   return apiJson<TrailSearchResponseBbox>(
     `/api/trails/search?${qs.toString()}`,
     { allowAnonymous: true },
   );
+}
+
+const MAP_SEARCH_PAGE_SIZE = 1000;
+const MAP_SEARCH_MAX_TRAILS = 20_000;
+const MAP_PARALLEL_PAGES = 4;
+
+/** Paginated bbox search with optional parallel page fetches. */
+async function fetchAllTrailsInBbox(
+  bbox: string,
+  opts: { map?: boolean; maxTrails?: number },
+): Promise<MapTrail[]> {
+  const maxTrails = opts.maxTrails ?? MAP_SEARCH_MAX_TRAILS;
+  const pageOpts = { bbox, map: opts.map };
+
+  const first = await searchTrailsByBbox({
+    ...pageOpts,
+    limit: MAP_SEARCH_PAGE_SIZE,
+    offset: 0,
+  });
+  const all: MapTrail[] = [...(first.trails ?? [])];
+  if (all.length < MAP_SEARCH_PAGE_SIZE || all.length >= maxTrails) {
+    return all.slice(0, maxTrails);
+  }
+
+  const offsets: number[] = [];
+  for (let offset = MAP_SEARCH_PAGE_SIZE; offset < maxTrails; offset += MAP_SEARCH_PAGE_SIZE) {
+    offsets.push(offset);
+  }
+
+  for (let i = 0; i < offsets.length; i += MAP_PARALLEL_PAGES) {
+    const batch = offsets.slice(i, i + MAP_PARALLEL_PAGES);
+    const pages = await Promise.all(
+      batch.map((offset) =>
+        searchTrailsByBbox({ ...pageOpts, limit: MAP_SEARCH_PAGE_SIZE, offset }),
+      ),
+    );
+    for (const page of pages) {
+      const rows = page.trails ?? [];
+      all.push(...rows);
+      if (rows.length < MAP_SEARCH_PAGE_SIZE) return all.slice(0, maxTrails);
+      if (all.length >= maxTrails) return all.slice(0, maxTrails);
+    }
+  }
+
+  return all.slice(0, maxTrails);
+}
+
+/** Map viewport search — summary (centroids) or full geometry when zoomed in. */
+export async function searchTrailsForMap(params: {
+  bbox: string;
+  /** When false, fetches centroid/metadata only — much faster when zoomed out. */
+  includeGeometry?: boolean;
+  /** @deprecated ignored */
+  limitPerSource?: number;
+}): Promise<TrailSearchResponseBbox> {
+  void params.limitPerSource;
+  const includeGeometry = params.includeGeometry ?? true;
+  const trails = await fetchAllTrailsInBbox(params.bbox, {
+    map: !includeGeometry,
+    maxTrails: includeGeometry ? MAP_SEARCH_MAX_TRAILS : MAP_SEARCH_MAX_TRAILS,
+  });
+  return { trails };
 }
 
 export async function getPlannerSuggestions(req: {

@@ -14,7 +14,7 @@
  */
 
 import { haversineM, bearingDeg, type NavLatLng } from "./navigationReroute";
-import { gradeFromDifficulty } from "./trailColors";
+import { gradeFromDifficulty, type TrailDifficulty } from "./trailColors";
 import { trailMapCoordinates, type TrailPathSource } from "./geo";
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ import { trailMapCoordinates, type TrailPathSource } from "./geo";
 export interface NavTrailInput {
   id: string;
   name: string;
-  difficulty: string | null;
+  difficulty: TrailDifficulty;
   distance_km: number | null;
   /** GeoJSON [lon, lat] pairs, path_geojson, or simplified_path from the API. */
   path?: unknown;

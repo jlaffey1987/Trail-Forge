@@ -173,10 +173,17 @@ async function main() {
       // Find existing trail(s) with this OSM way ID
       const { data: existing } = await supa
         .from("trails")
-        .select("id, name, legal_status, is_public")
+        .select("id, name, legal_status, is_public, path_geojson, bbox_min_lat")
         .contains("osm_way_ids", [wayIdStr]);
 
-      const existingList = (existing ?? []) as Array<{ id: string; name: string; legal_status: string | null; is_public: boolean }>;
+      const existingList = (existing ?? []) as Array<{
+        id: string;
+        name: string;
+        legal_status: string | null;
+        is_public: boolean;
+        path_geojson: unknown;
+        bbox_min_lat: number | null;
+      }>;
 
       if (action === "delete" || legalAccessRemoved(tags)) {
         // Auto-hide: motor vehicle access removed
@@ -194,9 +201,35 @@ async function main() {
       }
 
       if (existingList.length > 0) {
-        // Update legal status if changed
         const newStatus = legalStatusFromTags(tags);
         for (const trail of existingList) {
+          if (way.geometry && way.geometry.length >= 2 && !trail.path_geojson && trail.bbox_min_lat == null) {
+            const pts = way.geometry;
+            const lats = pts.map(p => p.lat);
+            const lons = pts.map(p => p.lon);
+            let dist = 0;
+            for (let i = 1; i < pts.length; i++) {
+              const dLat = (pts[i].lat - pts[i - 1].lat) * Math.PI / 180;
+              const dLon = (pts[i].lon - pts[i - 1].lon) * Math.PI / 180;
+              const a = Math.sin(dLat / 2) ** 2 + Math.cos(pts[i - 1].lat * Math.PI / 180) * Math.cos(pts[i].lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+              dist += 6371 * 2 * Math.asin(Math.sqrt(a));
+            }
+            await supa.from("trails").update({
+              path_geojson: { type: "LineString", coordinates: pts.map(p => [p.lon, p.lat]) },
+              bbox_min_lat: Math.min(...lats),
+              bbox_max_lat: Math.max(...lats),
+              bbox_min_lng: Math.min(...lons),
+              bbox_max_lng: Math.max(...lons),
+              centroid_lat: (Math.min(...lats) + Math.max(...lats)) / 2,
+              centroid_lon: (Math.min(...lons) + Math.max(...lons)) / 2,
+              distance_km: Math.round(dist * 100) / 100,
+              legal_status: newStatus,
+              legal_confidence: "osm_legal",
+              legal_notes: `Geometry backfilled by OSM sync ${syncStart}`,
+            }).eq("id", trail.id);
+            changes.updated++;
+            continue;
+          }
           if (trail.legal_status !== newStatus) {
             await supa.from("trails").update({
               legal_status: newStatus,
@@ -233,10 +266,13 @@ async function main() {
           bbox_max_lat: Math.max(...lats),
           bbox_min_lng: Math.min(...lons),
           bbox_max_lng: Math.max(...lons),
+          centroid_lat: (Math.min(...lats) + Math.max(...lats)) / 2,
+          centroid_lon: (Math.min(...lons) + Math.max(...lons)) / 2,
           legal_status: legalStatusFromTags(tags),
           legal_confidence: "osm_legal",
           legal_source: "OpenStreetMap",
           osm_way_ids: [wayIdStr],
+          source_url: `osm://way/${way.id}`,
           verification_status: "approved",
         });
         if (error) {

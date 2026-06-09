@@ -29,13 +29,13 @@ import {
   markTrailRidden,
   unmarkTrailRidden,
 } from "@/lib/api";
-import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
+import { difficultyColor, difficultyLabel, type TrailDifficulty } from "@/lib/trailColors";
 
 export interface TrailDetailData {
   id: string;
   name: string;
-  difficulty: string | null;
-  ai_difficulty?: string | null;
+  difficulty: TrailDifficulty;
+  ai_difficulty?: TrailDifficulty;
   terrain?: string | null;
   distance_km?: number | null;
   elevation_gain_m?: number | null;
@@ -281,7 +281,7 @@ function DiffBadge({
   difficulty,
   prefix,
 }: {
-  difficulty: string | null;
+  difficulty: TrailDifficulty;
   prefix?: string;
 }) {
   return (

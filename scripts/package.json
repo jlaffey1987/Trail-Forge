@@ -11,6 +11,7 @@
     "import:osm": "tsx ./src/importOSM/index.ts",
     "import:osm:scotland": "tsx ./src/importOSM/index.ts --region scotland",
     "import:osm:wales": "tsx ./src/importOSM/index.ts --region wales",
+    "import:osm:england": "tsx ./src/importOSM/index.ts --region england",
     "import:osm:england-north": "tsx ./src/importOSM/index.ts --region england-north",
     "import:osm:england-midlands": "tsx ./src/importOSM/index.ts --region england-midlands",
     "import:osm:england-south": "tsx ./src/importOSM/index.ts --region england-south",

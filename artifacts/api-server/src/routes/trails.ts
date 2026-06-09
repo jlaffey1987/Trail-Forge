@@ -185,8 +185,11 @@ const SEARCH_COLUMNS_BASE = [
   "bbox_max_lat",
   "bbox_min_lng",
   "bbox_max_lng",
+  "centroid_lat",
+  "centroid_lon",
   "simplified_path",
   "path_geojson",
+  "owner_user_id",
 ] as const;
 
 // Extended columns added by later migrations (0011, 0030). Fetched when
@@ -206,6 +209,53 @@ const SEARCH_COLUMNS_EXTENDED = [
 const SEARCH_COLUMNS = SEARCH_COLUMNS_BASE.join(",");
 const SEARCH_COLUMNS_FULL = SEARCH_COLUMNS_EXTENDED.join(",");
 
+/** Lightweight map clustering — no path geometry (much smaller payloads). */
+const SEARCH_COLUMNS_MAP_BASE = [
+  "id",
+  "name",
+  "type",
+  "difficulty",
+  "distance_km",
+  "terrain",
+  "legal_status",
+  "source_region",
+  "is_public",
+  "verification_status",
+  "bbox_min_lat",
+  "bbox_max_lat",
+  "bbox_min_lng",
+  "bbox_max_lng",
+  "centroid_lat",
+  "centroid_lon",
+  "owner_user_id",
+] as const;
+
+const SEARCH_COLUMNS_MAP_EXTENDED = [
+  ...SEARCH_COLUMNS_MAP_BASE,
+  "source",
+  "is_seasonal",
+] as const;
+
+const SEARCH_COLUMNS_MAP = SEARCH_COLUMNS_MAP_BASE.join(",");
+const SEARCH_COLUMNS_MAP_FULL = SEARCH_COLUMNS_MAP_EXTENDED.join(",");
+
+function resolveSearchColumns(mapMode: boolean, extended: boolean): string {
+  if (mapMode) return extended ? SEARCH_COLUMNS_MAP_FULL : SEARCH_COLUMNS_MAP;
+  return extended ? SEARCH_COLUMNS_FULL : SEARCH_COLUMNS;
+}
+
+function applyBboxFilter<T extends { or: (filters: string) => T }>(
+  q: T,
+  bbox: { minLat: number; minLng: number; maxLat: number; maxLng: number },
+): T {
+  const { minLat, minLng, maxLat, maxLng } = bbox;
+  // Bbox overlap OR centroid inside viewport (trails missing bbox still appear).
+  return q.or(
+    `and(bbox_min_lat.lte.${maxLat},bbox_max_lat.gte.${minLat},bbox_min_lng.lte.${maxLng},bbox_max_lng.gte.${minLng}),`
+    + `and(centroid_lat.gte.${minLat},centroid_lat.lte.${maxLat},centroid_lon.gte.${minLng},centroid_lon.lte.${maxLng})`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Bbox / id-filter search — used by the mobile map and trail detail screen.
 // Handles ?bbox=minLat,minLng,maxLat,maxLng and/or ?ids=uuid,uuid and
@@ -220,6 +270,8 @@ router.get("/trails/search", async (req: Request, res: Response) => {
 
   if (bboxParam || idsParam) {
     const limitNum = Math.min(Number(req.query.limit ?? 500), 1000);
+    const offsetNum = Math.max(0, Number(req.query.offset ?? 0));
+    const mapMode = req.query.map === "1" || req.query.map === "true";
     const supa = getSupabaseAdmin();
     const auth = getAuth(req);
 
@@ -244,16 +296,10 @@ router.get("/trails/search", async (req: Request, res: Response) => {
         .from("trails")
         .select(cols)
         .eq("is_public", true)
-        .is("deleted_at", null)
-        .limit(limitNum);
+        .is("deleted_at", null);
 
       if (bboxFilter) {
-        // Overlap check: trail bbox overlaps the viewport bbox.
-        q = q
-          .lte("bbox_min_lat", bboxFilter.maxLat)
-          .gte("bbox_max_lat", bboxFilter.minLat)
-          .lte("bbox_min_lng", bboxFilter.maxLng)
-          .gte("bbox_max_lng", bboxFilter.minLng);
+        q = applyBboxFilter(q, bboxFilter);
       }
       if (idList.length > 0) {
         q = q.in("id", idList);
@@ -261,12 +307,12 @@ router.get("/trails/search", async (req: Request, res: Response) => {
       if (typeof sourceParam === "string" && sourceParam) {
         q = q.eq("source", sourceParam);
       }
-      return q;
+      return q.order("id", { ascending: true }).range(offsetNum, offsetNum + limitNum - 1);
     };
 
-    let { data: publicRows, error } = await buildQuery(SEARCH_COLUMNS_FULL);
+    let { data: publicRows, error } = await buildQuery(resolveSearchColumns(mapMode, true));
     if (error && isMissingColumnError(error)) {
-      ({ data: publicRows, error } = await buildQuery(SEARCH_COLUMNS));
+      ({ data: publicRows, error } = await buildQuery(resolveSearchColumns(mapMode, false)));
     }
     if (error) {
       req.log.error({ err: error }, "trails bbox/ids search failed");
@@ -286,20 +332,15 @@ router.get("/trails/search", async (req: Request, res: Response) => {
           .select(cols)
           .eq("owner_user_id", auth.userId!)
           .eq("is_public", false)
-          .is("deleted_at", null)
-          .limit(limitNum);
+          .is("deleted_at", null);
         if (bboxFilter) {
-          q = q
-            .lte("bbox_min_lat", bboxFilter!.maxLat)
-            .gte("bbox_max_lat", bboxFilter!.minLat)
-            .lte("bbox_min_lng", bboxFilter!.maxLng)
-            .gte("bbox_max_lng", bboxFilter!.minLng);
+          q = applyBboxFilter(q, bboxFilter);
         }
         if (idList.length > 0) q = q.in("id", idList);
-        return q;
+        return q.order("id", { ascending: true }).range(offsetNum, offsetNum + limitNum - 1);
       };
-      let { data: privateRows } = await buildPrivateQuery(SEARCH_COLUMNS_FULL);
-      if (!privateRows) ({ data: privateRows } = await buildPrivateQuery(SEARCH_COLUMNS));
+      let { data: privateRows } = await buildPrivateQuery(resolveSearchColumns(mapMode, true));
+      if (!privateRows) ({ data: privateRows } = await buildPrivateQuery(resolveSearchColumns(mapMode, false)));
       for (const row of ((privateRows ?? []) as unknown as Array<Record<string, unknown> & { deleted_at?: string | null }>).filter(r => r.deleted_at == null)) {
         const id = row.id as string;
         if (!seen.has(id)) { seen.add(id); rows.push(row); }
@@ -312,10 +353,10 @@ router.get("/trails/search", async (req: Request, res: Response) => {
         const { data: shares } = await supa.from("trail_shares").select("trail_id").in("group_id", gids);
         const sharedIds = [...new Set((shares ?? []).map((s: Record<string, string>) => s.trail_id))].filter(id => !seen.has(id));
         if (sharedIds.length > 0) {
-          let sharedQ = supa.from("trails").select(SEARCH_COLUMNS_FULL).in("id", sharedIds).is("deleted_at", null);
+          let sharedQ = supa.from("trails").select(resolveSearchColumns(mapMode, true)).in("id", sharedIds).is("deleted_at", null);
           let { data: sharedRows, error: shErr } = await sharedQ;
           if (shErr && isMissingColumnError(shErr)) {
-            ({ data: sharedRows } = await supa.from("trails").select(SEARCH_COLUMNS).in("id", sharedIds).is("deleted_at", null));
+            ({ data: sharedRows } = await supa.from("trails").select(resolveSearchColumns(mapMode, false)).in("id", sharedIds).is("deleted_at", null));
           }
           for (const row of ((sharedRows ?? []) as unknown as Array<Record<string, unknown> & { deleted_at?: string | null }>).filter(r => r.deleted_at == null)) {
             const id = row.id as string;

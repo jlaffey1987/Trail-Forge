@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gradeSegment, elevationGainMeters } from "../importACT/grade.js";
+import { mergeOsmWays, type MergedOsmSegment } from "./mergeWays.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -114,9 +115,33 @@ const REGIONS: Record<string, { bbox: [number, number, number, number]; label: s
   "south-downs":      { bbox: [50.8, -1.2, 51.1,  0.3],  label: "South Downs" },
   "new-forest":       { bbox: [50.7, -1.8, 51.0, -1.3],  label: "New Forest" },
   "exmoor":           { bbox: [51.0, -3.8, 51.3, -3.3],  label: "Exmoor" },
+  cornwall:           { bbox: [49.95, -5.7, 50.6, -4.2], label: "Cornwall" },
+  somerset:           { bbox: [50.9, -3.8, 51.5, -2.3],  label: "Somerset" },
+  dorset:             { bbox: [50.5, -2.9, 51.2, -1.6],  label: "Dorset" },
+  kent:               { bbox: [50.9, -0.2, 51.5, 1.4],   label: "Kent" },
+  "east-anglia":      { bbox: [52.0, -0.2, 53.0, 1.8],   label: "East Anglia" },
+  lancashire:         { bbox: [53.5, -3.2, 54.5, -2.2],  label: "Lancashire" },
+  cheshire:           { bbox: [53.0, -3.0, 53.5, -2.0],  label: "Cheshire" },
 
   // ── Convenience aliases that group sub-regions (run via --region all) ─────
-  // These are not queried directly — see expandRegions() below.
+  // These are not queried directly — see resolveRegionKeys() below.
+};
+
+const ENGLAND_REGIONS = [
+  "cornwall", "dartmoor", "exmoor", "dorset", "somerset", "new-forest",
+  "south-downs", "kent", "cotswolds", "welsh-marches", "shropshire",
+  "cheshire", "midlands-central", "peak-district", "lancashire",
+  "yorkshire", "lake-district", "northumberland", "east-anglia",
+] as const;
+
+const REGION_GROUPS: Record<string, readonly string[]> = {
+  "england-north": ["yorkshire", "lake-district", "peak-district", "northumberland", "lancashire"],
+  "england-midlands": ["shropshire", "welsh-marches", "midlands-central", "cheshire", "peak-district"],
+  "england-south": [
+    "cornwall", "dartmoor", "exmoor", "dorset", "somerset", "new-forest",
+    "south-downs", "kent", "cotswolds",
+  ],
+  england: ENGLAND_REGIONS,
 };
 
 /**
@@ -124,12 +149,17 @@ const REGIONS: Record<string, { bbox: [number, number, number, number]; label: s
  * Lists every leaf region in a sensible south→north order.
  */
 const ALL_REGIONS = [
-  "dartmoor", "exmoor", "new-forest", "south-downs", "cotswolds",
-  "welsh-marches", "shropshire", "midlands-central",
-  "peak-district", "yorkshire", "lake-district", "northumberland",
+  ...ENGLAND_REGIONS,
   "wales",
   "scotland",
 ];
+
+function resolveRegionKeys(region: string): string[] {
+  if (region === "all") return [...ALL_REGIONS];
+  const group = REGION_GROUPS[region];
+  if (group) return [...group];
+  return [region];
+}
 
 // ---------------------------------------------------------------------------
 // Overpass types
@@ -162,7 +192,7 @@ function buildOverpassQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
   const b = `${s},${w},${n},${e}`;
   return (
-    `[out:json][timeout:60];(` +
+    `[out:json][timeout:120];(` +
     `way["highway"="track"]["motor_vehicle"="yes"](${b});` +
     `way["highway"="track"]["motor_vehicle"="permissive"](${b});` +
     `way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});` +
@@ -183,7 +213,7 @@ function buildScotlandQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
   const b = `${s},${w},${n},${e}`;
   return (
-    `[out:json][timeout:60];(` +
+    `[out:json][timeout:120];(` +
     `way["highway"="track"]["motor_vehicle"="yes"](${b});` +
     `way["highway"="track"]["motor_vehicle"="permissive"](${b});` +
     `way["highway"="track"]["designation"="byway_open_to_all_traffic"](${b});` +
@@ -203,7 +233,7 @@ function buildScotlandQuery(bbox: [number, number, number, number]): string {
  */
 function buildSimpleQuery(bbox: [number, number, number, number]): string {
   const [s, w, n, e] = bbox;
-  return `[out:json][timeout:60];(way["highway"="track"]["motor_vehicle"="yes"](${s},${w},${n},${e}););out geom;`;
+  return `[out:json][timeout:120];(way["highway"="track"]["motor_vehicle"="yes"](${s},${w},${n},${e}););out geom;`;
 }
 
 /** Sleep helper */
@@ -211,32 +241,95 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-async function fetchOverpass(query: string, attempt = 1): Promise<OverpassResponse> {
-  const url = "https://overpass-api.de/api/interpreter";
-  const body = `data=${encodeURIComponent(query)}`;
+function isTransientNetworkError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|network/i.test(msg);
+}
 
-  console.log(`  [Overpass] POST ${url} (attempt ${attempt})`);
+/** Retry Supabase calls on transient network blips (common on long imports). */
+async function withDbRetry<T extends { error: { message: string } | null }>(
+  label: string,
+  fn: () => Promise<T>,
+  attempts = 4,
+): Promise<T> {
+  let last: T | undefined;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      last = await fn();
+      if (!last.error || !isTransientNetworkError(last.error)) return last;
+      if (i === attempts) return last;
+      const wait = i * 3000;
+      console.warn(`  [DB] ${label} failed (${last.error.message}) — retry ${i}/${attempts - 1} in ${wait / 1000}s`);
+      await sleep(wait);
+    } catch (err) {
+      if (!isTransientNetworkError(err) || i === attempts) throw err;
+      const wait = i * 3000;
+      console.warn(`  [DB] ${label} failed (${(err as Error).message}) — retry ${i}/${attempts - 1} in ${wait / 1000}s`);
+      await sleep(wait);
+    }
+  }
+  return last!;
+}
 
-  const res = await fetch(url, {
+/** Public Overpass mirrors — rotate on 504/503/429. */
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+
+const OVERPASS_MAX_ATTEMPTS_PER_ENDPOINT = 4;
+
+async function postOverpass(url: string, query: string): Promise<Response> {
+  return fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "Accept": "application/json",
       "User-Agent": "TrailForge/1.0 (trail-navigation-app)",
     },
-    body,
+    body: `data=${encodeURIComponent(query)}`,
   });
+}
 
-  console.log(`  [Overpass] Response: HTTP ${res.status}`);
+async function fetchOverpass(
+  query: string,
+  endpointIdx = 0,
+  attempt = 1,
+): Promise<OverpassResponse> {
+  const url = OVERPASS_ENDPOINTS[endpointIdx] ?? OVERPASS_ENDPOINTS[0];
+  const mirrorLabel = `${new URL(url).hostname} (${attempt}/${OVERPASS_MAX_ATTEMPTS_PER_ENDPOINT})`;
+
+  console.log(`  [Overpass] POST ${mirrorLabel}`);
+
+  let res: Response;
+  try {
+    res = await postOverpass(url, query);
+  } catch (err) {
+    if (endpointIdx + 1 < OVERPASS_ENDPOINTS.length) {
+      console.warn(`  [Overpass] Network error on ${new URL(url).hostname}: ${(err as Error).message}`);
+      console.log(`  [Overpass] Switching mirror → ${new URL(OVERPASS_ENDPOINTS[endpointIdx + 1]).hostname}`);
+      await sleep(45_000);
+      return fetchOverpass(query, endpointIdx + 1, 1);
+    }
+    throw err;
+  }
+
+  console.log(`  [Overpass] Response: HTTP ${res.status} (${new URL(url).hostname})`);
 
   // 429 = rate limit, 503 = server busy, 504 = gateway timeout
-  // All are transient — wait and retry up to 3 times.
   if (res.status === 429 || res.status === 503 || res.status === 504) {
-    if (attempt >= 3) throw new Error(`Overpass server error (${res.status}) after ${attempt} attempts`);
-    const wait = attempt === 1 ? 60_000 : 90_000;
-    console.log(`  Overpass busy (${res.status}), waiting ${wait / 1000}s before retry...`);
-    await sleep(wait);
-    return fetchOverpass(query, attempt + 1);
+    if (attempt < OVERPASS_MAX_ATTEMPTS_PER_ENDPOINT) {
+      const wait = attempt === 1 ? 60_000 : attempt === 2 ? 90_000 : 120_000;
+      console.log(`  Overpass busy (${res.status}), waiting ${wait / 1000}s before retry...`);
+      await sleep(wait);
+      return fetchOverpass(query, endpointIdx, attempt + 1);
+    }
+    if (endpointIdx + 1 < OVERPASS_ENDPOINTS.length) {
+      console.log(`  [Overpass] Mirror exhausted — trying ${new URL(OVERPASS_ENDPOINTS[endpointIdx + 1]).hostname}`);
+      await sleep(60_000);
+      return fetchOverpass(query, endpointIdx + 1, 1);
+    }
+    throw new Error(`Overpass server error (${res.status}) after all mirrors and retries`);
   }
 
   if (!res.ok) {
@@ -305,8 +398,8 @@ function wayBbox(pts: OsmWayGeom[]) {
   return { minLat, maxLat, minLng, maxLng };
 }
 
-function segmentHash(wayId: number, pts: OsmWayGeom[]): string {
-  const payload = `${wayId}:${pts.map(p => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`).join("|")}`;
+function segmentHash(wayIds: number[], pts: OsmWayGeom[]): string {
+  const payload = `${[...wayIds].sort((a, b) => a - b).join("+")}:${pts.map(p => `${p.lat.toFixed(5)},${p.lon.toFixed(5)}`).join("|")}`;
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
 
@@ -381,39 +474,22 @@ function toGeoJsonPath(pts: OsmWayGeom[]): { type: "LineString"; coordinates: [n
   };
 }
 
-// ---------------------------------------------------------------------------
-// Segment splitting (split long ways at large gaps or junctions)
-// ---------------------------------------------------------------------------
-
-const GAP_THRESHOLD_KM = 0.5;
-const MIN_SEGMENT_KM = 1.0;
-
 interface OsmSegment {
   pts: OsmWayGeom[];
   distKm: number;
+  wayIds: number[];
+  tags: Record<string, string>;
+  grade: number;
 }
 
-function splitAtGaps(pts: OsmWayGeom[]): OsmSegment[] {
-  const segments: OsmSegment[] = [];
-  let current: OsmWayGeom[] = [pts[0]];
-
-  for (let i = 1; i < pts.length; i++) {
-    const d = haversineKm(pts[i - 1], pts[i]);
-    if (d > GAP_THRESHOLD_KM && current.length >= 2) {
-      const dist = wayDistance(current);
-      if (dist >= MIN_SEGMENT_KM) segments.push({ pts: current, distKm: dist });
-      current = [pts[i]];
-    } else {
-      current.push(pts[i]);
-    }
-  }
-
-  if (current.length >= 2) {
-    const dist = wayDistance(current);
-    if (dist >= MIN_SEGMENT_KM) segments.push({ pts: current, distKm: dist });
-  }
-
-  return segments;
+function mergedToSegments(merged: MergedOsmSegment[]): OsmSegment[] {
+  return merged.map(m => ({
+    pts: m.pts,
+    distKm: m.distKm,
+    wayIds: m.wayIds,
+    tags: m.tags,
+    grade: m.grade,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +499,7 @@ function splitAtGaps(pts: OsmWayGeom[]): OsmSegment[] {
 interface TrailRow {
   name: string;
   source: string;
+  source_region: string;
   type: string;
   terrain: string;
   difficulty: number;
@@ -433,10 +510,14 @@ interface TrailRow {
   bbox_max_lat: number;
   bbox_min_lng: number;
   bbox_max_lng: number;
+  centroid_lat: number;
+  centroid_lon: number;
   legal_status: string;
   legal_confidence: string;
   legal_source: string;
   osm_way_ids: string[];
+  segment_hash: string;
+  source_url: string;
   verification_status: string;
 }
 
@@ -444,10 +525,44 @@ interface TrailRow {
 // Main import
 // ---------------------------------------------------------------------------
 
+function geometryPatch(
+  reg: { label: string },
+  name: string,
+  difficulty: number,
+  seg: OsmSegment,
+  bbox: ReturnType<typeof wayBbox>,
+  geojson: ReturnType<typeof toGeoJsonPath>,
+  legal_status: string,
+  legal_confidence: string,
+  hash: string,
+  wayIds: number[],
+) {
+  return {
+    name,
+    source_region: reg.label,
+    difficulty,
+    distance_km: Math.round(seg.distKm * 100) / 100,
+    path_geojson: geojson,
+    bbox_min_lat: bbox.minLat,
+    bbox_max_lat: bbox.maxLat,
+    bbox_min_lng: bbox.minLng,
+    bbox_max_lng: bbox.maxLng,
+    centroid_lat: (bbox.minLat + bbox.maxLat) / 2,
+    centroid_lon: (bbox.minLng + bbox.maxLng) / 2,
+    legal_status,
+    legal_confidence,
+    legal_source: "OpenStreetMap",
+    verification_status: "verified",
+    segment_hash: hash,
+    source_url: `osm://ways/${wayIds.join("+")}#${hash}`,
+  };
+}
+
 interface ImportResult {
   queried: number;
   segments: number;
   inserted: number;
+  updated: number;
   skipped: number;
   errors: number;
 }
@@ -472,88 +587,151 @@ async function importRegion(
   const ways = response.elements.filter((e): e is OsmWay => e.type === "way" && e.geometry?.length >= 2);
   console.log(`[${reg.label}] ${ways.length} ways received`);
 
-  let segments = 0, inserted = 0, skipped = 0, errors = 0;
+  const merged = mergeOsmWays(
+    ways.map(w => ({ id: w.id, geometry: w.geometry, tags: w.tags ?? {} })),
+    gradeFromOsmTags,
+  );
+  const segsAll = mergedToSegments(merged);
+  console.log(`[${reg.label}] ${segsAll.length} merged trail section(s) from ${ways.length} ways`);
 
-  for (const way of ways) {
-    const tags = way.tags ?? {};
-    const segs = splitAtGaps(way.geometry);
-    segments += segs.length;
+  if (!opts.dryRun) {
+    const { count: removedRegion } = await supabase
+      .from("trails")
+      .delete({ count: "exact" })
+      .eq("source", "OSM-UK")
+      .eq("source_region", reg.label);
+    if (removedRegion) {
+      console.log(`[${reg.label}] Replaced ${removedRegion} existing OSM row(s) for region`);
+    }
 
-    for (let si = 0; si < segs.length; si++) {
-      const seg = segs[si];
-      const hash = segmentHash(way.id, seg.pts);
-      const bbox = wayBbox(seg.pts);
-      const geojson = toGeoJsonPath(seg.pts);
-      const { legal_status, legal_confidence } = legalStatusFromTags(tags);
-      const name = segs.length > 1
-        ? `${nameFromTags(tags, way.id)} — Section ${si + 1}`
-        : nameFromTags(tags, way.id);
-      const osmGrade = gradeFromOsmTags(tags);
+    const { count: removedStubs } = await supabase
+      .from("trails")
+      .delete({ count: "exact" })
+      .eq("source", "OSM-UK")
+      .is("path_geojson", null)
+      .is("bbox_min_lat", null);
+    if (removedStubs) {
+      console.log(`[${reg.label}] Removed ${removedStubs} geometry-less OSM stub(s)`);
+    }
+  }
 
-      // Check for existing record by osm_way_ids to avoid duplicates
-      if (!opts.dryRun) {
-        const { data: existing } = await supabase
+  let segments = 0, inserted = 0, updated = 0, skipped = 0, errors = 0;
+
+  for (let si = 0; si < segsAll.length; si++) {
+    const seg = segsAll[si];
+    segments += 1;
+    const primaryWayId = seg.wayIds[0];
+    const tags = seg.tags;
+    const hash = segmentHash(seg.wayIds, seg.pts);
+    const bbox = wayBbox(seg.pts);
+    const geojson = toGeoJsonPath(seg.pts);
+    const { legal_status, legal_confidence } = legalStatusFromTags(tags);
+    const baseName = nameFromTags(tags, primaryWayId);
+    const name = segsAll.length > 1 && !tags.name
+      ? `${baseName} — Section ${si + 1}`
+      : baseName;
+    const osmGrade = seg.grade;
+
+    // Grade with AI (or heuristic)
+    const gpxPoints = seg.pts.map(p => ({ lat: p.lat, lon: p.lon, ele: null as number | null }));
+    const gradeResult = await gradeSegment({
+      name,
+      segmentHash: hash,
+      source: "tet",
+      region: reg.label,
+      points: gpxPoints,
+      distanceKm: seg.distKm,
+      elevationGainM: null,
+      skipAi: opts.skipAi,
+    });
+
+    const difficulty = gradeResult.fallback
+      ? osmGrade
+      : gradeResult.grade;
+
+    // Upsert by segment_hash; repair legacy stubs missing geometry.
+    if (!opts.dryRun) {
+      const byHash = await withDbRetry(`lookup ${name}`, () =>
+        supabase
           .from("trails")
-          .select("id")
-          .contains("osm_way_ids", [String(way.id)])
-          .maybeSingle();
-        if (existing) { skipped++; continue; }
-      }
+          .select("id, path_geojson, bbox_min_lat")
+          .eq("source", "OSM-UK")
+          .eq("segment_hash", hash)
+          .maybeSingle(),
+      );
 
-      // Grade with AI (or heuristic)
-      const gpxPoints = seg.pts.map(p => ({ lat: p.lat, lon: p.lon, ele: null as number | null }));
-      const gradeResult = await gradeSegment({
-        name,
-        segmentHash: hash,
-        source: "tet",
-        region: reg.label,
-        points: gpxPoints,
-        distanceKm: seg.distKm,
-        elevationGainM: null,
-        skipAi: opts.skipAi,
-      });
-
-      const difficulty = gradeResult.fallback
-        ? osmGrade
-        : gradeResult.grade;
-
-      if (opts.dryRun) {
-        console.log(`  [DRY] ${name} | ${seg.distKm.toFixed(2)} km | Grade ${difficulty} | ${legal_status}`);
-        inserted++;
+      if (byHash.data) {
+        const needsGeometry = !byHash.data.path_geojson && byHash.data.bbox_min_lat == null;
+        if (needsGeometry) {
+          const { error } = await withDbRetry(`update ${name}`, () =>
+            supabase
+              .from("trails")
+              .update(geometryPatch(reg, name, difficulty, seg, bbox, geojson, legal_status, legal_confidence, hash, seg.wayIds))
+              .eq("id", byHash.data!.id),
+          );
+          if (error) { console.error(`  Error updating ${name}: ${error.message}`); errors++; }
+          else updated++;
+        } else skipped++;
         continue;
       }
+    }
 
-      const row: TrailRow = {
-        name,
-        source: "OSM-UK",
-        type: legal_status === "BOAT" ? "BOAT" : "green-lane",
-        terrain: "trail",
-        difficulty,
-        distance_km: Math.round(seg.distKm * 100) / 100,
-        path_geojson: geojson,
-        is_public: true,
-        bbox_min_lat: bbox.minLat,
-        bbox_max_lat: bbox.maxLat,
-        bbox_min_lng: bbox.minLng,
-        bbox_max_lng: bbox.maxLng,
-        legal_status,
-        legal_confidence,
-        legal_source: "OpenStreetMap",
-        osm_way_ids: [String(way.id)],
-        verification_status: "verified",
-      };
+    if (opts.dryRun) {
+      console.log(`  [DRY] ${name} | ${seg.distKm.toFixed(2)} km | Grade ${difficulty} | ways=${seg.wayIds.length} | ${legal_status}`);
+      inserted++;
+      continue;
+    }
 
-      const { error } = await supabase.from("trails").insert(row as never);
-      if (error) {
-        console.error(`  Error inserting ${name}: ${error.message}`);
+    // Insert without geometry columns first — BEFORE INSERT triggers on gpx_data
+    // null out path_geojson/bbox when gpx_data is absent. Apply geometry via UPDATE.
+    const row: TrailRow = {
+      name,
+      source: "OSM-UK",
+      source_region: reg.label,
+      type: legal_status === "BOAT" ? "BOAT" : "green-lane",
+      terrain: "trail",
+      difficulty,
+      distance_km: Math.round(seg.distKm * 100) / 100,
+      is_public: true,
+      legal_status,
+      legal_confidence,
+      legal_source: "OpenStreetMap",
+      osm_way_ids: seg.wayIds.map(String),
+      segment_hash: hash,
+      source_url: `osm://ways/${seg.wayIds.join("+")}#${hash}`,
+      verification_status: "verified",
+    };
+
+    const { data: newRow, error } = await withDbRetry(`insert ${name}`, () =>
+      supabase
+        .from("trails")
+        .insert(row as never)
+        .select("id")
+        .maybeSingle(),
+    );
+    if (error) {
+      console.error(`  Error inserting ${name}: ${error.message}`);
+      errors++;
+    } else if (newRow?.id) {
+      const { error: patchError } = await withDbRetry(`patch ${name}`, () =>
+        supabase
+          .from("trails")
+          .update(geometryPatch(reg, name, difficulty, seg, bbox, geojson, legal_status, legal_confidence, hash, seg.wayIds))
+          .eq("id", newRow.id),
+      );
+      if (patchError) {
+        console.error(`  Error patching geometry for ${name}: ${patchError.message}`);
         errors++;
       } else {
         inserted++;
+        if (inserted % 250 === 0) {
+          console.log(`  [${reg.label}] ${inserted} trail(s) written…`);
+        }
       }
     }
   }
 
-  return { queried: ways.length, segments, inserted, skipped, errors };
+  return { queried: ways.length, segments, inserted, updated, skipped, errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -588,27 +766,27 @@ async function main() {
     auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
   });
 
-  const regionKeys = opts.region === "all"
-    ? ALL_REGIONS
-    : [opts.region];
+  const regionKeys = resolveRegionKeys(opts.region);
 
   // Validate region keys
   for (const key of regionKeys) {
     if (!REGIONS[key]) {
-      console.error(`Unknown region: "${key}". Valid regions: ${Object.keys(REGIONS).join(", ")}`);
+      console.error(`Unknown region: "${key}". Valid regions: ${Object.keys(REGIONS).join(", ")}, groups: ${Object.keys(REGION_GROUPS).join(", ")}`);
       process.exit(1);
     }
   }
 
-  let totalQueried = 0, totalSegments = 0, totalInserted = 0, totalSkipped = 0, totalErrors = 0;
+  let totalQueried = 0, totalSegments = 0, totalInserted = 0, totalUpdated = 0, totalSkipped = 0, totalErrors = 0;
+  const failedRegions: string[] = [];
 
   for (let i = 0; i < regionKeys.length; i++) {
     const regionKey = regionKeys[i];
 
-    // 30-second courtesy pause between queries to avoid rate limiting
+    // Pause between regions — longer after failures to let Overpass recover.
     if (i > 0) {
-      console.log(`\n[Overpass] Waiting 30s before next region (rate limit courtesy)...`);
-      await sleep(30_000);
+      const pauseMs = failedRegions.length > 0 ? 90_000 : 60_000;
+      console.log(`\n[Overpass] Waiting ${pauseMs / 1000}s before next region (rate limit courtesy)...`);
+      await sleep(pauseMs);
     }
 
     try {
@@ -616,10 +794,12 @@ async function main() {
       totalQueried  += result.queried;
       totalSegments += result.segments;
       totalInserted += result.inserted;
+      totalUpdated  += result.updated;
       totalSkipped  += result.skipped;
       totalErrors   += result.errors;
     } catch (err) {
       console.error(`[${regionKey}] Failed: ${(err as Error).message} — skipping to next region`);
+      failedRegions.push(regionKey);
       totalErrors++;
     }
   }
@@ -628,8 +808,15 @@ async function main() {
   console.log(`Ways queried:   ${totalQueried}`);
   console.log(`Segments:       ${totalSegments}`);
   console.log(`Inserted:       ${totalInserted}`);
+  console.log(`Updated:        ${totalUpdated}`);
   console.log(`Skipped (dup):  ${totalSkipped}`);
   console.log(`Errors:         ${totalErrors}`);
+  if (failedRegions.length > 0) {
+    console.log("\nFailed regions — re-run individually when Overpass is quieter:");
+    for (const key of failedRegions) {
+      console.log(`  pnpm exec tsx ./src/importOSM/index.ts --region ${key} --skip-ai`);
+    }
+  }
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

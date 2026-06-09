@@ -1,0 +1,364 @@
+=== dartmoor 2026-06-09T13:32:03+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: dartmoor
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity check failed: Overpass connectivity test failed: HTTP 504
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:
+[Overpass] Proceeding anyway — the actual query may still succeed.
+
+
+[Dartmoor] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 60s before retry...
+  [Overpass] POST overpass-api.de (2/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Dartmoor] 1082 ways received
+[Dartmoor] 481 merged trail section(s) from 1082 ways
+[Dartmoor] Replaced 93 existing OSM row(s) for region
+[Dartmoor] Removed 1 geometry-less OSM stub(s)
+  [Dartmoor] 250 trail(s) written…
+
+=== Summary ===
+Ways queried:   1082
+Segments:       481
+Inserted:       481
+Updated:        0
+Skipped (dup):  0
+Errors:         0
+Sleeping 90s...
+=== dorset 2026-06-09T13:36:49+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: dorset
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity check failed: Overpass connectivity test failed: HTTP 504
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:
+[Overpass] Proceeding anyway — the actual query may still succeed.
+
+
+[Dorset] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 60s before retry...
+  [Overpass] POST overpass-api.de (2/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 90s before retry...
+  [Overpass] POST overpass-api.de (3/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 120s before retry...
+  [Overpass] POST overpass-api.de (4/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Dorset] 3625 ways received
+[Dorset] 1631 merged trail section(s) from 3625 ways
+[Dorset] Replaced 412 existing OSM row(s) for region
+  [Dorset] 250 trail(s) written…
+  [Dorset] 500 trail(s) written…
+  [Dorset] 750 trail(s) written…
+  [Dorset] 1000 trail(s) written…
+  [Dorset] 1250 trail(s) written…
+
+=== Summary ===
+Ways queried:   3625
+Segments:       1631
+Inserted:       1357
+Updated:        0
+Skipped (dup):  274
+Errors:         0
+Sleeping 90s...
+=== somerset 2026-06-09T13:48:40+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: somerset
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity check failed: Overpass connectivity test failed: HTTP 504
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:
+[Overpass] Proceeding anyway — the actual query may still succeed.
+
+
+[Somerset] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Somerset] 1485 ways received
+[Somerset] 578 merged trail section(s) from 1485 ways
+[Somerset] Replaced 39 existing OSM row(s) for region
+  [Somerset] 250 trail(s) written…
+
+=== Summary ===
+Ways queried:   1485
+Segments:       578
+Inserted:       312
+Updated:        0
+Skipped (dup):  266
+Errors:         0
+Sleeping 90s...
+=== south-downs 2026-06-09T13:51:58+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: south-downs
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity OK — got 1 element(s) in test response
+
+
+[South Downs] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[South Downs] 2328 ways received
+[South Downs] 941 merged trail section(s) from 2328 ways
+[South Downs] Replaced 143 existing OSM row(s) for region
+  [South Downs] 250 trail(s) written…
+  [South Downs] 500 trail(s) written…
+
+=== Summary ===
+Ways queried:   2328
+Segments:       941
+Inserted:       704
+Updated:        0
+Skipped (dup):  237
+Errors:         0
+Sleeping 90s...
+=== midlands-central 2026-06-09T13:56:25+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: midlands-central
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity check failed: Overpass connectivity test failed: HTTP 504
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:
+[Overpass] Proceeding anyway — the actual query may still succeed.
+
+
+[Midlands Central] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 60s before retry...
+  [Overpass] POST overpass-api.de (2/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 90s before retry...
+  [Overpass] POST overpass-api.de (3/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 120s before retry...
+  [Overpass] POST overpass-api.de (4/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  [Overpass] Mirror exhausted — trying overpass.kumi.systems
+  [Overpass] POST overpass.kumi.systems (1/4)
+  [Overpass] Response: HTTP 504 (overpass.kumi.systems)
+  Overpass busy (504), waiting 60s before retry...
+  [Overpass] POST overpass.kumi.systems (2/4)
+[midlands-central] Failed: fetch failed — skipping to next region
+
+=== Summary ===
+Ways queried:   0
+Segments:       0
+Inserted:       0
+Updated:        0
+Skipped (dup):  0
+Errors:         1
+
+Failed regions — re-run individually when Overpass is quieter:
+  pnpm exec tsx ./src/importOSM/index.ts --region midlands-central --skip-ai
+Sleeping 90s...
+=== peak-district 2026-06-09T14:14:14+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: peak-district
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity OK — got 1 element(s) in test response
+
+
+[Peak District] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Peak District] 3450 ways received
+[Peak District] 1026 merged trail section(s) from 3450 ways
+[Peak District] Replaced 36 existing OSM row(s) for region
+  [Peak District] 250 trail(s) written…
+  [Peak District] 500 trail(s) written…
+  [Peak District] 750 trail(s) written…
+
+=== Summary ===
+Ways queried:   3450
+Segments:       1026
+Inserted:       820
+Updated:        0
+Skipped (dup):  206
+Errors:         0
+Sleeping 90s...
+=== lancashire 2026-06-09T14:19:12+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: lancashire
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity OK — got 1 element(s) in test response
+
+
+[Lancashire] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Lancashire] 2939 ways received
+[Lancashire] 1061 merged trail section(s) from 2939 ways
+[Lancashire] Replaced 174 existing OSM row(s) for region
+  [Lancashire] 250 trail(s) written…
+  [Lancashire] 500 trail(s) written…
+  [Lancashire] 750 trail(s) written…
+  [Lancashire] 1000 trail(s) written…
+
+=== Summary ===
+Ways queried:   2939
+Segments:       1061
+Inserted:       1060
+Updated:        0
+Skipped (dup):  1
+Errors:         0
+Sleeping 90s...
+=== yorkshire 2026-06-09T14:24:34+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: yorkshire
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity OK — got 1 element(s) in test response
+
+
+[Yorkshire] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Yorkshire] 11691 ways received
+[Yorkshire] 4361 merged trail section(s) from 11691 ways
+[Yorkshire] Replaced 649 existing OSM row(s) for region
+  [Yorkshire] 250 trail(s) written…
+  [Yorkshire] 500 trail(s) written…
+  [Yorkshire] 750 trail(s) written…
+  [Yorkshire] 1000 trail(s) written…
+  [Yorkshire] 1250 trail(s) written…
+  [Yorkshire] 1500 trail(s) written…
+  [Yorkshire] 1750 trail(s) written…
+  [Yorkshire] 2000 trail(s) written…
+  [Yorkshire] 2250 trail(s) written…
+  [Yorkshire] 2500 trail(s) written…
+  [Yorkshire] 2750 trail(s) written…
+  [Yorkshire] 3000 trail(s) written…
+  [Yorkshire] 3250 trail(s) written…
+
+=== Summary ===
+Ways queried:   11691
+Segments:       4361
+Inserted:       3384
+Updated:        0
+Skipped (dup):  977
+Errors:         0
+Sleeping 90s...
+=== lake-district 2026-06-09T14:40:07+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: lake-district
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity OK — got 1 element(s) in test response
+
+
+[Lake District] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 60s before retry...
+  [Overpass] POST overpass-api.de (2/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Lake District] 4291 ways received
+[Lake District] 1724 merged trail section(s) from 4291 ways
+[Lake District] Replaced 226 existing OSM row(s) for region
+  [Lake District] 250 trail(s) written…
+  [Lake District] 500 trail(s) written…
+  [Lake District] 750 trail(s) written…
+
+=== Summary ===
+Ways queried:   4291
+Segments:       1724
+Inserted:       896
+Updated:        0
+Skipped (dup):  828
+Errors:         0
+Sleeping 90s...
+=== northumberland 2026-06-09T14:46:53+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: northumberland
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity OK — got 1 element(s) in test response
+
+
+[Northumberland] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 60s before retry...
+  [Overpass] POST overpass-api.de (2/4)
+  [Overpass] Response: HTTP 504 (overpass-api.de)
+  Overpass busy (504), waiting 90s before retry...
+  [Overpass] POST overpass-api.de (3/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[Northumberland] 2660 ways received
+[Northumberland] 1174 merged trail section(s) from 2660 ways
+[Northumberland] Replaced 252 existing OSM row(s) for region
+  [Northumberland] 250 trail(s) written…
+  [Northumberland] 500 trail(s) written…
+  [Northumberland] 750 trail(s) written…
+
+=== Summary ===
+Ways queried:   2660
+Segments:       1174
+Inserted:       939
+Updated:        0
+Skipped (dup):  235
+Errors:         0
+Sleeping 90s...
+=== east-anglia 2026-06-09T14:55:03+01:00 ===
+Loaded env: C:\Users\jonathan\Trail-Forge\artifacts\api-server\.env.local
+=== TrailForge OSM Legal Trail Import ===
+Region: east-anglia
+
+[Overpass] Running connectivity test...
+[Overpass] Connectivity check failed: Overpass connectivity test failed: HTTP 504
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:
+[Overpass] Proceeding anyway — the actual query may still succeed.
+
+
+[East Anglia] Querying Overpass...
+  [Overpass] POST overpass-api.de (1/4)
+  [Overpass] Response: HTTP 200 (overpass-api.de)
+[East Anglia] 7930 ways received
+[East Anglia] 2743 merged trail section(s) from 7930 ways
+  [East Anglia] 250 trail(s) written…
+  [East Anglia] 500 trail(s) written…
+  [East Anglia] 750 trail(s) written…
+
+=== Summary ===
+Ways queried:   7930
+Segments:       2743
+Inserted:       897
+Updated:        0
+Skipped (dup):  1846
+Errors:         0
+Sleeping 90s...
+=== ALL DONE 2026-06-09T15:02:07+01:00 ===

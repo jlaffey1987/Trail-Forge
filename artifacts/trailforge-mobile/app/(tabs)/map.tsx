@@ -39,11 +39,16 @@ import MapView, {
   type Region,
 } from "react-native-maps";
 
+import TrailClusterBubble, {
+  type TrailClusterRenderProps,
+} from "@/components/map/TrailClusterBubble";
+import TrailDotMarker from "@/components/map/TrailDotMarker";
 import {
   TrailDetailSheet,
   type TrailDetailData,
 } from "@/components/TrailDetailSheet";
 import { AppShellHeader } from "@/components/shell/AppShellHeader";
+import { PageLoadingCover } from "@/components/PageLoadingCover";
 import { PlannerMapChrome } from "@/components/planner/PlannerMapChrome";
 import { UpgradePrompt } from "@/components/UpgradePrompt";
 import { useProfile } from "@/components/ProfileContext";
@@ -51,7 +56,7 @@ import colors from "@/constants/colors";
 import {
   listCompletions,
   patchPreferences,
-  searchTrailsByBbox,
+  searchTrailsForMap,
   type MapTrail as ApiTrail,
 } from "@/lib/api";
 import {
@@ -60,6 +65,15 @@ import {
   TRAIL_ORANGE,
 } from "@/lib/trailColors";
 import { formatSearchBbox, formatSearchBboxFromRegion, trailMapCoordinates, trailCentroid } from "@/lib/geo";
+import {
+  gradeClusterColor,
+  shouldClusterTrails,
+  shouldShowTrailPolylines,
+} from "@/lib/mapZoom";
+import {
+  buildGridClusters,
+  shouldUseGridClusters,
+} from "@/lib/mapGridClusters";
 import { publishVisibleTrails } from "@/lib/visibleTrails";
 import { toggleTrailOnRoute } from "@/lib/plannerMapSession";
 import { usePlannerStore } from "@/store/routePlannerStore";
@@ -145,9 +159,9 @@ const VISIBILITY_CHIPS: { id: VisibilityFilter; label: string }[] = [
 // Layer system
 // ---------------------------------------------------------------------------
 
-const LAYER_STORAGE_KEY = "@trailforge/map_layers_v1";
+const LAYER_STORAGE_KEY = "@trailforge/map_layers_v2";
 
-export type LayerId = "osm" | "tet" | "trf" | "my_trails" | "my_groups";
+export type LayerId = "osm" | "tet" | "trf" | "tnt" | "my_trails" | "my_groups";
 
 interface LayerDef {
   id: LayerId;
@@ -159,11 +173,12 @@ interface LayerDef {
 }
 
 export const LAYER_DEFS: LayerDef[] = [
-  { id: "osm",       label: "Public Trails",    source: "OSM-UK",  color: "#00C853", defaultOn: true },
-  { id: "tet",       label: "Trans Euro Trail",  source: "TET-UK",  color: "#F5A623", defaultOn: true },
-  { id: "trf",       label: "TRF Routes",        source: "TRF",     color: "#2979FF", defaultOn: true },
-  { id: "my_trails", label: "My Trails",                            color: "#CE93D8", defaultOn: true },
-  { id: "my_groups", label: "My Groups",                            color: "#FF6D00", defaultOn: true },
+  { id: "osm",       label: "Public Trails",         source: "OSM-UK",  color: "#00C853", defaultOn: true },
+  { id: "tet",       label: "Trans Euro Trail",      source: "TET-UK",  color: "#FFB300", defaultOn: true },
+  { id: "tnt",       label: "Trans Northern Trail",  source: "TNT",     color: "#F5A623", defaultOn: true },
+  { id: "trf",       label: "TRF Routes",            source: "TRF",     color: "#2979FF", defaultOn: true },
+  { id: "my_trails", label: "My Trails",                                      color: "#CE93D8", defaultOn: true },
+  { id: "my_groups", label: "My Groups",                                      color: "#FF6D00", defaultOn: true },
 ];
 
 function defaultLayerState(): Record<LayerId, boolean> {
@@ -486,8 +501,8 @@ const FALLBACK_REGION: Region = {
   longitudeDelta: 4.5,
 };
 
-/** UK + Ireland bbox for browsing all public trails without a planned route. */
-const UK_IE_BBOX = formatSearchBbox(49.5, -11.0, 61.0, 2.0);
+/** Debounce map region before refetching trails (ms). */
+const REGION_FETCH_DEBOUNCE_MS = 450;
 
 // ---------------------------------------------------------------------------
 // Component
@@ -496,6 +511,7 @@ const UK_IE_BBOX = formatSearchBbox(49.5, -11.0, 61.0, 2.0);
 export default function MapTab() {
   const mapRef = useRef<MapView | null>(null);
   const [region, setRegion] = useState<Region>(FALLBACK_REGION);
+  const [fetchRegion, setFetchRegion] = useState<Region>(FALLBACK_REGION);
   const [permission, setPermission] = useState<
     "unknown" | "granted" | "denied"
   >("unknown");
@@ -518,6 +534,8 @@ export default function MapTab() {
   const [upgradedFeature, setUpgradedFeature] = useState("");
   const { profile } = useProfile();
   const isPremium = profile.isPremium;
+  /** Production: difficulty colours are premium. Dev builds always show them for map QA. */
+  const showDifficultyColors = isPremium || __DEV__;
   const planner = usePlannerStore();
   const isPlanning = planner.mapMode === "planning";
   const activeTrailSet = useMemo(
@@ -638,53 +656,72 @@ export default function MapTab() {
       longitudeDelta: 0.4,
     };
     setRegion(next);
+    setFetchRegion(next);
     mapRef.current?.animateToRegion(next, 600);
     setSearchHits([]);
   }
 
+  useEffect(() => {
+    const t = setTimeout(() => setFetchRegion(region), REGION_FETCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [region]);
+
   // -------------------------------------------------------------------------
-  // Trail data
+  // Trail data — viewport bbox (not whole-UK cap) so visible trails load reliably.
   // -------------------------------------------------------------------------
 
-  const useWideFetch = !isPlanning;
   const bbox = useMemo(() => {
-    if (useWideFetch) return UK_IE_BBOX;
-    const lats = [region.latitude - region.latitudeDelta / 2, region.latitude + region.latitudeDelta / 2];
-    const lngs = [region.longitude - region.longitudeDelta / 2, region.longitude + region.longitudeDelta / 2];
-    if (planner.from) {
-      lats.push(planner.from.lat);
-      lngs.push(planner.from.lon);
+    if (isPlanning) {
+      const lats = [
+        fetchRegion.latitude - fetchRegion.latitudeDelta / 2,
+        fetchRegion.latitude + fetchRegion.latitudeDelta / 2,
+      ];
+      const lngs = [
+        fetchRegion.longitude - fetchRegion.longitudeDelta / 2,
+        fetchRegion.longitude + fetchRegion.longitudeDelta / 2,
+      ];
+      if (planner.from) {
+        lats.push(planner.from.lat);
+        lngs.push(planner.from.lon);
+      }
+      if (planner.to) {
+        lats.push(planner.to.lat);
+        lngs.push(planner.to.lon);
+      }
+      for (const p of planner.roadPolyline ?? []) {
+        lats.push(p.latitude);
+        lngs.push(p.longitude);
+      }
+      const pad = 0.15;
+      const latSpan = Math.max(0.08, Math.max(...lats) - Math.min(...lats));
+      const lngSpan = Math.max(0.08, Math.max(...lngs) - Math.min(...lngs));
+      return formatSearchBbox(
+        Math.min(...lats) - latSpan * pad,
+        Math.min(...lngs) - lngSpan * pad,
+        Math.max(...lats) + latSpan * pad,
+        Math.max(...lngs) + lngSpan * pad,
+      );
     }
-    if (planner.to) {
-      lats.push(planner.to.lat);
-      lngs.push(planner.to.lon);
-    }
-    for (const p of planner.roadPolyline ?? []) {
-      lats.push(p.latitude);
-      lngs.push(p.longitude);
-    }
-    const pad = 0.15;
-    const latSpan = Math.max(0.08, Math.max(...lats) - Math.min(...lats));
-    const lngSpan = Math.max(0.08, Math.max(...lngs) - Math.min(...lngs));
-    return formatSearchBbox(
-      Math.min(...lats) - latSpan * pad,
-      Math.min(...lngs) - lngSpan * pad,
-      Math.max(...lats) + latSpan * pad,
-      Math.max(...lngs) + lngSpan * pad,
-    );
-  }, [useWideFetch, region, planner.from, planner.to, planner.roadPolyline]);
-  const trailLimit = useWideFetch ? 500 : 300;
+    return formatSearchBboxFromRegion(fetchRegion, 0.2);
+  }, [isPlanning, fetchRegion, planner.from, planner.to, planner.roadPolyline]);
+
+  /** Full path geometry only when polylines render — clusters need centroids only. */
+  const includeTrailGeometry =
+    isPlanning || shouldShowTrailPolylines(fetchRegion.latitudeDelta);
+
   const trailsQ = useQuery({
-    queryKey: ["trails-bbox", bbox, trailLimit],
-    queryFn: () => searchTrailsByBbox({ bbox, limit: trailLimit }),
-    staleTime: 60_000,
-    retry: 2,
+    queryKey: ["trails-map", bbox, isPlanning, includeTrailGeometry],
+    queryFn: () => searchTrailsForMap({ bbox, includeGeometry: includeTrailGeometry }),
+    staleTime: 120_000,
+    gcTime: 600_000,
+    placeholderData: (prev) => prev,
   });
 
+  // Refetch when returning to the tab only if data is stale (avoid full reload every time).
   useFocusEffect(
     useCallback(() => {
-      void trailsQ.refetch();
-    }, [trailsQ.refetch]),
+      if (trailsQ.isStale) void trailsQ.refetch();
+    }, [trailsQ.isStale, trailsQ.refetch]),
   );
 
   // Separate road liaison connectors (terrain="road") from rideable trail sections.
@@ -697,7 +734,7 @@ export default function MapTab() {
     const trailData: ApiTrail[] = [];
     const roadData: ApiTrail[] = [];
     const layerMap: Record<LayerId, ApiTrail[]> = {
-      osm: [], tet: [], trf: [], my_trails: [], my_groups: [],
+      osm: [], tet: [], trf: [], tnt: [], my_trails: [], my_groups: [],
     };
 
     for (const t of all) {
@@ -707,14 +744,14 @@ export default function MapTab() {
       }
       trailData.push(t);
 
-      // Assign to layer bucket by source tag
       const tAny = t as unknown as Record<string, unknown>;
       const src = tAny["source"] as string | undefined;
-      if (src === "TET-UK") layerMap.tet.push(t);
+      if (src === "TET-UK" || src === "tet") layerMap.tet.push(t);
+      else if (src === "TNT") layerMap.tnt.push(t);
       else if (src === "TRF") layerMap.trf.push(t);
       else if (src === "OSM-UK") layerMap.osm.push(t);
       else if (tAny["owner_user_id"]) layerMap.my_trails.push(t);
-      else layerMap.osm.push(t); // default bucket
+      else layerMap.osm.push(t);
     }
 
     // Apply active-layer filter and difficulty/bike filters
@@ -734,8 +771,88 @@ export default function MapTab() {
 
   // Flat list of trail sections (for markers, completions lookup, etc.)
   const trails: ApiTrail[] = useMemo(() => layeredTrails.map(l => l.trail), [layeredTrails]);
-  const showTrailMarkers = region.latitudeDelta < 0.75 && trails.length <= 120;
+  const showPolylines = !isPlanning && shouldShowTrailPolylines(region.latitudeDelta);
+  const showClusterMarkers = !isPlanning && shouldClusterTrails(region.latitudeDelta);
+  const useOverviewClusters =
+    !isPlanning
+    && shouldUseGridClusters(region.latitudeDelta, trails.length);
+  const useMapClustering = showClusterMarkers && !useOverviewClusters;
   const rawTrailCount = trailsQ.data?.trails?.length ?? 0;
+  const superClusterRef = useRef<{ getLeaves: (id: number, limit: number) => Array<{ properties: Record<string, unknown> }> } | null>(null);
+  // Android custom Marker views need one paint cycle with tracksViewChanges enabled.
+  const [markerTracksChanges, setMarkerTracksChanges] = useState(Platform.OS === "android");
+
+  const trailMarkerItems = useMemo(
+    () =>
+      trails
+        .map((t) => {
+          const center = trailCentroid(t);
+          if (!center) return null;
+          const grade =
+            gradeFromDifficulty(t.difficulty) ??
+            gradeFromDifficulty(t.ai_difficulty ?? null);
+          return { trail: t, center, grade };
+        })
+        .filter((item): item is NonNullable<typeof item> => item != null),
+    [trails],
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    if (trailMarkerItems.length > 0) setMarkerTracksChanges(true);
+  }, [trailMarkerItems.length, showClusterMarkers]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android" || !markerTracksChanges) return;
+    const t = setTimeout(() => setMarkerTracksChanges(false), 2500);
+    return () => clearTimeout(t);
+  }, [markerTracksChanges, trailMarkerItems.length, useMapClustering]);
+
+  const overviewClusters = useMemo(
+    () =>
+      useOverviewClusters
+        ? buildGridClusters(
+            trailMarkerItems.map(({ center, grade }) => ({ center, grade })),
+            region.latitudeDelta,
+          )
+        : [],
+    [useOverviewClusters, trailMarkerItems, region.latitudeDelta],
+  );
+
+  const zoomToCluster = useCallback(
+    (latitude: number, longitude: number) => {
+      const next: Region = {
+        latitude,
+        longitude,
+        latitudeDelta: Math.max(0.15, region.latitudeDelta / 2.8),
+        longitudeDelta: Math.max(0.15, region.longitudeDelta / 2.8),
+      };
+      setRegion(next);
+      mapRef.current?.animateToRegion(next, 450);
+    },
+    [region.latitudeDelta, region.longitudeDelta],
+  );
+
+  const renderTrailCluster = useCallback(
+    (cluster: TrailClusterRenderProps & { id?: number }) => {
+      const clusterId = cluster.properties.cluster_id ?? cluster.id;
+      const leaves =
+        clusterId != null
+          ? superClusterRef.current?.getLeaves(clusterId, 80) ?? []
+          : [];
+      const leafGrades = leaves.map(
+        (leaf) => leaf.properties.trailGrade as number | null | undefined,
+      );
+      return (
+        <TrailClusterBubble
+          key={`cluster-${clusterId ?? "x"}`}
+          {...cluster}
+          leafGrades={leafGrades}
+        />
+      );
+    },
+    [],
+  );
 
   const completionsQ = useQuery({
     queryKey: ["my-completions"],
@@ -772,10 +889,10 @@ export default function MapTab() {
       console.warn("[Map] trails fetch failed:", trailsQ.error);
     } else if (trailsQ.data) {
       console.log(
-        `[Map] API trails=${rawTrailCount} rendered=${trailPolylines.length} polylines`,
+        `[Map] API trails=${rawTrailCount} drawable=${trailPolylines.length} mode=${useOverviewClusters ? "overview-grid" : useMapClustering ? "cluster" : showPolylines ? "polyline" : "none"} delta=${region.latitudeDelta.toFixed(3)}`,
       );
     }
-  }, [trailsQ.isError, trailsQ.error, trailsQ.data, rawTrailCount, trailPolylines.length]);
+  }, [trailsQ.isError, trailsQ.error, trailsQ.data, rawTrailCount, trailPolylines.length, useOverviewClusters, useMapClustering, showPolylines, region.latitudeDelta]);
 
   // Road liaison connectors — always shown regardless of filters; never tappable.
   const roadPolylines = useMemo(
@@ -845,6 +962,11 @@ export default function MapTab() {
   return (
     <View style={styles.container}>
       <AppShellHeader />
+      <PageLoadingCover
+        loading={trailsQ.isLoading && !trailsQ.data}
+        delayMs={800}
+        message="Loading trails on map…"
+      >
       <View style={styles.mapArea}>
       <ClusterMapView
         ref={mapRef}
@@ -855,11 +977,16 @@ export default function MapTab() {
         showsUserLocation={permission === "granted"}
         showsMyLocationButton={false}
         onRegionChangeComplete={setRegion}
-        radius={48}
+        clusteringEnabled={useMapClustering}
+        superClusterRef={superClusterRef}
+        renderCluster={renderTrailCluster}
+        radius={56}
         minZoom={1}
-        maxZoom={12}
+        maxZoom={16}
+        minPoints={2}
         clusterColor={colors.light.primary}
-        clusterTextColor={colors.light.primaryForeground}
+        clusterTextColor="#111"
+        spiralEnabled={false}
       >
         {planner.from && isPlanning ? (
           <Marker
@@ -883,19 +1010,28 @@ export default function MapTab() {
             zIndex={2}
           />
         ) : null}
-        {showTrailMarkers ? trails.map((t) => {
-          const center = trailCentroid(t);
-          if (!center) return null;
-          return (
-            <Marker
-              key={`m-${t.id}`}
-              coordinate={center}
-              tracksViewChanges={false}
-              pinColor={difficultyColor(t.difficulty)}
-              onPress={() => setSelected(trailDetailData(t))}
-            />
-          );
-        }) : null}
+        {useOverviewClusters
+          ? overviewClusters.map((cluster, idx) => (
+              <TrailClusterBubble
+                key={`grid-${idx}-${cluster.count}`}
+                geometry={{ coordinates: [cluster.longitude, cluster.latitude] }}
+                properties={{ point_count: cluster.count }}
+                leafGrades={cluster.grades}
+                onPress={() => zoomToCluster(cluster.latitude, cluster.longitude)}
+              />
+            ))
+          : null}
+        {useMapClustering
+          ? trailMarkerItems.map(({ trail, center, grade }) => (
+              <TrailDotMarker
+                key={`m-${trail.id}`}
+                coordinate={center}
+                trailGrade={grade}
+                tracksViewChanges={markerTracksChanges}
+                onPress={() => setSelected(trailDetailData(trail))}
+              />
+            ))
+          : null}
         {/* Road liaison connectors — thin grey dashed lines, never interactive */}
         {roadPolylines.map(({ id, coords }) => (
           <Polyline
@@ -908,14 +1044,12 @@ export default function MapTab() {
           />
         ))}
 
-        {/* Trail sections — coloured by layer (premium) or grey (free).
-            OSM trails use difficulty colour; other layers use their layer colour.
-            Seasonal trails render as dashed lines. */}
-        {trailPolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
+        {/* Trail sections — difficulty colour for premium (always on in __DEV__). */}
+        {(showPolylines || isPlanning) && trailPolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
           const isActive = activeTrailSet.has(id);
           const color = isActive
             ? colors.light.primary
-            : isPremium
+            : showDifficultyColors
               ? (isOsm ? difficultyColor(trail.difficulty) : layerColor)
               : "#888888";
           return (
@@ -923,7 +1057,10 @@ export default function MapTab() {
               key={id}
               coordinates={coords}
               strokeColor={color}
-              strokeWidth={isActive ? 7 : isPremium ? 4 : 3}
+              strokeWidth={isActive ? 7 : showDifficultyColors ? 5 : 4}
+              lineCap="round"
+              lineJoin="round"
+              zIndex={isActive ? 12 : 10}
               lineDashPattern={isSeasonal ? [8, 6] : undefined}
               tappable
               onPress={() => {
@@ -1018,11 +1155,19 @@ export default function MapTab() {
           ) : (
             <Feather name="map" size={14} color={colors.light.primary} />
           )}
-          <Text style={styles.statusText}>
-            {trailsQ.isError
-              ? "Couldn't load trails"
-              : `${trails.length} trail${trails.length === 1 ? "" : "s"} in view`}
-          </Text>
+          <View>
+            <Text style={styles.statusText}>
+              {trailsQ.isError
+                ? "Couldn't load trails"
+                : `${trails.length} TRAIL${trails.length === 1 ? "" : "S"} IN VIEW`}
+            </Text>
+            {!trailsQ.isError && useOverviewClusters && trails.length > 0 ? (
+              <Text style={styles.statusSubtext}>TAP CLUSTER TO ZOOM IN</Text>
+            ) : null}
+            {!trailsQ.isError && useMapClustering && trails.length > 0 ? (
+              <Text style={styles.statusSubtext}>CLUSTERED · ZOOM IN FOR DETAIL</Text>
+            ) : null}
+          </View>
         </View>
 
         {trailsQ.isError ? (
@@ -1081,6 +1226,22 @@ export default function MapTab() {
         </View>
       ) : null}
 
+      {!isPlanning && showClusterMarkers ? (
+        <View style={styles.legendCard} pointerEvents="none">
+          {([
+            { label: "Easy (1–3)", color: gradeClusterColor(2) },
+            { label: "Moderate (4–6)", color: gradeClusterColor(5) },
+            { label: "Hard (7–8)", color: gradeClusterColor(8) },
+            { label: "Extreme (9–10)", color: gradeClusterColor(10) },
+          ] as const).map((row) => (
+            <View key={row.label} style={styles.legendRow}>
+              <View style={[styles.legendSwatch, { backgroundColor: row.color }]} />
+              <Text style={styles.legendText}>{row.label}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
       <PlannerMapChrome />
 
       {/* ── Trail detail sheet ──────────────────────────────────────────── */}
@@ -1119,6 +1280,7 @@ export default function MapTab() {
         onDismiss={() => setUpgradeVisible(false)}
       />
       </View>
+      </PageLoadingCover>
     </View>
   );
 }
@@ -1236,12 +1398,42 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 999,
+    maxWidth: "62%",
   },
   statusText: {
     color: "#FFFFFF",
     fontSize: 13,
-    fontWeight: "700",
+    fontWeight: "800",
+    letterSpacing: 0.3,
   },
+  statusSubtext: {
+    color: AMBER,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    marginTop: 2,
+  },
+  legendCard: {
+    position: "absolute",
+    left: 12,
+    bottom: 24,
+    backgroundColor: "rgba(26,26,26,0.92)",
+    borderColor: "#2A2A2A",
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+  },
+  legendRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  legendSwatch: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#111",
+  },
+  legendText: { color: "#DDD", fontSize: 11, fontWeight: "600" },
   retryPill: {
     flexDirection: "row",
     alignItems: "center",
