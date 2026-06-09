@@ -1,6 +1,6 @@
 /**
  * Planner tab — classic Replit layout.
- * Hero · start/destination · bike · difficulty · Find / Build Nav.
+ * Hero · start/destination · bike · difficulty · Find / Plan on map.
  */
 import { Feather } from "@expo/vector-icons";
 import * as Location from "expo-location";
@@ -37,6 +37,7 @@ import {
   launchFindTrailsOnMap,
   launchSuggestTrip,
 } from "@/lib/plannerMapSession";
+import { useProfile } from "@/components/ProfileContext";
 
 const AMBER = colors.light.primary;
 const BG = colors.light.background;
@@ -61,6 +62,7 @@ export default function PlannerTab() {
   const [suggesting, setSuggesting] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const planner = usePlannerStore();
+  const { profile } = useProfile();
 
   // Auto GPS on mount
   useEffect(() => {
@@ -185,7 +187,7 @@ export default function PlannerTab() {
     }
   };
 
-  const handleBuildNav = async () => {
+  const handlePlanOnMap = async () => {
     if (planner.routeReady && planner.from && planner.to) {
       router.push("/(tabs)/map");
       return;
@@ -223,6 +225,32 @@ export default function PlannerTab() {
           titleAccent="Planner"
           subtitle="Address-to-address trip with road + trail navigation"
         />
+
+        <View style={s.quickStart}>
+          <Text style={s.quickStartTitle}>Start a ride</Text>
+          <View style={s.quickRow}>
+            <TouchableOpacity
+              style={s.quickCard}
+              onPress={() => router.push("/routes/tnt" as never)}
+            >
+              <Text style={s.quickCardTitle}>Trans Northern Trail</Text>
+              <Text style={s.quickCardSub}>Community route · navigate with Premium</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.quickCard}
+              onPress={() => router.push("/routes/trans-euro-trail" as never)}
+            >
+              <Text style={s.quickCardTitle}>Trans Euro Trail</Text>
+              <Text style={s.quickCardSub}>Import official GPX · navigate with Premium</Text>
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity
+            style={s.quickLink}
+            onPress={() => router.push("/(tabs)/trails" as never)}
+          >
+            <Text style={s.quickLinkText}>My saved routes →</Text>
+          </TouchableOpacity>
+        </View>
 
         <View style={s.form}>
           {/* Location panel */}
@@ -316,10 +344,10 @@ export default function PlannerTab() {
             </TouchableOpacity>
             <TouchableOpacity
               style={s.navBtn}
-              onPress={() => void handleBuildNav()}
+              onPress={() => void handlePlanOnMap()}
             >
-              <Feather name="navigation" size={16} color="#fff" />
-              <Text style={s.navBtnText}>Build Nav</Text>
+              <Feather name="map" size={16} color="#fff" />
+              <Text style={s.navBtnText}>Plan on map</Text>
             </TouchableOpacity>
           </View>
 
@@ -327,7 +355,9 @@ export default function PlannerTab() {
             <Text style={s.errorText}>{searchError}</Text>
           ) : (
             <Text style={s.helperText}>
-              Suggest or Find Trails opens the map with your route. Tap trails to add or remove.
+              {profile.isPremium
+                ? "Suggest or Find Trails opens the map. Tap trails to build your route, then start navigation."
+                : "Plan free on the map. Turn-by-turn navigation is included with Premium."}
             </Text>
           )}
 
@@ -439,6 +469,29 @@ const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: 32 },
+  quickStart: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    gap: 10,
+  },
+  quickStartTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  quickRow: { flexDirection: "row", gap: 10 },
+  quickCard: {
+    flex: 1,
+    backgroundColor: "#1c1917",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#44403c",
+    padding: 12,
+  },
+  quickCardTitle: { color: "#fff", fontWeight: "800", fontSize: 13, marginBottom: 4 },
+  quickCardSub: { color: "#78716c", fontSize: 11, lineHeight: 15 },
+  quickLink: { alignSelf: "flex-start", paddingVertical: 4 },
+  quickLinkText: { color: AMBER, fontWeight: "700", fontSize: 13 },
   form: { paddingHorizontal: 16, paddingTop: 16 },
   locPanel: {
     borderRadius: 16,

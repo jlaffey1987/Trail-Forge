@@ -8,7 +8,7 @@ import { Feather } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSaveTrail } from "@workspace/api-client-react";
 import { router } from "expo-router";
-import React from "react";
+import React, { useState } from "react";
 import {
   ActivityIndicator,
   Modal,
@@ -21,6 +21,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 
+import { AchievementCelebration } from "@/components/profile/AchievementCelebration";
 import { ElevationChart } from "@/components/ElevationChart";
 import colors from "@/constants/colors";
 import {
@@ -28,6 +29,8 @@ import {
   listTrailNotes,
   markTrailRidden,
   unmarkTrailRidden,
+  type MarkTrailRiddenResult,
+  type RiderAchievement,
 } from "@/lib/api";
 import { difficultyColor, difficultyLabel, type TrailDifficulty } from "@/lib/trailColors";
 
@@ -61,6 +64,10 @@ export function TrailDetailSheet({
 }: TrailDetailSheetProps) {
   const { width } = useWindowDimensions();
   const qc = useQueryClient();
+  const [celebration, setCelebration] = useState<{
+    achievements: Array<Pick<RiderAchievement, "name" | "description" | "icon" | "colour">>;
+    statsLine: string | null;
+  } | null>(null);
 
   const saveMut = useSaveTrail({
     mutation: {
@@ -72,15 +79,32 @@ export function TrailDetailSheet({
 
   const riddenMut = useMutation({
     mutationFn: async (next: boolean) => {
-      if (!trail) return;
+      if (!trail) return null;
       if (next) {
-        await markTrailRidden(trail.id);
-      } else {
-        await unmarkTrailRidden(trail.id);
+        return markTrailRidden(trail.id);
       }
+      await unmarkTrailRidden(trail.id);
+      return null;
     },
-    onSuccess: (_data, next) => {
+    onSuccess: (data, next) => {
       onMarkRiddenChange?.(next);
+      void qc.invalidateQueries({ queryKey: ["recently-ridden"] });
+      void qc.invalidateQueries({ queryKey: ["rider-profile", "me"] });
+      if (next && data && (data as MarkTrailRiddenResult).isNew !== false) {
+        const result = data as MarkTrailRiddenResult;
+        const stats = result.stats;
+        const statsLine = stats
+          ? `${stats.trailKmTotal.toFixed(1)} km ridden · ${stats.trailsCompleted} trails · ${stats.rankTitle}`
+          : null;
+        if (result.newAchievements.length > 0) {
+          setCelebration({
+            achievements: result.newAchievements,
+            statsLine,
+          });
+        } else if (statsLine) {
+          setCelebration({ achievements: [], statsLine });
+        }
+      }
     },
   });
 
@@ -104,6 +128,7 @@ export function TrailDetailSheet({
   if (!trail) return null;
 
   return (
+    <>
     <Modal
       visible={visible}
       transparent
@@ -274,6 +299,18 @@ export function TrailDetailSheet({
         </Pressable>
       </Pressable>
     </Modal>
+    <AchievementCelebration
+      visible={celebration != null}
+      achievements={celebration?.achievements ?? []}
+      statsLine={celebration?.statsLine ?? null}
+      onDismiss={() => setCelebration(null)}
+      onViewProfile={() => {
+        setCelebration(null);
+        onClose();
+        router.push("/profile" as never);
+      }}
+    />
+    </>
   );
 }
 

@@ -4,11 +4,12 @@
 import { router } from "expo-router";
 
 import {
+  fetchPublicRouteDetail,
   getPlannerSuggestions,
   searchTrailsByBbox,
   type MapTrail,
 } from "@/lib/api";
-import { formatSearchBbox } from "@/lib/geo";
+import { formatSearchBbox, trailCentroid } from "@/lib/geo";
 import {
   difficultyToCorridorKm,
   filterTrailsByGrades,
@@ -175,4 +176,69 @@ export function activeTrailsFromStore(): MapTrail[] {
   const s = getPlannerState();
   const map = new Map(s.trailDetails.map((t) => [t.id, t]));
   return s.activeTrailIds.map((id) => map.get(id)).filter(Boolean) as MapTrail[];
+}
+
+function orderTrailsByIds(trails: MapTrail[], ids: string[]): MapTrail[] {
+  const map = new Map(trails.map((t) => [t.id, t]));
+  const ordered: MapTrail[] = [];
+  for (const id of ids) {
+    const t = map.get(id);
+    if (t) ordered.push(t);
+  }
+  return ordered.length > 0 ? ordered : trails;
+}
+
+/** Open a saved route draft on the map tab for viewing or editing. */
+export async function launchSavedRouteOnMap(routeId: string): Promise<void> {
+  const detail = await fetchPublicRouteDetail(routeId);
+  const idsCsv = detail.trailIds.join(",");
+  let trails = detail.trails ?? [];
+  if (idsCsv && trails.length < detail.trailIds.length) {
+    const res = await searchTrailsByBbox({ ids: idsCsv, limit: 200 });
+    trails = orderTrailsByIds(res.trails ?? [], detail.trailIds);
+  } else if (detail.trailIds.length) {
+    trails = orderTrailsByIds(trails, detail.trailIds);
+  }
+
+  if (trails.length === 0) {
+    throw new Error("This route has no trails to show on the map.");
+  }
+
+  const fromWp = detail.waypoints?.find((w) => w.id === "from");
+  const toWp = detail.waypoints?.find((w) => w.id === "to");
+  const firstCentroid = trailCentroid(trails[0]);
+  const lastCentroid = trailCentroid(trails[trails.length - 1]);
+
+  const from =
+    fromWp?.lat != null && fromWp?.lon != null
+      ? { lat: fromWp.lat, lon: fromWp.lon, address: fromWp.label ?? detail.name }
+      : firstCentroid
+        ? { lat: firstCentroid.latitude, lon: firstCentroid.longitude, address: detail.name }
+        : null;
+  const to =
+    toWp?.lat != null && toWp?.lon != null
+      ? { lat: toWp.lat, lon: toWp.lon, address: toWp.label ?? "Route end" }
+      : lastCentroid
+        ? { lat: lastCentroid.latitude, lon: lastCentroid.longitude, address: "Route end" }
+        : null;
+
+  if (!from || !to) {
+    throw new Error("Could not place this route on the map.");
+  }
+  const activeIds = detail.trailIds.filter((id) => trails.some((t) => t.id === id));
+
+  plannerActions.startMapPlanning({
+    from,
+    to,
+    difficultyGrades: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    source: "browse",
+  });
+  plannerActions.setSavedRouteName(detail.name);
+  plannerActions.setMapTrails(activeIds, [], trails);
+  plannerActions.setCalculating(false);
+  await rebuildPlannerRoadRoute();
+  if (getPlannerState().routeReady) {
+    plannerActions.requestOpenRouteActions();
+  }
+  router.push("/(tabs)/map");
 }

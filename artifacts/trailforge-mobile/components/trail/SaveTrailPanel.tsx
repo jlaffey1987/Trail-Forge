@@ -21,14 +21,20 @@ import {
 import MapView, { Polyline, PROVIDER_DEFAULT, PROVIDER_GOOGLE, type Region } from "react-native-maps";
 
 import colors from "@/constants/colors";
+import { useProfile } from "@/components/ProfileContext";
 import { buildGpx, createTrailFromRide, listMyGroups, type Group } from "@/lib/api";
+import {
+  allowedTrailVisibilities,
+  defaultTrailVisibility,
+  type TrailVisibility,
+} from "@/lib/tierPolicy";
 
-export type TrailVisibility = "private" | "public" | "group";
+export type { TrailVisibility };
 
 const GRADE_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 const VISIBILITY_OPTIONS: { id: TrailVisibility; label: string; sub: string }[] = [
   { id: "private", label: "Personal only", sub: "Only you can see this trail" },
-  { id: "public", label: "Public", sub: "Visible to all TrailForge riders" },
+  { id: "public", label: "Public", sub: "Shared with all TrailForge riders" },
   { id: "group", label: "Private group", sub: "Shared with a riding group" },
 ];
 
@@ -51,9 +57,16 @@ export function SaveTrailPanel({
   onDone,
   onBack,
 }: SaveTrailPanelProps) {
+  const { profile } = useProfile();
+  const isPremium = profile.isPremium;
+  const visibilityChoices = VISIBILITY_OPTIONS.filter((o) =>
+    allowedTrailVisibilities(isPremium).includes(o.id),
+  );
   const [name, setName] = useState(initialName);
   const [grade, setGrade] = useState<number | null>(5);
-  const [visibility, setVisibility] = useState<TrailVisibility>("private");
+  const [visibility, setVisibility] = useState<TrailVisibility>(() =>
+    defaultTrailVisibility(isPremium),
+  );
   const [groupId, setGroupId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -190,7 +203,12 @@ export function SaveTrailPanel({
       </View>
 
       <Text style={s.label}>Who can see this trail?</Text>
-      {VISIBILITY_OPTIONS.map((opt) => (
+      {!isPremium ? (
+        <Text style={s.hint}>
+          Free accounts publish new trails to the community map. Upgrade for personal-only or group trails.
+        </Text>
+      ) : null}
+      {visibilityChoices.map((opt) => (
         <Pressable
           key={opt.id}
           onPress={() => setVisibility(opt.id)}

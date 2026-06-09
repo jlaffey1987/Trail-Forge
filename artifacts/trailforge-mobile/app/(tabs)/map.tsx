@@ -30,7 +30,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { geocode, shortLabel, type NominatimResult } from "@/lib/nominatim";
 import { getAccuratePosition } from "@/lib/location";
-import ClusterMapView from "react-native-map-clustering";
 import MapView, {
   Marker,
   PROVIDER_DEFAULT,
@@ -39,10 +38,7 @@ import MapView, {
   type Region,
 } from "react-native-maps";
 
-import TrailClusterBubble, {
-  type TrailClusterRenderProps,
-} from "@/components/map/TrailClusterBubble";
-import TrailDotMarker from "@/components/map/TrailDotMarker";
+import TrailClusterBubble from "@/components/map/TrailClusterBubble";
 import {
   TrailDetailSheet,
   type TrailDetailData,
@@ -50,6 +46,8 @@ import {
 import { AppShellHeader } from "@/components/shell/AppShellHeader";
 import { PageLoadingCover } from "@/components/PageLoadingCover";
 import { PlannerMapChrome } from "@/components/planner/PlannerMapChrome";
+import { MapLegalDisclaimer } from "@/components/map/MapLegalDisclaimer";
+import { MapPlannerCoachMark } from "@/components/map/MapPlannerCoachMark";
 import { UpgradePrompt } from "@/components/UpgradePrompt";
 import { useProfile } from "@/components/ProfileContext";
 import colors from "@/constants/colors";
@@ -67,13 +65,13 @@ import {
 import { formatSearchBbox, formatSearchBboxFromRegion, trailMapCoordinates, trailCentroid } from "@/lib/geo";
 import {
   gradeClusterColor,
-  shouldClusterTrails,
   shouldShowTrailPolylines,
 } from "@/lib/mapZoom";
 import {
   buildGridClusters,
   shouldUseGridClusters,
 } from "@/lib/mapGridClusters";
+import { cullPolylinesToViewport } from "@/lib/mapPolylineCulling";
 import { publishVisibleTrails } from "@/lib/visibleTrails";
 import { toggleTrailOnRoute } from "@/lib/plannerMapSession";
 import { usePlannerStore } from "@/store/routePlannerStore";
@@ -134,25 +132,15 @@ function matchesVisibility(trail: ApiTrail, filter: VisibilityFilter): boolean {
 // Filter chip configs
 // ---------------------------------------------------------------------------
 
-const GRADE_CHIPS: { id: GradeFilter; label: string; color?: string }[] = [
-  { id: "all", label: "ALL" },
-  { id: "easy", label: "EASY 1-3", color: "#00C853" },
-  { id: "intermediate", label: "INTER 4-6", color: "#2979FF" },
-  { id: "hard", label: "HARD 7-9", color: "#FF6D00" },
-  { id: "extreme", label: "EXTREME 10", color: "#D50000" },
-];
+const GRADE_LABELS: Record<number, string> = {
+  0: "All grades", 1: "Grade 1 — Easy", 2: "Grade 2 — Easy", 3: "Grade 3 — Easy",
+  4: "Grade 4 — Intermediate", 5: "Grade 5 — Intermediate", 6: "Grade 6 — Intermediate",
+  7: "Grade 7 — Hard", 8: "Grade 8 — Hard", 9: "Grade 9 — Hard", 10: "Grade 10 — Extreme",
+};
 
-const BIKE_CHIPS: { id: BikeFilter; label: string }[] = [
-  { id: "all", label: "All bikes" },
-  { id: "adventure", label: "Adventure" },
-  { id: "trail", label: "Trail" },
-  { id: "enduro", label: "Enduro" },
-];
-
-const VISIBILITY_CHIPS: { id: VisibilityFilter; label: string }[] = [
-  { id: "all", label: "All trails" },
-  { id: "public_groups", label: "Public + groups" },
-  { id: "groups_only", label: "Groups only" },
+const VISIBILITY_OPTIONS: { id: VisibilityFilter; label: string; sub: string }[] = [
+  { id: "all", label: "All trails", sub: "Public and your groups" },
+  { id: "groups_only", label: "My groups only", sub: "Hide public trails" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -174,7 +162,7 @@ interface LayerDef {
 
 export const LAYER_DEFS: LayerDef[] = [
   { id: "osm",       label: "Public Trails",         source: "OSM-UK",  color: "#00C853", defaultOn: true },
-  { id: "tet",       label: "Trans Euro Trail",      source: "TET-UK",  color: "#FFB300", defaultOn: true },
+  { id: "tet",       label: "Trans Euro Trail area", source: "TET-UK",  color: "#FFB300", defaultOn: true },
   { id: "tnt",       label: "Trans Northern Trail",  source: "TNT",     color: "#F5A623", defaultOn: true },
   { id: "trf",       label: "TRF Routes",            source: "TRF",     color: "#2979FF", defaultOn: true },
   { id: "my_trails", label: "My Trails",                                      color: "#CE93D8", defaultOn: true },
@@ -261,6 +249,18 @@ function FiltersSheet({
 
   function apply() {
     const g = gradeFilterFromNum(gradeNum);
+    if (gradeNum > 0 && !isPremium) {
+      onShowUpgrade("Trail difficulty filtering");
+      return;
+    }
+    if (draftVis !== "all" && !isPremium) {
+      onShowUpgrade("Groups-only map view");
+      return;
+    }
+    if (draftBike !== "all" && !isPremium) {
+      onShowUpgrade("Bike type filtering");
+      return;
+    }
     onApply(g, draftBike, draftVis, draftLayers);
     closeSheet();
   }
@@ -277,13 +277,24 @@ function FiltersSheet({
     setDraftBike(b);
   }
 
+  function handleGradeNum(n: number) {
+    if (n > 0 && !isPremium) {
+      onShowUpgrade("Trail difficulty filtering");
+      return;
+    }
+    setGradeNum(n);
+  }
+
+  function handleVisibility(v: VisibilityFilter) {
+    if (v !== "all" && !isPremium) {
+      onShowUpgrade("Groups-only map view");
+      return;
+    }
+    setDraftVis(v);
+  }
+
   const sheetTranslate = slideAnim.interpolate({ inputRange: [0, 1], outputRange: [600, 0] });
 
-  const GRADE_LABELS: Record<number, string> = {
-    0: "All grades", 1: "Grade 1 — Easy", 2: "Grade 2 — Easy", 3: "Grade 3 — Easy",
-    4: "Grade 4 — Intermediate", 5: "Grade 5 — Intermediate", 6: "Grade 6 — Intermediate",
-    7: "Grade 7 — Hard", 8: "Grade 8 — Hard", 9: "Grade 9 — Hard", 10: "Grade 10 — Extreme",
-  };
   const gradeColor = (n: number) => {
     if (n === 0) return "#A0A0A0";
     if (n <= 3) return "#00C853";
@@ -303,7 +314,7 @@ function FiltersSheet({
           />
           <Animated.View style={[fs.sheet, { transform: [{ translateY: sheetTranslate }] }]}>
             <View style={fs.handle} />
-            <Text style={fs.sheetTitle}>FILTERS</Text>
+            <Text style={fs.sheetTitle}>Filters</Text>
 
             <ScrollView
               style={fs.sheetScroll}
@@ -311,7 +322,10 @@ function FiltersSheet({
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
             >
-              <Text style={fs.sectionLabel}>DIFFICULTY</Text>
+              <Text style={fs.sectionLabel}>Difficulty</Text>
+              {!isPremium ? (
+                <Text style={fs.premiumNote}>Premium — colour trails by how hard they are</Text>
+              ) : null}
               <View style={[fs.gradeDisplay, { borderColor: gradeColor(gradeNum) }]}>
                 <Text style={[fs.gradeNum, { color: gradeColor(gradeNum) }]}>
                   {gradeNum === 0 ? "All" : gradeNum}
@@ -329,7 +343,7 @@ function FiltersSheet({
                       n > 0 && n <= gradeNum && { backgroundColor: gradeColor(n), borderColor: gradeColor(n) },
                       n === gradeNum && { borderColor: gradeColor(n), borderWidth: 2 },
                     ]}
-                    onPress={() => setGradeNum(n)}
+                    onPress={() => handleGradeNum(n)}
                   >
                     <Text style={[fs.trackCellTxt, n > 0 && n <= gradeNum && { color: "#000" }]}>
                       {n === 0 ? "★" : n}
@@ -338,7 +352,10 @@ function FiltersSheet({
                 ))}
               </View>
 
-              <Text style={fs.sectionLabel}>BIKE TYPE</Text>
+              <Text style={fs.sectionLabel}>Bike type</Text>
+              {!isPremium ? (
+                <Text style={fs.premiumNote}>Premium — match trails to your bike</Text>
+              ) : null}
               <View style={fs.bikeRow}>
                 {(["all", "adventure", "trail", "enduro"] as BikeFilter[]).map(b => (
                   <TouchableOpacity
@@ -353,7 +370,31 @@ function FiltersSheet({
                 ))}
               </View>
 
-              <Text style={fs.sectionLabel}>MAP LAYERS</Text>
+              <Text style={fs.sectionLabel}>Which trails</Text>
+              {!isPremium ? (
+                <Text style={fs.premiumNote}>Premium — show only your group trails</Text>
+              ) : null}
+              <View style={fs.visCol}>
+                {VISIBILITY_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.id}
+                    style={[fs.visRow, draftVis === opt.id && fs.visRowActive]}
+                    onPress={() => handleVisibility(opt.id)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={[fs.visLabel, draftVis === opt.id && fs.visLabelActive]}>
+                        {opt.label}
+                      </Text>
+                      <Text style={fs.visSub}>{opt.sub}</Text>
+                    </View>
+                    {draftVis === opt.id ? (
+                      <Feather name="check-circle" size={18} color={AMBER} />
+                    ) : null}
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={fs.sectionLabel}>Map layers</Text>
               {LAYER_DEFS.map(layer => (
                 <View key={layer.id} style={fs.layerRow}>
                   <View style={[fs.layerDot, { backgroundColor: layer.color }]} />
@@ -369,7 +410,7 @@ function FiltersSheet({
             </ScrollView>
 
             <TouchableOpacity style={fs.applyBtn} onPress={apply}>
-              <Text style={fs.applyBtnTxt}>APPLY FILTERS</Text>
+              <Text style={fs.applyBtnTxt}>Apply filters</Text>
             </TouchableOpacity>
             <TouchableOpacity style={fs.resetBtn} onPress={reset}>
               <Text style={fs.resetBtnTxt}>Reset to defaults</Text>
@@ -480,6 +521,28 @@ const fs = StyleSheet.create({
   layerDot: { width: 12, height: 12, borderRadius: 6, marginRight: 12 },
   layerLabel: { flex: 1, color: "#FFF", fontSize: 15, fontWeight: "600" },
 
+  premiumNote: {
+    color: "#78716c",
+    fontSize: 11,
+    marginBottom: 8,
+    marginTop: -4,
+  },
+  visCol: { gap: 8, marginBottom: 20 },
+  visRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: SHEET_BORDER,
+    backgroundColor: "#0D0D0D",
+    gap: 10,
+  },
+  visRowActive: { borderColor: AMBER, backgroundColor: AMBER + "12" },
+  visLabel: { color: "#FFF", fontWeight: "700", fontSize: 14 },
+  visLabelActive: { color: AMBER },
+  visSub: { color: "#78716c", fontSize: 11, marginTop: 2 },
+
   // Buttons
   applyBtn: {
     height: 56, borderRadius: 14, backgroundColor: AMBER,
@@ -534,8 +597,7 @@ export default function MapTab() {
   const [upgradedFeature, setUpgradedFeature] = useState("");
   const { profile } = useProfile();
   const isPremium = profile.isPremium;
-  /** Production: difficulty colours are premium. Dev builds always show them for map QA. */
-  const showDifficultyColors = isPremium || __DEV__;
+  const showDifficultyColors = isPremium;
   const planner = usePlannerStore();
   const isPlanning = planner.mapMode === "planning";
   const activeTrailSet = useMemo(
@@ -582,32 +644,6 @@ export default function MapTab() {
   function showUpgrade(feature: string) {
     setUpgradedFeature(feature);
     setUpgradeVisible(true);
-  }
-
-  function handleGradeFilter(f: GradeFilter) {
-    if (f !== "all" && !isPremium) {
-      showUpgrade("Trail difficulty filtering");
-      return;
-    }
-    setGradeFilter(f);
-  }
-
-  function handleBikeFilter(f: BikeFilter) {
-    if (f !== "all" && !isPremium) {
-      showUpgrade("Bike type filtering");
-      return;
-    }
-    setBikeFilter(f);
-    // Best-effort persist — don't block the UI on a network round-trip.
-    void patchPreferences({ preferred_bike_type: f }).catch(() => undefined);
-  }
-
-  function handleVisibilityFilter(f: VisibilityFilter) {
-    if (f !== "all" && !isPremium) {
-      showUpgrade("Groups-only map view");
-      return;
-    }
-    setVisibilityFilter(f);
   }
 
   // -------------------------------------------------------------------------
@@ -705,9 +741,11 @@ export default function MapTab() {
     return formatSearchBboxFromRegion(fetchRegion, 0.2);
   }, [isPlanning, fetchRegion, planner.from, planner.to, planner.roadPolyline]);
 
-  /** Full path geometry only when polylines render — clusters need centroids only. */
+  /** Full path geometry when polylines may render (current or debounced region). */
   const includeTrailGeometry =
-    isPlanning || shouldShowTrailPolylines(fetchRegion.latitudeDelta);
+    isPlanning
+    || shouldShowTrailPolylines(region.latitudeDelta)
+    || shouldShowTrailPolylines(fetchRegion.latitudeDelta);
 
   const trailsQ = useQuery({
     queryKey: ["trails-map", bbox, isPlanning, includeTrailGeometry],
@@ -772,13 +810,7 @@ export default function MapTab() {
   // Flat list of trail sections (for markers, completions lookup, etc.)
   const trails: ApiTrail[] = useMemo(() => layeredTrails.map(l => l.trail), [layeredTrails]);
   const showPolylines = !isPlanning && shouldShowTrailPolylines(region.latitudeDelta);
-  const showClusterMarkers = !isPlanning && shouldClusterTrails(region.latitudeDelta);
-  const useOverviewClusters =
-    !isPlanning
-    && shouldUseGridClusters(region.latitudeDelta, trails.length);
-  const useMapClustering = showClusterMarkers && !useOverviewClusters;
   const rawTrailCount = trailsQ.data?.trails?.length ?? 0;
-  const superClusterRef = useRef<{ getLeaves: (id: number, limit: number) => Array<{ properties: Record<string, unknown> }> } | null>(null);
   // Android custom Marker views need one paint cycle with tracksViewChanges enabled.
   const [markerTracksChanges, setMarkerTracksChanges] = useState(Platform.OS === "android");
 
@@ -797,16 +829,10 @@ export default function MapTab() {
     [trails],
   );
 
-  useEffect(() => {
-    if (Platform.OS !== "android") return;
-    if (trailMarkerItems.length > 0) setMarkerTracksChanges(true);
-  }, [trailMarkerItems.length, showClusterMarkers]);
-
-  useEffect(() => {
-    if (Platform.OS !== "android" || !markerTracksChanges) return;
-    const t = setTimeout(() => setMarkerTracksChanges(false), 2500);
-    return () => clearTimeout(t);
-  }, [markerTracksChanges, trailMarkerItems.length, useMapClustering]);
+  const useOverviewClusters = shouldUseGridClusters(
+    region.latitudeDelta,
+    trailMarkerItems.length,
+  );
 
   const overviewClusters = useMemo(
     () =>
@@ -819,6 +845,17 @@ export default function MapTab() {
     [useOverviewClusters, trailMarkerItems, region.latitudeDelta],
   );
 
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    if (overviewClusters.length > 0) setMarkerTracksChanges(true);
+  }, [overviewClusters.length]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android" || !markerTracksChanges) return;
+    const t = setTimeout(() => setMarkerTracksChanges(false), 2500);
+    return () => clearTimeout(t);
+  }, [markerTracksChanges, overviewClusters.length]);
+
   const zoomToCluster = useCallback(
     (latitude: number, longitude: number) => {
       const next: Region = {
@@ -828,30 +865,10 @@ export default function MapTab() {
         longitudeDelta: Math.max(0.15, region.longitudeDelta / 2.8),
       };
       setRegion(next);
+      setFetchRegion(next);
       mapRef.current?.animateToRegion(next, 450);
     },
     [region.latitudeDelta, region.longitudeDelta],
-  );
-
-  const renderTrailCluster = useCallback(
-    (cluster: TrailClusterRenderProps & { id?: number }) => {
-      const clusterId = cluster.properties.cluster_id ?? cluster.id;
-      const leaves =
-        clusterId != null
-          ? superClusterRef.current?.getLeaves(clusterId, 80) ?? []
-          : [];
-      const leafGrades = leaves.map(
-        (leaf) => leaf.properties.trailGrade as number | null | undefined,
-      );
-      return (
-        <TrailClusterBubble
-          key={`cluster-${clusterId ?? "x"}`}
-          {...cluster}
-          leafGrades={leafGrades}
-        />
-      );
-    },
-    [],
   );
 
   const completionsQ = useQuery({
@@ -883,16 +900,26 @@ export default function MapTab() {
     [layeredTrails],
   );
 
+  const { visiblePolylines, polylineHiddenCount } = useMemo(() => {
+    if (isPlanning || !showPolylines) {
+      return { visiblePolylines: trailPolylines, polylineHiddenCount: 0 };
+    }
+    const { visible, hiddenCount } = cullPolylinesToViewport(trailPolylines, region);
+    return { visiblePolylines: visible, polylineHiddenCount: hiddenCount };
+  }, [trailPolylines, region, isPlanning, showPolylines]);
+
+  const showClusterLegend = useOverviewClusters && trails.length > 0;
+
   useEffect(() => {
     if (!__DEV__) return;
     if (trailsQ.isError) {
       console.warn("[Map] trails fetch failed:", trailsQ.error);
     } else if (trailsQ.data) {
       console.log(
-        `[Map] API trails=${rawTrailCount} drawable=${trailPolylines.length} mode=${useOverviewClusters ? "overview-grid" : useMapClustering ? "cluster" : showPolylines ? "polyline" : "none"} delta=${region.latitudeDelta.toFixed(3)}`,
+        `[Map] API trails=${rawTrailCount} markers=${trailMarkerItems.length} polylines=${trailPolylines.length} mode=${useOverviewClusters ? "grid-clusters" : showPolylines ? "polyline" : "none"} delta=${region.latitudeDelta.toFixed(3)}`,
       );
     }
-  }, [trailsQ.isError, trailsQ.error, trailsQ.data, rawTrailCount, trailPolylines.length, useOverviewClusters, useMapClustering, showPolylines, region.latitudeDelta]);
+  }, [trailsQ.isError, trailsQ.error, trailsQ.data, rawTrailCount, trailMarkerItems.length, trailPolylines.length, useOverviewClusters, showPolylines, region.latitudeDelta]);
 
   // Road liaison connectors — always shown regardless of filters; never tappable.
   const roadPolylines = useMemo(
@@ -968,7 +995,7 @@ export default function MapTab() {
         message="Loading trails on map…"
       >
       <View style={styles.mapArea}>
-      <ClusterMapView
+      <MapView
         ref={mapRef}
         provider={Platform.OS === "android" ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
         mapType={mapKind}
@@ -977,16 +1004,6 @@ export default function MapTab() {
         showsUserLocation={permission === "granted"}
         showsMyLocationButton={false}
         onRegionChangeComplete={setRegion}
-        clusteringEnabled={useMapClustering}
-        superClusterRef={superClusterRef}
-        renderCluster={renderTrailCluster}
-        radius={56}
-        minZoom={1}
-        maxZoom={16}
-        minPoints={2}
-        clusterColor={colors.light.primary}
-        clusterTextColor="#111"
-        spiralEnabled={false}
       >
         {planner.from && isPlanning ? (
           <Marker
@@ -1017,18 +1034,8 @@ export default function MapTab() {
                 geometry={{ coordinates: [cluster.longitude, cluster.latitude] }}
                 properties={{ point_count: cluster.count }}
                 leafGrades={cluster.grades}
-                onPress={() => zoomToCluster(cluster.latitude, cluster.longitude)}
-              />
-            ))
-          : null}
-        {useMapClustering
-          ? trailMarkerItems.map(({ trail, center, grade }) => (
-              <TrailDotMarker
-                key={`m-${trail.id}`}
-                coordinate={center}
-                trailGrade={grade}
                 tracksViewChanges={markerTracksChanges}
-                onPress={() => setSelected(trailDetailData(trail))}
+                onPress={() => zoomToCluster(cluster.latitude, cluster.longitude)}
               />
             ))
           : null}
@@ -1044,8 +1051,8 @@ export default function MapTab() {
           />
         ))}
 
-        {/* Trail sections — difficulty colour for premium (always on in __DEV__). */}
-        {(showPolylines || isPlanning) && trailPolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
+        {/* Trail sections — difficulty colour for Premium. */}
+        {(showPolylines || isPlanning) && visiblePolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
           const isActive = activeTrailSet.has(id);
           const color = isActive
             ? colors.light.primary
@@ -1073,7 +1080,7 @@ export default function MapTab() {
             />
           );
         })}
-      </ClusterMapView>
+      </MapView>
 
       {/* ── Top actions: Filters + Add trail ───────────────────────────── */}
       <View style={styles.topActions} pointerEvents="box-none">
@@ -1083,7 +1090,7 @@ export default function MapTab() {
           activeOpacity={0.85}
         >
           <Feather name="sliders" size={14} color={AMBER} />
-          <Text style={fs.topBtnOutlineTxt}>FILTERS</Text>
+          <Text style={fs.topBtnOutlineTxt}>Filters</Text>
           {hasFiltersActive ? <View style={fs.activeDot} /> : null}
         </TouchableOpacity>
         {!isPlanning ? (
@@ -1093,7 +1100,7 @@ export default function MapTab() {
             activeOpacity={0.85}
           >
             <Feather name="plus" size={14} color="#000" />
-            <Text style={fs.topBtnTxt}>ADD TRAIL</Text>
+            <Text style={fs.topBtnTxt}>Add trail</Text>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -1159,13 +1166,18 @@ export default function MapTab() {
             <Text style={styles.statusText}>
               {trailsQ.isError
                 ? "Couldn't load trails"
-                : `${trails.length} TRAIL${trails.length === 1 ? "" : "S"} IN VIEW`}
+                : `${trails.length} trail${trails.length === 1 ? "" : "s"} here`}
             </Text>
             {!trailsQ.isError && useOverviewClusters && trails.length > 0 ? (
-              <Text style={styles.statusSubtext}>TAP CLUSTER TO ZOOM IN</Text>
+              <Text style={styles.statusSubtext}>Tap a cluster to zoom in</Text>
             ) : null}
-            {!trailsQ.isError && useMapClustering && trails.length > 0 ? (
-              <Text style={styles.statusSubtext}>CLUSTERED · ZOOM IN FOR DETAIL</Text>
+            {!trailsQ.isError && polylineHiddenCount > 0 ? (
+              <Text style={styles.statusSubtext}>
+                {polylineHiddenCount} more nearby — zoom in to see all
+              </Text>
+            ) : null}
+            {!trailsQ.isError && !isPremium && trails.length > 0 && showPolylines ? (
+              <Text style={styles.statusSubtext}>Upgrade for difficulty colours</Text>
             ) : null}
           </View>
         </View>
@@ -1226,7 +1238,7 @@ export default function MapTab() {
         </View>
       ) : null}
 
-      {!isPlanning && showClusterMarkers ? (
+      {!isPlanning && showClusterLegend ? (
         <View style={styles.legendCard} pointerEvents="none">
           {([
             { label: "Easy (1–3)", color: gradeClusterColor(2) },
@@ -1243,6 +1255,9 @@ export default function MapTab() {
       ) : null}
 
       <PlannerMapChrome />
+      <MapPlannerCoachMark
+        active={isPlanning && planner.activeTrailIds.length === 0 && !planner.pendingRouteActionsOpen}
+      />
 
       {/* ── Trail detail sheet ──────────────────────────────────────────── */}
       <TrailDetailSheet
@@ -1279,6 +1294,7 @@ export default function MapTab() {
         featureName={upgradedFeature}
         onDismiss={() => setUpgradeVisible(false)}
       />
+      <MapLegalDisclaimer auto />
       </View>
       </PageLoadingCover>
     </View>

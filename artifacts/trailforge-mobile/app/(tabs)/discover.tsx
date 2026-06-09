@@ -40,13 +40,16 @@ import {
   type TrailCollection,
 } from "@/lib/api";
 import { difficultyColor, difficultyLabel } from "@/lib/trailColors";
+import { gradeRangeLabel } from "@/lib/rideLevels";
+import { TRANS_EURO_TRAIL } from "@/lib/transEuroTrail";
 
 interface PublicRoute {
   id: string;
   name: string;
-  author?: string | null;
-  trail_count?: number | null;
-  like_count?: number | null;
+  userId?: string | null;
+  ownerName?: string | null;
+  trailIds?: string[];
+  likesCount?: number;
   region?: string | null;
   difficulty?: string | null;
 }
@@ -68,8 +71,10 @@ function trailMatchesCategory(
   c: TrailCategory,
   near: { lat: number; lon: number } | null,
 ): boolean {
-  // Mirrors web's DiscoverTab filter: only BOATs / Green Lanes / Nearby
-  // narrow the list. "All" and "Featured" both fall through to true.
+  if (c === "Featured") {
+    const src = t.source ?? "";
+    return src === "TNT" || src === "TET-UK" || src === "TRF" || t.legal_status === "BOAT";
+  }
   if (c === "BOATs") return t.legal_status === "BOAT";
   if (c === "Green Lanes") return t.legal_status === "Green Lane";
   if (c === "Nearby") {
@@ -87,7 +92,7 @@ type RouteCategory = "all" | "popular" | "easy" | "moderate" | "hard";
 
 function routeMatchesCategory(r: PublicRoute, c: RouteCategory): boolean {
   if (c === "all") return true;
-  if (c === "popular") return (r.like_count ?? 0) >= 5;
+  if (c === "popular") return (r.likesCount ?? 0) >= 5;
   const d = (r.difficulty ?? "").toLowerCase();
   if (c === "easy") return d.includes("green") || d.includes("easy");
   if (c === "moderate")
@@ -195,11 +200,43 @@ export default function DiscoverTab() {
   );
   const otherFeatured = useMemo(
     () =>
-      (collectionsQ.data ?? []).filter(
-        (c) => c.is_featured && c.name !== "Trans Northern Trail",
-      ),
+      (collectionsQ.data ?? []).filter((c) => {
+        if (!c.is_featured) return false;
+        if (c.name === "Trans Northern Trail") return false;
+        return !TRANS_EURO_TRAIL.collectionNames.some(
+          (n) => n.toLowerCase() === c.name.toLowerCase(),
+        );
+      }),
     [collectionsQ.data],
   );
+
+  async function selectTrailCategory(f: TrailCategory) {
+    if (f === "Nearby" && !near) {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert(
+          "Location needed",
+          "Turn on location to see trails near you.",
+        );
+        return;
+      }
+      const last = await Location.getLastKnownPositionAsync();
+      if (last) {
+        setNear({ lat: last.coords.latitude, lon: last.coords.longitude });
+      } else {
+        try {
+          const pos = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
+          });
+          setNear({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+        } catch {
+          Alert.alert("Location unavailable", "Could not get your position.");
+          return;
+        }
+      }
+    }
+    setTrailCategory(f);
+  }
 
   function confirmLeave(g: Group) {
     Alert.alert("Leave group?", `Leave "${g.name}"?`, [
@@ -244,6 +281,7 @@ export default function DiscoverTab() {
             void routesQ.refetch();
             void groupsQ.refetch();
             void collectionsQ.refetch();
+            void trailsQ.refetch();
           }}
           tintColor={colors.light.primary}
         />
@@ -257,6 +295,9 @@ export default function DiscoverTab() {
           />
 
           <Text style={styles.sectionTitle}>Featured routes</Text>
+          <Text style={styles.sectionIntro}>
+            Curated community routes — browse free, navigate with Premium
+          </Text>
           <FeaturedRouteCard
             collection={tntCollection}
             fallback={{
@@ -268,11 +309,26 @@ export default function DiscoverTab() {
             }}
             onPress={() => router.push("/routes/tnt" as never)}
           />
+          <FeaturedRouteCard
+            fallback={{
+              name: "Trans Euro Trail",
+              region: "United Kingdom · Europe",
+              total_distance_km: null,
+            }}
+            badge="Official GPX"
+            hint="Download from transeurotrail.org · import to navigate with Premium"
+            onPress={() => router.push("/routes/trans-euro-trail" as never)}
+          />
           {otherFeatured.map((c) => (
             <FeaturedRouteCard
               key={c.id}
               collection={c}
-              onPress={() => router.push("/(tabs)/map" as never)}
+              onPress={() =>
+                router.push({
+                  pathname: "/routes/collection/[collectionId]",
+                  params: { collectionId: c.id },
+                } as never)
+              }
             />
           ))}
 
@@ -280,16 +336,14 @@ export default function DiscoverTab() {
           <View style={styles.categoryRibbon}>
             {TRAIL_FILTERS.map((f) => {
               const active = f === trailCategory;
-              const disabled = f === "Nearby" && !near;
               return (
                 <TouchableOpacity
                   key={f}
-                  onPress={() => !disabled && setTrailCategory(f)}
-                  disabled={disabled}
+                  onPress={() => void selectTrailCategory(f)}
+                  disabled={false}
                   style={[
                     styles.catChip,
                     active && styles.catChipActive,
-                    disabled && { opacity: 0.4 },
                   ]}
                 >
                   <Text
@@ -306,7 +360,7 @@ export default function DiscoverTab() {
           </View>
           {trailCategory === "Nearby" && !near ? (
             <Text style={styles.helper}>
-              Enable location on the Map tab to use Nearby.
+              Tap Nearby to use your location.
             </Text>
           ) : null}
           {trailsQ.isLoading ? (
@@ -490,18 +544,22 @@ export default function DiscoverTab() {
 }
 
 function FeaturedRouteCard({
-  collection,
+  collection = null,
   fallback,
+  hint,
+  badge = "Community Route",
   onPress,
 }: {
-  collection: TrailCollection | null;
+  collection?: TrailCollection | null;
   fallback?: {
     name: string;
     region: string;
     total_distance_km: number | null;
-    difficulty_min: number;
-    difficulty_max: number;
+    difficulty_min?: number | null;
+    difficulty_max?: number | null;
   };
+  hint?: string;
+  badge?: string;
   onPress: () => void;
 }) {
   const name = collection?.name ?? fallback?.name ?? "Community route";
@@ -515,22 +573,24 @@ function FeaturedRouteCard({
       <View style={styles.featuredTop}>
         <Text style={styles.featuredTitle} numberOfLines={1}>{name}</Text>
         <View style={styles.communityBadge}>
-          <Text style={styles.communityBadgeText}>Community Route</Text>
+          <Text style={styles.communityBadgeText}>{badge}</Text>
         </View>
       </View>
       {region ? <Text style={styles.featuredRegion}>{region}</Text> : null}
       <View style={styles.featuredMeta}>
         {km != null ? (
           <Text style={styles.featuredMetaText}>{Math.round(km)} km total</Text>
-        ) : (
+        ) : badge === "Community Route" ? (
           <Text style={styles.featuredMetaText}>Distance after import</Text>
+        ) : (
+          <Text style={styles.featuredMetaText}>Download · import · ride</Text>
         )}
         {dMin != null && dMax != null ? (
-          <Text style={styles.featuredMetaText}>Grade {dMin}–{dMax}</Text>
+          <Text style={styles.featuredMetaText}>{gradeRangeLabel(dMin, dMax)}</Text>
         ) : null}
       </View>
       <Text style={styles.featuredHint}>
-        Trails associated with the {name}
+        {hint ?? `Trails associated with the ${name}`}
       </Text>
     </TouchableOpacity>
   );
@@ -602,13 +662,36 @@ function DiscoverableGroupRow({
 
 function RouteCard({ route }: { route: PublicRoute }) {
   return (
-    <Pressable style={styles.routeCard}>
+    <Pressable
+      style={styles.routeCard}
+      onPress={() =>
+        router.push({
+          pathname: "/routes/public/[routeId]",
+          params: { routeId: route.id },
+        } as never)
+      }
+    >
       <Text style={styles.routeName} numberOfLines={1}>
         {route.name}
       </Text>
-      <Text style={styles.rowMeta}>
-        {route.trail_count ?? 0} trails • ♥ {route.like_count ?? 0}
-      </Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+        <Text style={styles.rowMeta}>
+          {route.trailIds?.length ?? 0} sections • ♥ {route.likesCount ?? 0}
+        </Text>
+        {route.ownerName && route.userId ? (
+          <Pressable
+            onPress={(e) => {
+              e.stopPropagation?.();
+              router.push(`/profile/${encodeURIComponent(route.userId!)}` as never);
+            }}
+            hitSlop={8}
+          >
+            <Text style={styles.authorLink}>by {route.ownerName}</Text>
+          </Pressable>
+        ) : route.ownerName ? (
+          <Text style={styles.rowMeta}> • {route.ownerName}</Text>
+        ) : null}
+      </View>
     </Pressable>
   );
 }
@@ -621,6 +704,13 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     fontSize: 14,
     marginBottom: 8,
+  },
+  sectionIntro: {
+    color: colors.light.mutedForeground,
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 10,
+    marginTop: -4,
   },
   featuredCard: {
     backgroundColor: colors.light.card,
@@ -688,6 +778,12 @@ const styles = StyleSheet.create({
   },
   rowTitle: { color: colors.light.foreground, fontWeight: "600" },
   rowMeta: { color: colors.light.mutedForeground, fontSize: 12, marginTop: 2 },
+  authorLink: {
+    color: colors.light.primary,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 2,
+  },
   emptyText: { color: colors.light.mutedForeground, fontSize: 13 },
   createGroupRow: { flexDirection: "row", gap: 8, marginTop: 6 },
   input: {

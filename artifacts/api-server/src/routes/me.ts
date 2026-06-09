@@ -12,6 +12,10 @@ import {
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { isMissingTableError, isMissingColumnError } from "../lib/dbErrors";
 import {
+  getUserIsPremium,
+  PREMIUM_PUBLISH_ROUTE_ERROR,
+} from "../lib/tierPolicy";
+import {
   PLANNER_MAX_TRAILS,
   PLANNER_MAX_WAYPOINTS,
   PLANNER_MAX_ENTRIES,
@@ -182,6 +186,7 @@ router.post("/me/sync", async (req: Request, res: Response) => {
 
 const PatchPreferencesBody = z.object({
   preferred_bike_type: z.enum(["all", "adventure", "trail", "enduro"]).optional(),
+  home_region: z.string().trim().min(1).max(80).nullable().optional(),
 });
 
 router.patch("/me/preferences", async (req: Request, res: Response) => {
@@ -200,6 +205,9 @@ router.patch("/me/preferences", async (req: Request, res: Response) => {
   const updates: Record<string, unknown> = {};
   if (parsed.data.preferred_bike_type !== undefined) {
     updates.preferred_bike_type = parsed.data.preferred_bike_type;
+  }
+  if (parsed.data.home_region !== undefined) {
+    updates.home_region = parsed.data.home_region;
   }
   if (Object.keys(updates).length === 0) {
     res.status(400).json({ error: "No recognised preference fields supplied" });
@@ -1624,6 +1632,8 @@ router.post("/me/saved-routes", async (req: Request, res: Response) => {
 
   try {
     const supa = getSupabaseAdmin();
+    const isPremium = await getUserIsPremium(supa, auth.userId);
+    const routeIsPublic = isPremium && parsed.data.isPublic === true;
 
     const { count, error: countErr } = await supa
       .from("saved_routes")
@@ -1663,7 +1673,7 @@ router.post("/me/saved-routes", async (req: Request, res: Response) => {
       description: parsed.data.description?.trim() || null,
       ride_type: parsed.data.rideType ?? null,
       region,
-      is_public: parsed.data.isPublic === true,
+      is_public: routeIsPublic,
       trail_ids: trailIds,
       waypoints,
       entry_order: entryOrder,
@@ -1790,6 +1800,11 @@ router.put("/me/saved-routes/:id", async (req: Request, res: Response) => {
 
   try {
     const supa = getSupabaseAdmin();
+    const isPremium = await getUserIsPremium(supa, auth.userId);
+    if (!isPremium && parsed.data.isPublic === true) {
+      res.status(403).json({ error: PREMIUM_PUBLISH_ROUTE_ERROR });
+      return;
+    }
 
     let region: string | null = parsed.data.region ?? null;
     if (region == null && trailIds.length > 0) {
@@ -1824,7 +1839,7 @@ router.put("/me/saved-routes/:id", async (req: Request, res: Response) => {
       updateRow.ride_type = parsed.data.rideType ?? null;
     }
     if (parsed.data.isPublic !== undefined) {
-      updateRow.is_public = parsed.data.isPublic === true;
+      updateRow.is_public = isPremium && parsed.data.isPublic === true;
     }
 
     const { data, error } = await supa
@@ -1891,6 +1906,12 @@ router.patch("/me/saved-routes/:id", async (req: Request, res: Response) => {
 
   try {
     const supa = getSupabaseAdmin();
+    const isPremium = await getUserIsPremium(supa, auth.userId);
+
+    if (!isPremium && parsed.data.isPublic === true) {
+      res.status(403).json({ error: PREMIUM_PUBLISH_ROUTE_ERROR });
+      return;
+    }
 
     if (parsed.data.isPublic === true) {
       const { data: existing } = await supa
@@ -1940,7 +1961,7 @@ router.patch("/me/saved-routes/:id", async (req: Request, res: Response) => {
       updateRow.region = parsed.data.region ?? null;
     }
     if (parsed.data.isPublic !== undefined) {
-      updateRow.is_public = parsed.data.isPublic === true;
+      updateRow.is_public = isPremium && parsed.data.isPublic === true;
     }
 
     const { data, error } = await supa

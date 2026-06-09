@@ -57,6 +57,8 @@ export interface PlannerState {
   roadDistanceKm: number | null;
   routeReady: boolean;
   isRebuildingRoute: boolean;
+  /** Open the route actions sheet once route geometry is ready (saved draft reload). */
+  pendingRouteActionsOpen: boolean;
 }
 
 const DEFAULT_STATE: PlannerState = {
@@ -81,6 +83,7 @@ const DEFAULT_STATE: PlannerState = {
   roadDistanceKm: null,
   routeReady: false,
   isRebuildingRoute: false,
+  pendingRouteActionsOpen: false,
 };
 
 // ── Module-level state + listeners ───────────────────────────────────────────
@@ -214,6 +217,12 @@ export const plannerActions = {
   setRebuildingRoute(isRebuildingRoute: boolean) {
     _setState({ isRebuildingRoute });
   },
+  requestOpenRouteActions() {
+    _setState({ pendingRouteActionsOpen: true });
+  },
+  clearPendingRouteActionsOpen() {
+    _setState({ pendingRouteActionsOpen: false });
+  },
   endMapPlanning() {
     _setState({
       mapMode: "idle",
@@ -224,6 +233,7 @@ export const plannerActions = {
       roadDistanceKm: null,
       routeReady: false,
       isRebuildingRoute: false,
+      pendingRouteActionsOpen: false,
     });
   },
   reset() {

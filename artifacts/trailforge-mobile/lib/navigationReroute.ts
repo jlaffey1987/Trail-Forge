@@ -11,15 +11,19 @@
  * from the stored polyline (GPS noise, multiple lines).
  */
 
+import { OSRM_BASE } from "@/lib/appConfig";
+import { haversineLatLng as haversineM } from "./geo";
+
+export { haversineLatLng as haversineM, bearingDeg } from "./geo";
+
 export const OFF_ROUTE_THRESHOLD_M = 50;
 export const REROUTE_COOLDOWN_MS = 10_000;
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-// OSRM public demo server — suitable for development / low-volume use.
-const OSRM_BASE = "https://router.project-osrm.org";
-
-import { haversineLatLng as haversineM } from "./geo";
-export { haversineLatLng as haversineM, bearingDeg } from "./geo";
+/** Road routing API — set EXPO_PUBLIC_OSRM_BASE_URL for production. */
+export function getOsrmBaseUrl(): string {
+  return OSRM_BASE;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -161,6 +165,16 @@ export interface RoadRouteResult {
   polyline: NavLatLng[];
   distanceM: number;
   durationS: number;
+  /** Turn-by-turn steps when OSRM returns them. */
+  steps: RoadRouteStep[];
+}
+
+export interface RoadRouteStep {
+  instruction: string;
+  shortInstruction: string;
+  distanceM: number;
+  location: NavLatLng;
+  icon: "straight" | "turn-left" | "turn-right" | "u-turn";
 }
 
 export interface RoadRouteError {
@@ -169,6 +183,50 @@ export interface RoadRouteError {
 }
 
 export type RoadRouteResponse = RoadRouteResult | RoadRouteError;
+
+function osrmManeuverIcon(type?: string, modifier?: string): RoadRouteStep["icon"] {
+  const m = `${modifier ?? ""} ${type ?? ""}`.toLowerCase();
+  if (m.includes("uturn") || m.includes("u-turn")) return "u-turn";
+  if (m.includes("left") || m.includes("slight left") || m.includes("sharp left")) return "turn-left";
+  if (m.includes("right") || m.includes("slight right") || m.includes("sharp right")) return "turn-right";
+  return "straight";
+}
+
+function parseOsrmSteps(
+  legs: Array<{
+    steps?: Array<{
+      maneuver: { type?: string; modifier?: string; location: [number, number] };
+      name?: string;
+      distance: number;
+    }>;
+  }>,
+): RoadRouteStep[] {
+  const out: RoadRouteStep[] = [];
+  for (const leg of legs) {
+    for (const step of leg.steps ?? []) {
+      const name = step.name?.trim();
+      const type = step.maneuver.type ?? "continue";
+      const mod = step.maneuver.modifier ?? "";
+      const label =
+        mod && mod !== "straight"
+          ? `${mod.replace(/^\w/, (c) => c.toUpperCase())}${name ? ` onto ${name}` : ""}`
+          : name
+            ? `Continue on ${name}`
+            : "Continue";
+      out.push({
+        instruction: label,
+        shortInstruction: label.split(" onto ")[0] ?? label,
+        distanceM: step.distance,
+        location: {
+          latitude: step.maneuver.location[1],
+          longitude: step.maneuver.location[0],
+        },
+        icon: osrmManeuverIcon(type, mod),
+      });
+    }
+  }
+  return out;
+}
 
 export async function fetchRoadRoute(
   from: NavLatLng,
@@ -186,7 +244,7 @@ export async function fetchRoadRouteViaWaypoints(
     return { ok: false, error: "Need at least two points" };
   }
   const coords = points.map((p) => `${p.longitude},${p.latitude}`).join(";");
-  const url = `${OSRM_BASE}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+  const url = `${getOsrmBaseUrl()}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=true`;
 
   try {
     const res = await fetch(url, { signal });
@@ -197,6 +255,13 @@ export async function fetchRoadRouteViaWaypoints(
         geometry: { coordinates: [number, number][] };
         distance: number;
         duration: number;
+        legs?: Array<{
+          steps?: Array<{
+            maneuver: { type?: string; modifier?: string; location: [number, number] };
+            name?: string;
+            distance: number;
+          }>;
+        }>;
       }>;
     };
     if (json.code !== "Ok" || !json.routes?.[0]) {
@@ -208,6 +273,7 @@ export async function fetchRoadRouteViaWaypoints(
       polyline: r.geometry.coordinates.map(([lon, lat]) => ({ latitude: lat, longitude: lon })),
       distanceM: r.distance,
       durationS: r.duration,
+      steps: parseOsrmSteps(r.legs ?? []),
     };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
@@ -215,7 +281,7 @@ export async function fetchRoadRouteViaWaypoints(
     }
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "OSRM request failed",
+      error: "Road routing is unavailable right now. Check your connection or try again.",
     };
   }
 }

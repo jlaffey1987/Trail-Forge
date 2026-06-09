@@ -3,7 +3,7 @@
  */
 import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -18,6 +18,8 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import colors from "@/constants/colors";
+import { useProfile } from "@/components/ProfileContext";
+import { UpgradePrompt } from "@/components/UpgradePrompt";
 import { apiJson } from "@/lib/api";
 import { exportGpxFile, trailsToGpxInput, type GpxDevice } from "@/lib/gpxExport";
 import {
@@ -26,6 +28,11 @@ import {
   toggleTrailOnRoute,
 } from "@/lib/plannerMapSession";
 import { setActiveNavRoute } from "@/lib/activeNavRoute";
+import {
+  canExportRouteGpx,
+  canNavigate,
+  canSaveRouteDraft,
+} from "@/lib/tierPolicy";
 import {
   getPlannerState,
   plannerActions,
@@ -36,9 +43,17 @@ const AMBER = colors.light.primary;
 
 export function PlannerMapChrome() {
   const planner = usePlannerStore();
+  const { profile } = useProfile();
   const insets = useSafeAreaInsets();
   const [actionsOpen, setActionsOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
+
+  useEffect(() => {
+    if (!planner.pendingRouteActionsOpen || !planner.routeReady) return;
+    setActionsOpen(true);
+    plannerActions.clearPendingRouteActionsOpen();
+  }, [planner.pendingRouteActionsOpen, planner.routeReady]);
 
   if (planner.mapMode !== "planning" || !planner.from || !planner.to) {
     return null;
@@ -56,8 +71,14 @@ export function PlannerMapChrome() {
     }
   }
 
+  const isPremium = profile.isPremium;
+
   async function handleRide() {
     if (!planner.from || !planner.to) return;
+    if (!canNavigate(isPremium)) {
+      setUpgradeVisible(true);
+      return;
+    }
     setActiveNavRoute({
       from: {
         latitude: planner.from.lat,
@@ -84,6 +105,7 @@ export function PlannerMapChrome() {
   }
 
   async function handleSaveRoute() {
+    if (!canSaveRouteDraft()) return;
     setBusy("save");
     try {
       const name =
@@ -94,6 +116,7 @@ export function PlannerMapChrome() {
         body: JSON.stringify({
           name,
           trailIds: planner.activeTrailIds,
+          isPublic: false,
           waypoints: [
             { id: "from", lat: planner.from!.lat, lon: planner.from!.lon, label: planner.from!.address },
             { id: "to", lat: planner.to!.lat, lon: planner.to!.lon, label: planner.to!.address },
@@ -101,7 +124,12 @@ export function PlannerMapChrome() {
         }),
       });
       plannerActions.setSavedRouteName(name);
-      Alert.alert("Saved", `"${name}" added to My Routes.`);
+      Alert.alert(
+        "Draft saved",
+        isPremium
+          ? `"${name}" is in My Routes.`
+          : `"${name}" is saved as your draft. Upgrade to Premium for turn-by-turn navigation and GPX export.`,
+      );
     } catch (e) {
       Alert.alert("Save failed", e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -110,6 +138,10 @@ export function PlannerMapChrome() {
   }
 
   async function handleExport(device: GpxDevice) {
+    if (!canExportRouteGpx(isPremium)) {
+      setUpgradeVisible(true);
+      return;
+    }
     setBusy("export");
     try {
       const name =
@@ -174,8 +206,8 @@ export function PlannerMapChrome() {
             <ActivityIndicator color="#1a0e05" />
           ) : (
             <>
-              <Feather name="navigation" size={16} color="#1a0e05" />
-              <Text style={s.buildText}>Build route</Text>
+              <Feather name="map" size={16} color="#1a0e05" />
+              <Text style={s.buildText}>Review route</Text>
             </>
           )}
         </TouchableOpacity>
@@ -185,26 +217,47 @@ export function PlannerMapChrome() {
         <Pressable style={s.modalBackdrop} onPress={() => setActionsOpen(false)}>
           <Pressable style={[s.modalSheet, { paddingBottom: Math.max(insets.bottom, 20) }]}>
             <Text style={s.modalTitle}>Your route is ready</Text>
-            <ActionRow icon="play" label="Ride this route" onPress={() => void handleRide()} />
+            {!isPremium ? (
+              <Text style={s.modalHint}>
+                Save your draft free. Navigation and GPX export need Premium.
+              </Text>
+            ) : null}
+            <ActionRow
+              icon="play"
+              label="Start navigation"
+              locked={!isPremium}
+              onPress={() => void handleRide()}
+            />
             <ActionRow
               icon="save"
-              label="Save to My Routes"
+              label="Save draft to My Routes"
               loading={busy === "save"}
               onPress={() => void handleSaveRoute()}
             />
             <ActionRow
               icon="download"
-              label="Download GPX (Garmin inReach)"
+              label="Export GPX (Garmin inReach)"
+              locked={!isPremium}
               loading={busy === "export"}
               onPress={() => void handleExport("garminInreach")}
             />
-            <ActionRow icon="smartphone" label="Download GPX (generic)" onPress={() => void handleExport("generic")} />
+            <ActionRow
+              icon="smartphone"
+              label="Export GPX (generic)"
+              locked={!isPremium}
+              onPress={() => void handleExport("generic")}
+            />
             <TouchableOpacity style={s.dismissBtn} onPress={() => setActionsOpen(false)}>
               <Text style={s.dismissText}>Close</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
       </Modal>
+      <UpgradePrompt
+        visible={upgradeVisible}
+        featureName="Turn-by-turn navigation"
+        onDismiss={() => setUpgradeVisible(false)}
+      />
     </>
   );
 }
@@ -214,16 +267,19 @@ function ActionRow({
   label,
   onPress,
   loading,
+  locked,
 }: {
   icon: React.ComponentProps<typeof Feather>["name"];
   label: string;
   onPress: () => void;
   loading?: boolean;
+  locked?: boolean;
 }) {
   return (
     <TouchableOpacity style={s.actionRow} onPress={onPress} disabled={loading}>
-      <Feather name={icon} size={18} color={AMBER} />
-      <Text style={s.actionText}>{label}</Text>
+      <Feather name={icon} size={18} color={locked ? "#78716c" : AMBER} />
+      <Text style={[s.actionText, locked && { color: colors.light.mutedForeground }]}>{label}</Text>
+      {locked ? <Feather name="lock" size={14} color="#78716c" /> : null}
       {loading ? <ActivityIndicator size="small" color={AMBER} /> : null}
     </TouchableOpacity>
   );
@@ -283,7 +339,13 @@ const s = StyleSheet.create({
     borderTopRightRadius: 20,
     padding: 20,
   },
-  modalTitle: { color: colors.light.foreground, fontSize: 18, fontWeight: "900", marginBottom: 16 },
+  modalTitle: { color: colors.light.foreground, fontSize: 18, fontWeight: "900", marginBottom: 8 },
+  modalHint: {
+    color: colors.light.mutedForeground,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
   actionRow: {
     flexDirection: "row",
     alignItems: "center",

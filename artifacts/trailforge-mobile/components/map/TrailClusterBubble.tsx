@@ -14,6 +14,8 @@ export interface TrailClusterRenderProps {
   onPress: () => void;
   /** Supercluster leaf grades for difficulty-coloured bubbles. */
   leafGrades?: Array<number | null | undefined>;
+  /** Required on Android so count text paints on custom marker views. */
+  tracksViewChanges?: boolean;
 }
 
 function TrailClusterBubble({
@@ -21,6 +23,7 @@ function TrailClusterBubble({
   properties,
   onPress,
   leafGrades = [],
+  tracksViewChanges = false,
 }: TrailClusterRenderProps) {
   const count = properties.point_count;
   const { outer, inner, fontSize } = clusterBubbleSize(count);
@@ -33,7 +36,7 @@ function TrailClusterBubble({
         latitude: geometry.coordinates[1],
       }}
       anchor={{ x: 0.5, y: 0.5 }}
-      tracksViewChanges={false}
+      tracksViewChanges={tracksViewChanges}
       onPress={onPress}
       zIndex={count}
     >

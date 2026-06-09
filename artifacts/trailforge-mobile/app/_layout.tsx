@@ -260,8 +260,13 @@ function RootLayoutNav() {
       <Stack.Screen name="linesman" options={{ headerShown: false, animation: "slide_from_right" }} />
       <Stack.Screen name="intro"    options={{ headerShown: false, animation: "fade" }} />
       <Stack.Screen name="rate"         options={{ title: "Rate Trail", presentation: "modal" }} />
+      <Stack.Screen name="membership" options={{ headerShown: false }} />
+      <Stack.Screen name="profile" options={{ headerShown: false }} />
       <Stack.Screen name="route-wizard" options={{ title: "Route Builder", headerShown: false }} />
       <Stack.Screen name="routes/tnt" options={{ title: "Trans Northern Trail", headerShown: false }} />
+      <Stack.Screen name="routes/trans-euro-trail" options={{ title: "Trans Euro Trail", headerShown: false }} />
+      <Stack.Screen name="routes/collection/[collectionId]" options={{ headerShown: false }} />
+      <Stack.Screen name="routes/public/[routeId]" options={{ headerShown: false }} />
     </Stack>
   );
 }

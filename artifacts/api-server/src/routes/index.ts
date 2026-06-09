@@ -13,6 +13,7 @@ import geocodeRouter from "./geocode";
 import adminRouter from "./admin";
 import conditionsRouter from "./conditions";
 import leaderboardRouter from "./leaderboard";
+import profilesRouter from "./profiles";
 import linesmanRouter from "./linesman";
 import ratingsRouter from "./ratings";
 
@@ -32,6 +33,7 @@ router.use(geocodeRouter);
 router.use(adminRouter);
 router.use(conditionsRouter);
 router.use(leaderboardRouter);
+router.use(profilesRouter);
 router.use(linesmanRouter);
 router.use(ratingsRouter);
 

@@ -139,7 +139,7 @@ export default function AddTrailScreen() {
           <Text style={s.title}>Add a trail</Text>
           <Text style={s.sub}>
             Record while you ride, draw on the map, or upload a GPX file.
-            Save as personal, public, or share with a group.
+            Free accounts share new trails with the community; Premium can keep trails personal or in a group.
           </Text>
 
           <TouchableOpacity

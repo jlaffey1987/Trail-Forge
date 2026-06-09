@@ -3,6 +3,10 @@ import { getAuth } from "@clerk/express";
 import { z } from "zod";
 import { getSupabaseAdmin } from "../lib/supabaseAdmin";
 import { isMissingTableError } from "../lib/dbErrors";
+import {
+  applyCompletionAdded,
+  applyCompletionRemoved,
+} from "../lib/riderStats";
 
 const router: IRouter = Router();
 
@@ -113,6 +117,14 @@ router.post("/me/completions", async (req: Request, res: Response) => {
       return;
     }
 
+    const { data: existing } = await supa
+      .from("trail_completions")
+      .select("id")
+      .eq("user_id", auth.userId)
+      .eq("trail_id", trailId)
+      .maybeSingle();
+    const isNew = !existing;
+
     const row: Record<string, unknown> = {
       user_id: auth.userId,
       trail_id: trailId,
@@ -151,7 +163,22 @@ router.post("/me/completions", async (req: Request, res: Response) => {
       res.status(500).json({ error: "Failed to mark trail as ridden" });
       return;
     }
-    res.json({ ok: true });
+
+    let gamification: Awaited<ReturnType<typeof applyCompletionAdded>> = null;
+    if (isNew) {
+      try {
+        gamification = await applyCompletionAdded(supa, auth.userId, trailId);
+      } catch (gamErr) {
+        req.log.warn({ err: gamErr }, "completion gamification update failed");
+      }
+    }
+
+    res.json({
+      ok: true,
+      isNew,
+      stats: gamification?.stats ?? null,
+      newAchievements: gamification?.newAchievements ?? [],
+    });
   } catch (err) {
     req.log.error({ err }, "mark completion failed");
     res.status(500).json({ error: "Failed to mark trail as ridden" });
@@ -173,6 +200,14 @@ router.delete(
     }
     try {
       const supa = getSupabaseAdmin();
+
+      const { data: existing } = await supa
+        .from("trail_completions")
+        .select("id")
+        .eq("user_id", auth.userId)
+        .eq("trail_id", trailId)
+        .maybeSingle();
+
       const { error } = await supa
         .from("trail_completions")
         .delete()
@@ -190,7 +225,20 @@ router.delete(
         res.status(500).json({ error: "Failed to remove completion" });
         return;
       }
-      res.json({ ok: true });
+
+      let gamification: Awaited<ReturnType<typeof applyCompletionRemoved>> = null;
+      if (existing) {
+        try {
+          gamification = await applyCompletionRemoved(supa, auth.userId, trailId);
+        } catch (gamErr) {
+          req.log.warn({ err: gamErr }, "completion gamification rollback failed");
+        }
+      }
+
+      res.json({
+        ok: true,
+        stats: gamification?.stats ?? null,
+      });
     } catch (err) {
       req.log.error({ err }, "unmark completion failed");
       res.status(500).json({ error: "Failed to remove completion" });

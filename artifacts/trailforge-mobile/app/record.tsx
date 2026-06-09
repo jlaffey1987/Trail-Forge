@@ -30,11 +30,13 @@ import MapView, {
 } from "react-native-maps";
 
 import colors from "@/constants/colors";
+import { useProfile } from "@/components/ProfileContext";
+import { createTrailFromRide, listMyGroups, type Group } from "@/lib/api";
 import {
-  createTrailFromRide,
-  listMyGroups,
-  type Group,
-} from "@/lib/api";
+  allowedTrailVisibilities,
+  defaultTrailVisibility,
+  type TrailVisibility,
+} from "@/lib/tierPolicy";
 import { haversineMeters } from "@/lib/geo";
 import {
   isRecording,
@@ -46,9 +48,7 @@ import {
   type RideStats,
 } from "@/lib/recording";
 
-type Visibility = "private" | "public" | "group";
-
-const VISIBILITY_LABELS: Record<Visibility, string> = {
+const VISIBILITY_LABELS: Record<TrailVisibility, string> = {
   private: "Personal only",
   public: "Public",
   group: "Private group",
@@ -302,12 +302,19 @@ function SaveRidePanel({
   ride: { points: RidePoint[]; stats: RideStats };
   onDone: () => void;
 }) {
+  const { profile } = useProfile();
+  const isPremium = profile.isPremium;
+  const visibilityChoices = (["private", "public", "group"] as TrailVisibility[]).filter((v) =>
+    allowedTrailVisibilities(isPremium).includes(v),
+  );
   const total = ride.points.length;
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(total - 1);
   const [name, setName] = useState("");
   const [grade, setGrade] = useState<number | null>(null);
-  const [visibility, setVisibility] = useState<Visibility>("private");
+  const [visibility, setVisibility] = useState<TrailVisibility>(() =>
+    defaultTrailVisibility(isPremium),
+  );
   const [groupId, setGroupId] = useState<string | null>(null);
 
   const groupsQ = useQuery({
@@ -461,9 +468,14 @@ function SaveRidePanel({
           "Extreme — hard enduro only"}
       </Text>
 
-      <Text style={styles.fieldLabel}>Visibility</Text>
+      <Text style={styles.fieldLabel}>Who can see this trail?</Text>
+      {!isPremium ? (
+        <Text style={styles.helper}>
+          Free accounts publish new trails to the community map. Upgrade for personal-only or group trails.
+        </Text>
+      ) : null}
       <View style={styles.row}>
-        {(["private", "public", "group"] as Visibility[]).map((v) => (
+        {visibilityChoices.map((v) => (
           <Pressable
             key={v}
             onPress={() => setVisibility(v)}

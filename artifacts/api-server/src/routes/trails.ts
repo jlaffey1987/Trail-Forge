@@ -9,6 +9,12 @@ import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage"
 import { mintGpxUploadTicket, consumeGpxUploadTicket } from "../lib/uploadTickets";
 import { notifyTrailShared, notifyTrailUnshared } from "../lib/pushNotifications";
 import { logger } from "../lib/logger";
+import {
+  freeUserTrailCreateBlocked,
+  freeUserTrailUpdateBlocked,
+  getUserIsPremium,
+  PREMIUM_TRAIL_VISIBILITY_ERROR,
+} from "../lib/tierPolicy";
 
 const objectStorage = new ObjectStorageService();
 
@@ -593,18 +599,27 @@ router.post("/trails", async (req: Request, res: Response) => {
     ? Array.from(new Set(extras.data.group_ids))
     : [];
 
-  // Validate group memberships BEFORE creating the trail so an invalid
-  // request never leaves an orphan row behind.
-  if (groupIds.length > 0) {
-    const missing = await findMissingGroupMemberships(groupIds, auth.userId);
-    if (missing.length > 0) {
-      res.status(403).json({ error: "Cannot share into a group you don't belong to" });
-      return;
-    }
-  }
-
   try {
     const supa = getSupabaseAdmin();
+    const isPremium = await getUserIsPremium(supa, auth.userId);
+    if (!isPremium) {
+      if (freeUserTrailCreateBlocked({ privacy: extras.data.privacy, groupIds })) {
+        res.status(403).json({ error: PREMIUM_TRAIL_VISIBILITY_ERROR });
+        return;
+      }
+      isPublic = true;
+    }
+
+    // Validate group memberships BEFORE creating the trail so an invalid
+    // request never leaves an orphan row behind.
+    if (groupIds.length > 0) {
+      const missing = await findMissingGroupMemberships(groupIds, auth.userId);
+      if (missing.length > 0) {
+        res.status(403).json({ error: "Cannot share into a group you don't belong to" });
+        return;
+      }
+    }
+
     const insert: Record<string, unknown> = {
       ...data,
       is_public: isPublic,
@@ -796,6 +811,20 @@ router.patch(
       return;
     }
 
+    const supa = getSupabaseAdmin();
+    const isPremium = await getUserIsPremium(supa, userId);
+    if (
+      !isPremium
+      && freeUserTrailUpdateBlocked({
+        privacy: parsed.data.privacy,
+        isPublic: parsed.data.is_public,
+        groupIds: parsed.data.group_ids,
+      })
+    ) {
+      res.status(403).json({ error: PREMIUM_TRAIL_VISIBILITY_ERROR });
+      return;
+    }
+
     // See POST /trails for the privacy → is_public mapping. "group" privacy
     // keeps the trail row private and lets `group_ids` (when supplied) drive
     // the matching `trail_shares` rows. Shares are reconciled BEFORE the
@@ -808,8 +837,6 @@ router.patch(
     else if (parsed.data.privacy === "group") update.is_public = false;
     delete update.privacy;
     delete update.group_ids;
-
-    const supa = getSupabaseAdmin();
 
     // Reconcile shares first if the caller passed an explicit `group_ids`
     // list (and / or moved away from privacy=group). Both POST and PATCH

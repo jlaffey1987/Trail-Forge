@@ -13,9 +13,13 @@
  *   4. Camera helpers    — heading-up offset centre for bottom-third positioning
  */
 
-import { haversineM, bearingDeg, type NavLatLng } from "./navigationReroute";
+import { haversineM, bearingDeg, fetchRoadRoute, type NavLatLng, type RoadRouteStep } from "./navigationReroute";
 import { gradeFromDifficulty, type TrailDifficulty } from "./trailColors";
 import { trailMapCoordinates, type TrailPathSource } from "./geo";
+import { closestPointOnSegment, pathLengthM } from "./polylineSnap";
+
+/** Minimum gap (m) before inserting a road connector between legs. */
+export const ROAD_CONNECT_THRESHOLD_M = 80;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,12 +34,29 @@ export interface NavTrailInput {
   path?: unknown;
   path_geojson?: { type: string; coordinates: Array<[number, number]> } | null;
   simplified_path?: string | null;
+  /** Pre-trimmed path (e.g. mid-section TNT join). Takes precedence over trail geometry. */
+  pathOverride?: NavLatLng[];
+}
+
+/** Explicit ordered leg — trail or road — for collection routes like TNT. */
+export interface NavRouteLeg {
+  kind: NavSectionKind;
+  id: string;
+  name: string;
+  path: NavLatLng[];
+  difficulty?: TrailDifficulty;
+  grade?: number | null;
+  /** Road leg inserted to bypass a filtered trail section. */
+  isBypass?: boolean;
 }
 
 export interface NavRouteInput {
   from: NavLatLng & { label: string };
   to: NavLatLng & { label: string };
-  trails: NavTrailInput[];
+  /** Legacy: trail-only list with auto road connectors. */
+  trails?: NavTrailInput[];
+  /** Preferred: fully ordered legs including TNT road links and bypasses. */
+  legs?: NavRouteLeg[];
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +96,8 @@ export interface NavSection {
   distanceM: number;
   /** Cumulative distance from route START to end of this section. */
   cumulativeDistanceM: number;
+  /** OSRM turn-by-turn for road sections. */
+  osrmSteps?: RoadRouteStep[];
 }
 
 export interface NavRoute {
@@ -87,6 +110,8 @@ export interface NavRoute {
   polylineSection: number[];
   totalDistanceM: number;
   instructions: NavInstruction[];
+  /** Some road legs used straight-line fallback (OSRM unavailable). */
+  routingDegraded?: boolean;
 }
 
 export interface NavProgress {
@@ -110,111 +135,203 @@ export interface NavProgress {
 // Route builder
 // ---------------------------------------------------------------------------
 
-function parseTrailPath(trail: TrailPathSource): NavLatLng[] {
+function parseTrailPath(trail: TrailPathSource & { pathOverride?: NavLatLng[] }): NavLatLng[] {
+  if (trail.pathOverride?.length) return trail.pathOverride;
   return trailMapCoordinates(trail);
 }
 
 function polylineLength(pts: NavLatLng[]): number {
-  let d = 0;
-  for (let i = 1; i < pts.length; i++) d += haversineM(pts[i - 1], pts[i]);
-  return d;
+  return pathLengthM(pts);
 }
 
-/**
- * Build a navigable route from planner data.
- *
- * Road "connector" sections are inserted between the FROM endpoint → first
- * trail, between trails, and from the last trail → TO endpoint. These are
- * straight lines (no OSRM on the critical path at build time); OSRM road
- * polylines can be spliced in later via reroute.
- */
-export function buildNavRoute(input: NavRouteInput): NavRoute {
-  const sections: NavSection[] = [];
-  let cumulative = 0;
+/** Orient a trail path so the nearest endpoint to `approach` is the entry. */
+export function orientTrailPath(path: NavLatLng[], approach: NavLatLng): NavLatLng[] {
+  if (path.length <= 1) return path;
+  const first = path[0];
+  const last = path[path.length - 1];
+  const dFirst = haversineM(approach, first);
+  const dLast = haversineM(approach, last);
+  return dFirst <= dLast ? path : [...path].reverse();
+}
 
-  // Helper: road connector between two points.
-  function addRoadSection(
-    id: string,
-    name: string,
-    from: NavLatLng,
-    to: NavLatLng,
-  ) {
-    const path = [from, to];
-    const distanceM = haversineM(from, to);
-    cumulative += distanceM;
-    sections.push({ kind: "road", id, name, path, distanceM, cumulativeDistanceM: cumulative });
-  }
-
-  // Helper: trail section from path data.
-  function addTrailSection(trail: NavTrailInput) {
-    const path = parseTrailPath(trail);
-    if (path.length < 2) {
-      // Trail has no path data — treat as a road connector between its
-      // implied start/end (same point if no coords).
-      return;
-    }
-    const distanceM = polylineLength(path);
-    cumulative += distanceM;
-    sections.push({
-      kind: "trail",
-      id: trail.id,
-      name: trail.name,
-      grade: gradeFromDifficulty(trail.difficulty),
-      path,
-      distanceM,
-      cumulativeDistanceM: cumulative,
-    });
-  }
-
-  // From → first trail (or direct to destination if no trails).
-  if (input.trails.length === 0) {
-    addRoadSection("road-direct", "Proceed to destination", input.from, input.to);
-  } else {
-    const firstPath = parseTrailPath(input.trails[0]);
-    const firstEntry = firstPath[0] ?? input.to;
-    addRoadSection("road-0", `Head to ${input.trails[0].name}`, input.from, firstEntry);
-
-    for (let i = 0; i < input.trails.length; i++) {
-      addTrailSection(input.trails[i]);
-
-      // Inter-trail connector: exit of trail[i] → entry of trail[i+1]
-      if (i < input.trails.length - 1) {
-        const currPath = parseTrailPath(input.trails[i]);
-        const nextPath = parseTrailPath(input.trails[i + 1]);
-        const from_ = currPath[currPath.length - 1] ?? input.from;
-        const to_ = nextPath[0] ?? input.to;
-        addRoadSection(
-          `road-${i + 1}`,
-          `Head to ${input.trails[i + 1].name}`,
-          from_,
-          to_,
-        );
-      }
-    }
-
-    // Last trail → destination.
-    const lastPath = parseTrailPath(input.trails[input.trails.length - 1]);
-    const lastExit = lastPath[lastPath.length - 1] ?? input.from;
-    addRoadSection("road-final", "Continue to destination", lastExit, input.to);
-  }
-
-  // Build flat polyline + section index mapping.
+function finalizeNavRoute(
+  from: NavRouteInput["from"],
+  to: NavRouteInput["to"],
+  sections: NavSection[],
+): NavRoute {
   const polyline: NavLatLng[] = [];
   const polylineSection: number[] = [];
   for (let si = 0; si < sections.length; si++) {
-    const sec = sections[si];
-    for (const pt of sec.path) {
+    for (const pt of sections[si].path) {
       polyline.push(pt);
       polylineSection.push(si);
     }
   }
-
-  const totalDistanceM = cumulative;
-
-  // Build instruction list.
+  const totalDistanceM = sections.length
+    ? sections[sections.length - 1].cumulativeDistanceM
+    : 0;
   const instructions = buildInstructions(sections, totalDistanceM);
+  return { from, to, sections, polyline, polylineSection, totalDistanceM, instructions };
+}
 
-  return { from: input.from, to: input.to, sections, polyline, polylineSection, totalDistanceM, instructions };
+function appendSection(
+  sections: NavSection[],
+  cumulative: { value: number },
+  sec: Omit<NavSection, "cumulativeDistanceM">,
+) {
+  cumulative.value += sec.distanceM;
+  sections.push({ ...sec, cumulativeDistanceM: cumulative.value });
+}
+
+/**
+ * Build a navigable route (straight-line road placeholders).
+ * Call {@link buildNavRouteAsync} to hydrate road legs via OSRM.
+ */
+export function buildNavRoute(input: NavRouteInput): NavRoute {
+  const sections: NavSection[] = [];
+  const cumulative = { value: 0 };
+  let approach: NavLatLng = input.from;
+
+  function addRoad(from: NavLatLng, to: NavLatLng, id: string, name: string) {
+    if (haversineM(from, to) < 15) {
+      approach = to;
+      return;
+    }
+    const path = [from, to];
+    appendSection(sections, cumulative, {
+      kind: "road",
+      id,
+      name,
+      path,
+      distanceM: haversineM(from, to),
+    });
+    approach = to;
+  }
+
+  function addLeg(leg: NavRouteLeg) {
+    if (leg.path.length < 2) return;
+    const entry = leg.path[0];
+    if (haversineM(approach, entry) >= ROAD_CONNECT_THRESHOLD_M) {
+      addRoad(
+        approach,
+        entry,
+        `road-to-${leg.id}`,
+        leg.kind === "trail" ? `Head to ${leg.name}` : leg.name,
+      );
+    } else {
+      approach = entry;
+    }
+    appendSection(sections, cumulative, {
+      kind: leg.kind,
+      id: leg.id,
+      name: leg.name,
+      grade: leg.grade ?? (leg.kind === "trail" ? leg.grade : undefined),
+      path: leg.path,
+      distanceM: polylineLength(leg.path),
+    });
+    approach = leg.path[leg.path.length - 1];
+  }
+
+  if (input.legs?.length) {
+    for (const leg of input.legs) addLeg(leg);
+  } else {
+    for (let i = 0; i < (input.trails ?? []).length; i++) {
+      const trail = input.trails![i];
+      const oriented = orientTrailPath(parseTrailPath(trail), approach);
+      if (oriented.length < 2) continue;
+      addLeg({
+        kind: "trail",
+        id: trail.id,
+        name: trail.name,
+        path: oriented,
+        grade: gradeFromDifficulty(trail.difficulty),
+      });
+    }
+  }
+
+  if (haversineM(approach, input.to) >= ROAD_CONNECT_THRESHOLD_M) {
+    addRoad(approach, input.to, "road-final", "Continue to destination");
+  }
+
+  if (sections.length === 0) {
+    addRoad(input.from, input.to, "road-direct", "Proceed to destination");
+  }
+
+  return finalizeNavRoute(input.from, input.to, sections);
+}
+
+/**
+ * Build route with OSRM road geometry for every road connector.
+ */
+export async function buildNavRouteAsync(
+  input: NavRouteInput,
+  signal?: AbortSignal,
+): Promise<NavRoute> {
+  const draft = buildNavRoute(input);
+  return hydrateRoadSections(draft, signal);
+}
+
+/** Replace straight road sections with OSRM geometry. */
+export async function hydrateRoadSections(
+  draft: NavRoute,
+  signal?: AbortSignal,
+): Promise<NavRoute> {
+  const roadIndices = draft.sections
+    .map((s, i) => (s.kind === "road" ? i : -1))
+    .filter((i) => i >= 0);
+
+  if (roadIndices.length === 0) return draft;
+
+  let routingDegraded = false;
+
+  const results = await Promise.all(
+    roadIndices.map(async (idx) => {
+      const sec = draft.sections[idx];
+      const from = sec.path[0];
+      const to = sec.path[sec.path.length - 1];
+      if (!from || !to || haversineM(from, to) < 25) {
+        return { idx, path: sec.path, distanceM: sec.distanceM };
+      }
+      const res = await fetchRoadRoute(from, to, signal);
+      if (res.ok && res.polyline.length >= 2) {
+        return {
+          idx,
+          path: res.polyline,
+          distanceM: res.distanceM,
+          osrmSteps: res.steps.length > 0 ? res.steps : undefined,
+        };
+      }
+      if (!res.ok) routingDegraded = true;
+      return { idx, path: sec.path, distanceM: sec.distanceM, osrmSteps: undefined };
+    }),
+  );
+
+  const sections = draft.sections.map((s) => ({ ...s }));
+  for (const { idx, path, distanceM, osrmSteps } of results) {
+    sections[idx] = { ...sections[idx], path, distanceM, osrmSteps };
+  }
+
+  let cum = 0;
+  const rebuilt = sections.map((sec) => {
+    cum += sec.distanceM;
+    return { ...sec, cumulativeDistanceM: cum };
+  });
+
+  return { ...finalizeNavRoute(draft.from, draft.to, rebuilt), routingDegraded };
+}
+
+/** Recompute polyline, instructions, and cumulative distances after section edits. */
+export function rebuildNavRouteFromSections(
+  from: NavRoute["from"],
+  to: NavRoute["to"],
+  sections: NavSection[],
+): NavRoute {
+  let cum = 0;
+  const rebuilt = sections.map((sec) => {
+    cum += sec.distanceM;
+    return { ...sec, cumulativeDistanceM: cum };
+  });
+  return finalizeNavRoute(from, to, rebuilt);
 }
 
 function buildInstructions(sections: NavSection[], totalDistanceM: number): NavInstruction[] {
@@ -240,10 +357,25 @@ function buildInstructions(sections: NavSection[], totalDistanceM: number): NavI
   for (let i = 0; i < sections.length; i++) {
     const sec = sections[i];
     const next = sections[i + 1];
+    const sectionStart = cumDist;
+
+    if (sec.kind === "road" && sec.osrmSteps?.length) {
+      let stepOffset = sectionStart;
+      for (const step of sec.osrmSteps) {
+        stepOffset += step.distanceM;
+        if (step.distanceM < 25) continue;
+        list.push({
+          text: step.instruction,
+          shortText: step.shortInstruction,
+          icon: step.icon as InstructionIcon,
+          triggerDistanceM: Math.min(stepOffset, totalDistanceM),
+        });
+      }
+    }
+
     cumDist += sec.distanceM;
 
     if (!next) {
-      // Arrival.
       list.push({
         text: "You have arrived at your destination",
         shortText: "Arriving",
@@ -277,11 +409,10 @@ function buildInstructions(sections: NavSection[], totalDistanceM: number): NavI
         triggerDistanceM: cumDist,
       });
     } else if (sec.kind === "road" && next.kind === "road") {
-      // Bearing change at the junction may warrant a turn instruction.
       const secEnd = sec.path[sec.path.length - 1];
       const nextStart = next.path[0];
       const nextSecond = next.path[1] ?? next.path[0];
-      if (secEnd && nextStart && nextSecond) {
+      if (!sec.osrmSteps?.length && secEnd && nextStart && nextSecond) {
         const bearing1 = bearingDeg(sec.path[sec.path.length > 1 ? sec.path.length - 2 : 0], secEnd);
         const bearing2 = bearingDeg(nextStart, nextSecond);
         const diff = ((bearing2 - bearing1 + 540) % 360) - 180;
@@ -310,6 +441,11 @@ function buildInstructions(sections: NavSection[], totalDistanceM: number): NavI
   }
 
   return list;
+}
+
+function findPolylineIndex(route: NavRoute, sectionIdx: number): number {
+  const idx = route.polylineSection.indexOf(sectionIdx);
+  return idx >= 0 ? idx : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,39 +478,40 @@ export function computeProgress(
     };
   }
 
-  // Find closest polyline segment — search in a window around the previous
-  // snapped index to avoid jumping backward.
-  const prevIdx = prevProgress ? Math.max(0, prevProgress.currentSectionIdx - 1) : 0;
-  const searchStart = Math.max(0, prevIdx - 5);
-  const searchEnd = Math.min(route.polyline.length - 2, route.polyline.length - 1);
+  // Find closest point on route polyline (segment-accurate snap).
+  const prevSegIdx = prevProgress?.currentSectionIdx ?? 0;
+  const prevSection = route.sections[prevSegIdx];
+  const searchFrom = Math.max(0, (prevProgress ? findPolylineIndex(route, prevSegIdx) : 0) - 20);
+  const searchTo = route.polyline.length - 2;
 
   let bestDist = Infinity;
-  let bestIdx = searchStart;
+  let bestIdx = searchFrom;
+  let bestAlong = 0;
+  let alongAccum = 0;
 
-  for (let i = searchStart; i <= searchEnd; i++) {
+  for (let i = 0; i < route.polyline.length - 1; i++) {
+    const segLen = haversineM(route.polyline[i], route.polyline[i + 1]);
+    if (i < searchFrom) {
+      alongAccum += segLen;
+      continue;
+    }
+    if (i > searchTo) break;
+
     const a = route.polyline[i];
     const b = route.polyline[i + 1];
-    if (!a || !b) continue;
-    // Quick equirectangular distance check before haversine.
-    const dx = (userPos.longitude - a.longitude) * 80;
-    const dy = (userPos.latitude - a.latitude) * 111;
-    const approx = dx * dx + dy * dy;
-    if (approx > bestDist * bestDist * 2) continue;
-
-    const d = haversineM(userPos, a);
+    const snapped = closestPointOnSegment(userPos, a, b);
+    const d = haversineM(userPos, snapped);
+    const alongHere = alongAccum + haversineM(a, snapped);
     if (d < bestDist) {
       bestDist = d;
       bestIdx = i;
+      bestAlong = alongHere;
     }
+    alongAccum += segLen;
   }
 
-  // Compute travelled distance = sum of polyline length up to bestIdx.
-  let travelled = 0;
-  for (let i = 0; i < bestIdx; i++) {
-    const a = route.polyline[i];
-    const b = route.polyline[i + 1];
-    if (a && b) travelled += haversineM(a, b);
-  }
+  void prevSection;
+  const travelled = bestAlong;
 
   const remaining = Math.max(0, route.totalDistanceM - travelled);
   const currentSectionIdx = route.polylineSection[bestIdx] ?? 0;

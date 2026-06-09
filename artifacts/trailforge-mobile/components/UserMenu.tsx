@@ -5,6 +5,8 @@
  */
 import { useAuth, useUser } from "@clerk/clerk-expo";
 import { Feather } from "@expo/vector-icons";
+import { useQuery } from "@tanstack/react-query";
+import { Image } from "expo-image";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import React, { useState } from "react";
@@ -18,6 +20,7 @@ import {
 } from "react-native";
 
 import colors from "@/constants/colors";
+import { fetchMyRiderProfile } from "@/lib/api";
 import { ONBOARDING_KEY } from "@/lib/storageKeys";
 import { useProfile } from "@/components/ProfileContext";
 
@@ -26,12 +29,19 @@ export function UserMenu() {
   const { signOut } = useAuth();
   const { profile } = useProfile();
   const [open, setOpen] = useState(false);
+  const riderQ = useQuery({
+    queryKey: ["rider-profile", "me"],
+    queryFn: fetchMyRiderProfile,
+    staleTime: 60_000,
+  });
+  const riderStats = riderQ.data?.profile.stats;
 
   if (!user) return null;
 
   const initials = (user.fullName ?? user.primaryEmailAddress?.emailAddress ?? "?")
     .slice(0, 2)
     .toUpperCase();
+  const photoUrl = user.imageUrl ?? riderQ.data?.profile.avatarUrl ?? null;
 
   return (
     <>
@@ -40,7 +50,11 @@ export function UserMenu() {
         onPress={() => setOpen(true)}
         style={styles.avatar}
       >
-        <Text style={styles.avatarText}>{initials}</Text>
+        {photoUrl ? (
+          <Image source={{ uri: photoUrl }} style={styles.avatarImage} />
+        ) : (
+          <Text style={styles.avatarText}>{initials}</Text>
+        )}
       </TouchableOpacity>
 
       <Modal
@@ -53,14 +67,35 @@ export function UserMenu() {
           <View style={styles.menu}>
             <View style={styles.identity}>
               <Text style={styles.name}>{user.fullName ?? "TrailForge rider"}</Text>
+              {riderStats ? (
+                <Text style={styles.riderTag} numberOfLines={1}>
+                  {riderStats.rankTitle} · {riderStats.trailKmTotal.toFixed(0)} km ridden
+                </Text>
+              ) : null}
               <Text style={styles.email} numberOfLines={1}>
                 {user.primaryEmailAddress?.emailAddress ?? ""}
               </Text>
             </View>
 
             <MenuItem
+              icon="star"
+              label={profile.isPremium ? "Membership" : "Free vs Premium"}
+              onPress={() => {
+                setOpen(false);
+                router.push("/membership" as never);
+              }}
+            />
+            <MenuItem
               icon="user"
-              label="My profile"
+              label="Rider profile"
+              onPress={() => {
+                setOpen(false);
+                router.push("/profile" as never);
+              }}
+            />
+            <MenuItem
+              icon="map"
+              label="My trails & routes"
               onPress={() => {
                 setOpen(false);
                 router.push("/(tabs)/trails");
@@ -159,6 +194,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: colors.light.primary,
+    overflow: "hidden",
+  },
+  avatarImage: {
+    width: 34,
+    height: 34,
   },
   avatarText: {
     color: colors.light.primaryForeground,
@@ -188,6 +228,12 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.light.border,
   },
   name: { color: colors.light.foreground, fontWeight: "700", fontSize: 14 },
+  riderTag: {
+    color: colors.light.primary,
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 3,
+  },
   email: { color: colors.light.mutedForeground, fontSize: 12, marginTop: 2 },
   item: {
     paddingHorizontal: 14,

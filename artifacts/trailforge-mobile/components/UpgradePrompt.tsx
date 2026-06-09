@@ -1,80 +1,167 @@
 /**
+
  * Full-screen overlay shown when a free user taps a premium-gated feature.
- * Dismiss with the "Not now" button or by pressing outside the card.
+
  */
+
 import { Feather } from "@expo/vector-icons";
+import { router } from "expo-router";
 import React from "react";
+
 import {
+
   Modal,
+
   Pressable,
+
   StyleSheet,
+
   Text,
+
   TouchableOpacity,
+
   View,
+
 } from "react-native";
 
+
+
 import colors from "@/constants/colors";
+import { PREMIUM_UPGRADE_BENEFITS } from "@/lib/membershipBenefits";
+import { openPremiumUpgrade } from "@/lib/premiumUpgrade";
+
+
 
 interface Props {
+
   visible: boolean;
+
   featureName: string;
+
   onDismiss: () => void;
+
 }
 
+
+
 export function UpgradePrompt({ visible, featureName, onDismiss }: Props) {
+
+  async function handleUpgrade() {
+
+    onDismiss();
+
+    await openPremiumUpgrade(featureName);
+
+  }
+
+
+
   return (
+
     <Modal
+
       visible={visible}
+
       transparent
+
       animationType="fade"
+
       onRequestClose={onDismiss}
+
     >
+
       <Pressable style={styles.backdrop} onPress={onDismiss}>
-        {/* Stop inner press from closing */}
+
         <Pressable style={styles.card} onPress={(e) => e.stopPropagation()}>
+
           <View style={styles.iconWrap}>
+
             <Feather name="lock" size={28} color={colors.light.primary} />
+
           </View>
 
-          <Text style={styles.title}>Premium Feature</Text>
+
+
+          <Text style={styles.title}>Premium feature</Text>
+
           <Text style={styles.body}>
-            <Text style={styles.featureName}>{featureName}</Text> is available
-            on the TrailForge Premium plan. Upgrade to unlock trail filtering,
-            advanced navigation, and more.
+
+            <Text style={styles.featureName}>{featureName}</Text> is part of
+
+            TrailForge Premium — built for riders who want guided routes matched
+
+            to their skill level.
+
           </Text>
 
+
+
           <View style={styles.benefits}>
-            {BENEFITS.map((b) => (
+
+            {PREMIUM_UPGRADE_BENEFITS.map((b) => (
+
               <View key={b} style={styles.benefitRow}>
+
                 <Feather
+
                   name="check-circle"
+
                   size={14}
+
                   color={colors.light.trailGreen}
+
                 />
+
                 <Text style={styles.benefitText}>{b}</Text>
+
               </View>
+
             ))}
+
           </View>
 
-          <TouchableOpacity style={styles.upgradeBtn} activeOpacity={0.8}>
+
+
+          <TouchableOpacity
+
+            style={styles.upgradeBtn}
+
+            activeOpacity={0.8}
+
+            onPress={() => void handleUpgrade()}
+
+          >
+
             <Text style={styles.upgradeBtnText}>Upgrade to Premium</Text>
+
           </TouchableOpacity>
+
+
 
           <TouchableOpacity style={styles.dismissBtn} onPress={onDismiss}>
             <Text style={styles.dismissBtnText}>Not now</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.learnMoreBtn}
+            onPress={() => {
+              onDismiss();
+              router.push("/membership" as never);
+            }}
+          >
+            <Text style={styles.learnMoreBtnText}>Compare Free vs Premium</Text>
+          </TouchableOpacity>
+
         </Pressable>
+
       </Pressable>
+
     </Modal>
+
   );
+
 }
 
-const BENEFITS = [
-  "Filter trails by difficulty grade (1-10)",
-  "Filter by your bike type",
-  "Turn-by-turn trail navigation",
-  "Groups-only map view",
-];
+
 
 const styles = StyleSheet.create({
   backdrop: {
@@ -156,4 +243,14 @@ const styles = StyleSheet.create({
     color: colors.light.mutedForeground,
     fontSize: 14,
   },
+  learnMoreBtn: {
+    paddingVertical: 4,
+    marginTop: 2,
+  },
+  learnMoreBtnText: {
+    color: colors.light.primary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
 });
+

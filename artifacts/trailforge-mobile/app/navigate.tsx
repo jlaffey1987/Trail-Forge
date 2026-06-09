@@ -44,13 +44,15 @@ import MapView, {
 } from "react-native-maps";
 
 import colors from "@/constants/colors";
+import { NavCompletionSheet, type NavTrailToLog } from "@/components/nav/NavCompletionSheet";
 import { useHeading } from "@/lib/useHeading";
 import {
-  buildNavRoute,
+  buildNavRouteAsync,
   computeProgress,
   formatArrivalTime,
   formatDistance,
   getNavigationCameraCenter,
+  rebuildNavRouteFromSections,
   type InstructionIcon,
   type NavInstruction,
   type NavProgress,
@@ -69,7 +71,11 @@ import {
   type NavLatLng,
   type RerouteState,
 } from "@/lib/navigationReroute";
-import { getActiveNavRoute, clearActiveNavRoute } from "@/lib/activeNavRoute";
+import {
+  getActiveNavRoute,
+  clearActiveNavRoute,
+  consumePrebuiltNavRoute,
+} from "@/lib/activeNavRoute";
 import { difficultyColor, gradeToColor } from "@/lib/trailColors";
 import {
   loadNavPrefs,
@@ -129,6 +135,8 @@ export default function NavigateScreen() {
 
   // ── Core nav state (from existing implementation) ─────────────────────────
   const [navRoute, setNavRoute]         = useState<NavRoute | null>(null);
+  const [routeLoading, setRouteLoading] = useState(true);
+  const [routeError, setRouteError]     = useState<string | null>(null);
   const [progress, setProgress]         = useState<NavProgress | null>(null);
   const [rerouteState, setRerouteState] = useState<RerouteState>(initialRerouteState());
   const [overviewMode, setOverviewMode] = useState(false);
@@ -145,6 +153,12 @@ export default function NavigateScreen() {
   const [handoffDistM, setHandoffDistM] = useState(0);
   const [pulseSectionId, setPulseSectionId] = useState<string | null>(null);
   const [pulsePhase, setPulsePhase]     = useState<"bright" | "dim">("bright");
+  const [completionPrompt, setCompletionPrompt] = useState<{
+    title: string;
+    subtitle: string;
+    trails: NavTrailToLog[];
+    defaultSelectedIds: string[];
+  } | null>(null);
 
   // ── Refs ──────────────────────────────────────────────────────────────────
   const mapRef                = useRef<MapView>(null);
@@ -159,6 +173,7 @@ export default function NavigateScreen() {
   const lastInteractionRef    = useRef(Date.now());
   const recentreTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulseTimerRef         = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const arrivalPromptShownRef = useRef(false);
 
   mutedRef.current    = muted;
   navModeRef.current  = navMode;
@@ -193,12 +208,41 @@ export default function NavigateScreen() {
     });
   }, []);
 
-  // ── Build route on mount ──────────────────────────────────────────────────
+  // ── Build route on mount (OSRM road legs) ─────────────────────────────────
   useEffect(() => {
-    if (!inputRoute) { router.back(); return; }
-    const route = buildNavRoute(inputRoute);
-    setNavRoute(route);
-    routeRef.current = route;
+    if (!inputRoute) {
+      router.back();
+      return;
+    }
+
+    const prebuilt = consumePrebuiltNavRoute();
+    if (prebuilt) {
+      setNavRoute(prebuilt);
+      routeRef.current = prebuilt;
+      setRouteLoading(false);
+      return;
+    }
+
+    const abort = new AbortController();
+    setRouteLoading(true);
+    setRouteError(null);
+
+    void buildNavRouteAsync(inputRoute, abort.signal)
+      .then((route) => {
+        setNavRoute(route);
+        routeRef.current = route;
+        if (route.routingDegraded) {
+          setStatusMsg("Road routing is limited — some sections use direct lines");
+        }
+        setRouteLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setRouteError(err instanceof Error ? err.message : "Could not build route");
+        setRouteLoading(false);
+      });
+
+    return () => abort.abort();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handoff check — run once GPS is ready ─────────────────────────────────
@@ -210,6 +254,105 @@ export default function NavigateScreen() {
       setShowHandoff(true);
     }
   }, [userPos, navRoute]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function navigateToRouteStart() {
+    if (!userPos || !navRoute) return;
+    setShowHandoff(false);
+    setStatusMsg("Finding road to start…");
+    try {
+      const res = await fetchRoadRoute(userPos, navRoute.from);
+      if (!res.ok) {
+        setStatusMsg(null);
+        Alert.alert(
+          "Routing unavailable",
+          res.error ?? "Could not find a road route to the start. Try moving closer or start from here.",
+        );
+        setShowHandoff(true);
+        return;
+      }
+      const approach: NavSection = {
+        kind: "road",
+        id: "road-to-start-handoff",
+        name: "Head to route start",
+        path: res.polyline,
+        distanceM: res.distanceM,
+        osrmSteps: res.steps.length > 0 ? res.steps : undefined,
+        cumulativeDistanceM: 0,
+      };
+      const rebuilt = rebuildNavRouteFromSections(
+        { ...userPos, label: "You" },
+        navRoute.to,
+        [approach, ...navRoute.sections],
+      );
+      setNavRoute(rebuilt);
+      routeRef.current = rebuilt;
+      announcedAtRef.current.clear();
+      setProgress(null);
+      setStatusMsg(null);
+      speak("Navigating to route start", mutedRef.current);
+    } catch {
+      setStatusMsg(null);
+      Alert.alert("Routing failed", "Could not plan a route to the start.");
+      setShowHandoff(true);
+    }
+  }
+
+  // ── Exit / completion logging ─────────────────────────────────────────────
+
+  const finishNavigation = useCallback(() => {
+    clearActiveNavRoute();
+    rerouteAbortRef.current?.abort();
+    setCompletionPrompt(null);
+    router.back();
+  }, []);
+
+  const trailSectionsFromRoute = useCallback((route: NavRoute): NavTrailToLog[] => {
+    return route.sections
+      .filter((sec) => sec.kind === "trail")
+      .map((sec) => ({ id: sec.id, name: sec.name }));
+  }, []);
+
+  const openCompletionPrompt = useCallback((mode: "arrived" | "exit") => {
+    const route = routeRef.current;
+    const prog = progressRef.current;
+    if (!route) {
+      if (mode === "exit") finishNavigation();
+      return;
+    }
+    const trails = trailSectionsFromRoute(route);
+    if (trails.length === 0) {
+      if (mode === "exit") finishNavigation();
+      return;
+    }
+    const completedTrailIds = (prog?.completedSectionIds ?? []).filter((id) =>
+      route.sections.some((s) => s.kind === "trail" && s.id === id),
+    );
+    const defaultSelected =
+      mode === "arrived" ? trails.map((t) => t.id) : completedTrailIds;
+    if (mode === "exit" && defaultSelected.length === 0) {
+      finishNavigation();
+      return;
+    }
+    setCompletionPrompt({
+      title: mode === "arrived" ? "Ride complete!" : "Log trails from this ride?",
+      subtitle:
+        mode === "arrived"
+          ? "Add these trail sections to your ridden log for mileage, rank points, and badges."
+          : "You rode part of this route. Log completed trail sections to your profile.",
+      trails,
+      defaultSelectedIds: defaultSelected,
+    });
+  }, [finishNavigation, trailSectionsFromRoute]);
+
+  const exitNavigation = useCallback(() => {
+    Alert.alert("Exit navigation?", "Your route progress will be lost.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Exit", style: "destructive",
+        onPress: () => openCompletionPrompt("exit"),
+      },
+    ]);
+  }, [openCompletionPrompt]);
 
   // ── GPS tracking ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -251,9 +394,11 @@ export default function NavigateScreen() {
 
           // ── Arrival ───────────────────────────────────────────────────────
           if (newProg.arrived) {
-            speak("You have arrived at your destination", mutedRef.current);
-            setStatusMsg("You have arrived! 🎉");
-            setTimeout(() => setStatusMsg(null), ARRIVED_MS);
+            if (!arrivalPromptShownRef.current) {
+              arrivalPromptShownRef.current = true;
+              speak("You have arrived at your destination", mutedRef.current);
+              openCompletionPrompt("arrived");
+            }
             return;
           }
 
@@ -466,10 +611,19 @@ export default function NavigateScreen() {
     rerouteAbortRef.current = new AbortController();
 
     const prog = progressRef.current;
-    const nextTrailSection = route.sections
-      .slice((prog?.currentSectionIdx ?? 0) + 1)
-      .find(s => s.kind === "trail");
-    const target: NavLatLng = nextTrailSection?.path[0] ?? route.to;
+    const currentIdx = prog?.currentSectionIdx ?? 0;
+    const currentSec = route.sections[currentIdx];
+
+    const nextEntry: NavLatLng = (() => {
+      for (let i = currentIdx + 1; i < route.sections.length; i++) {
+        const sec = route.sections[i];
+        if (sec.path[0]) return sec.path[0];
+      }
+      return route.to;
+    })();
+
+    const target: NavLatLng =
+      currentSec?.kind === "road" ? nextEntry : (nextEntry ?? route.to);
 
     const result = await fetchRoadRoute(pos, target, rerouteAbortRef.current.signal);
     if (!result.ok) {
@@ -479,23 +633,11 @@ export default function NavigateScreen() {
       return;
     }
 
-    const currentIdx = prog?.currentSectionIdx ?? 0;
     const updatedSections = route.sections.map((sec, i) => {
       if (i !== currentIdx || sec.kind !== "road") return sec;
       return { ...sec, path: result.polyline, distanceM: result.distanceM };
     });
-    let cum = 0;
-    const rebuiltSections = updatedSections.map(sec => {
-      cum += sec.distanceM;
-      return { ...sec, cumulativeDistanceM: cum };
-    });
-    const newRoute: NavRoute = {
-      ...route,
-      sections: rebuiltSections,
-      polyline: rebuiltSections.flatMap(s => s.path),
-      polylineSection: rebuiltSections.flatMap((s, i) => s.path.map(() => i)),
-      totalDistanceM: cum,
-    };
+    const newRoute = rebuildNavRouteFromSections(route.from, route.to, updatedSections);
     routeRef.current = newRoute;
     setNavRoute(newRoute);
     setRerouteState(prev => updateRerouteStateOnSuccess(prev));
@@ -503,22 +645,6 @@ export default function NavigateScreen() {
     setStatusMsg("Route updated");
     setTimeout(() => setStatusMsg(null), RECALC_MS);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Exit ──────────────────────────────────────────────────────────────────
-
-  const exitNavigation = useCallback(() => {
-    Alert.alert("Exit navigation?", "Your route progress will be lost.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Exit", style: "destructive",
-        onPress: () => {
-          clearActiveNavRoute();
-          rerouteAbortRef.current?.abort();
-          router.back();
-        },
-      },
-    ]);
-  }, []);
 
   // ── Derived display ───────────────────────────────────────────────────────
 
@@ -588,11 +714,21 @@ export default function NavigateScreen() {
 
   // ── Loading ───────────────────────────────────────────────────────────────
 
-  if (!navRoute) {
+  if (routeLoading || !navRoute) {
     return (
       <View style={[st.loadingScreen, { paddingTop: insets.top }]}>
         <Text style={{ fontSize: 32 }}>🧭</Text>
-        <Text style={st.loadingText}>Building route…</Text>
+        <Text style={st.loadingText}>
+          {routeError ?? "Calculating road route…"}
+        </Text>
+        {routeError ? (
+          <Pressable
+            style={st.loadingRetry}
+            onPress={() => router.back()}
+          >
+            <Text style={st.loadingRetryText}>Go back</Text>
+          </Pressable>
+        ) : null}
       </View>
     );
   }
@@ -635,7 +771,7 @@ export default function NavigateScreen() {
         showsCompass={false}
         toolbarEnabled={false}
         rotateEnabled={false}
-        userInterfaceStyle={isNight ? "dark" : "dark"}
+        userInterfaceStyle={isNight ? "dark" : "light"}
         initialCamera={{
           center: navRoute.from, heading: 0,
           pitch: NAV_PITCH, zoom: ZOOM_ROAD_MED, altitude: ALTITUDE_ROAD,
@@ -759,14 +895,20 @@ export default function NavigateScreen() {
       {showHandoff && (
         <HandoffSheet
           distM={handoffDistM}
-          onNavigateToStart={() => {
-            setShowHandoff(false);
-            // TODO: insert road section to start
-            speak("Navigating to route start", false);
-          }}
+          onNavigateToStart={() => void navigateToRouteStart()}
           onStartHere={() => setShowHandoff(false)}
         />
       )}
+
+      <NavCompletionSheet
+        visible={completionPrompt != null}
+        title={completionPrompt?.title ?? ""}
+        subtitle={completionPrompt?.subtitle ?? ""}
+        trails={completionPrompt?.trails ?? []}
+        defaultSelectedIds={completionPrompt?.defaultSelectedIds ?? []}
+        onDismiss={finishNavigation}
+        onDone={finishNavigation}
+      />
     </View>
   );
 }
@@ -958,7 +1100,15 @@ const st = StyleSheet.create({
     flex: 1, backgroundColor: NAV_BG,
     alignItems: "center", justifyContent: "center", gap: 16,
   },
-  loadingText: { color: NAV_WHITE, fontSize: 18, fontWeight: "700" },
+  loadingText: { color: NAV_WHITE, fontSize: 18, fontWeight: "700", textAlign: "center", paddingHorizontal: 24 },
+  loadingRetry: {
+    marginTop: 20,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: AMBER,
+  },
+  loadingRetryText: { color: "#111", fontWeight: "800", fontSize: 15 },
 
   // ── Top panel ──────────────────────────────────────────────────────────────
   topPanel: {

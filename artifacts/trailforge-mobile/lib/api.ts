@@ -140,6 +140,7 @@ export async function subscribeExpoPushToken(
 
 export async function patchPreferences(prefs: {
   preferred_bike_type?: "all" | "adventure" | "trail" | "enduro";
+  home_region?: string | null;
 }): Promise<void> {
   await apiJson("/api/me/preferences", {
     method: "PATCH",
@@ -220,17 +221,24 @@ export function markRoomRead(roomId: string): Promise<void> {
 // Completions (mark trail as ridden) — direct fetch
 // ---------------------------------------------------------------------------
 
+export interface MarkTrailRiddenResult {
+  ok: boolean;
+  isNew?: boolean;
+  stats: RiderStats | null;
+  newAchievements: RiderAchievement[];
+}
+
 export function markTrailRidden(
   trailId: string,
   completedAt?: string,
-): Promise<void> {
+): Promise<MarkTrailRiddenResult> {
   return apiJson("/api/me/completions", {
     method: "POST",
     body: JSON.stringify(completedAt ? { trailId, completedAt } : { trailId }),
   });
 }
 
-export function unmarkTrailRidden(trailId: string): Promise<void> {
+export function unmarkTrailRidden(trailId: string): Promise<{ ok: boolean; stats: RiderStats | null }> {
   return apiJson(`/api/me/completions/${encodeURIComponent(trailId)}`, {
     method: "DELETE",
   });
@@ -239,7 +247,67 @@ export function unmarkTrailRidden(trailId: string): Promise<void> {
 export function listCompletions(): Promise<{
   completions: Array<{ trailId: string; completedAt: string }>;
 }> {
-  return apiJson("/api/me/completions");
+  return apiJson<{ items?: Array<{ trail_id: string; completed_at: string }> }>(
+    "/api/me/completions",
+  ).then((res) => ({
+    completions: (res.items ?? []).map((item) => ({
+      trailId: item.trail_id,
+      completedAt: item.completed_at,
+    })),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Rider profile (gamertag / achievements)
+// ---------------------------------------------------------------------------
+
+export interface RiderStats {
+  trailKmTotal: number;
+  trailsCompleted: number;
+  trailsAdded: number;
+  rankPoints: number;
+  rankTitle: string;
+  rankLevel: number;
+  helpfulVotes: number;
+  forumPosts: number;
+  globalRank: number | null;
+}
+
+export interface RiderAchievement {
+  key: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  colour: string | null;
+  earnedAt: string;
+}
+
+export interface RiderProfile {
+  id: string;
+  isMe: boolean;
+  displayName: string;
+  avatarUrl: string | null;
+  email?: string | null;
+  bikeLabel: string | null;
+  homeRegion: string | null;
+  memberSince: string | null;
+  stats: RiderStats;
+  achievements: RiderAchievement[];
+  recentTrails: Array<{
+    trailId: string;
+    completedAt: string;
+    name: string;
+    difficulty: string | number | null;
+    distanceKm: number | null;
+  }>;
+}
+
+export function fetchMyRiderProfile(): Promise<{ profile: RiderProfile }> {
+  return apiJson("/api/me/rider-profile");
+}
+
+export function fetchRiderProfile(userId: string): Promise<{ profile: RiderProfile }> {
+  return apiJson(`/api/users/${encodeURIComponent(userId)}/rider-profile`);
 }
 
 // ---------------------------------------------------------------------------
@@ -711,12 +779,69 @@ export async function fetchCollectionSections(
 export const UK_IE_SEARCH_BBOX = "49.5000,-11.0000,61.0000,2.0000";
 
 export async function fetchTntTrails(limit = 500): Promise<MapTrail[]> {
+  return fetchTrailsBySource("TNT", limit);
+}
+
+export async function fetchTrailsBySource(
+  source: string,
+  limit = 500,
+): Promise<MapTrail[]> {
   const res = await searchTrailsByBbox({
     bbox: UK_IE_SEARCH_BBOX,
-    source: "TNT",
+    source,
     limit,
   });
   return res.trails ?? [];
+}
+
+export interface PublicRouteDetail {
+  id: string;
+  name: string;
+  description: string | null;
+  region: string | null;
+  ownerId: string | null;
+  ownerName: string | null;
+  totalDistanceKm: number | null;
+  likesCount: number;
+  trailIds: string[];
+  trails: MapTrail[];
+  waypoints?: Array<{ id?: string; lat?: number; lon?: number; label?: string }>;
+}
+
+export async function fetchPublicRouteDetail(routeId: string): Promise<PublicRouteDetail> {
+  const res = await apiFetch(`/api/routes/${encodeURIComponent(routeId)}`, {
+    allowAnonymous: true,
+  });
+  if (!res.ok) throw new Error("Route not found");
+  const data = (await res.json()) as {
+    route: {
+      id: string;
+      name: string;
+      description?: string | null;
+      region?: string | null;
+      ownerName?: string | null;
+      userId?: string | null;
+      totalDistanceKm?: number | null;
+      likesCount?: number;
+      trailIds?: string[];
+      trails?: MapTrail[];
+      waypoints?: Array<{ id?: string; lat?: number; lon?: number; label?: string }>;
+    };
+  };
+  const r = data.route;
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description ?? null,
+    region: r.region ?? null,
+    ownerId: r.userId ?? null,
+    ownerName: r.ownerName ?? null,
+    totalDistanceKm: r.totalDistanceKm ?? null,
+    likesCount: r.likesCount ?? 0,
+    trailIds: r.trailIds ?? [],
+    trails: (r.trails ?? []) as MapTrail[],
+    waypoints: r.waypoints ?? [],
+  };
 }
 
 // ---------------------------------------------------------------------------

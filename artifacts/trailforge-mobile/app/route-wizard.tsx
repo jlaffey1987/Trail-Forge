@@ -63,6 +63,15 @@ import {
 } from "@/lib/nominatim";
 import { setActiveNavRoute } from "@/lib/activeNavRoute";
 import { useProfile } from "@/components/ProfileContext";
+import { UpgradePrompt } from "@/components/UpgradePrompt";
+import {
+  allowedRoutePrivacyOptions,
+  canDownloadRouteOffline,
+  canExportRouteGpx,
+  canNavigate,
+  canPublishRouteToCommunity,
+  savedRouteIsPublicForApi,
+} from "@/lib/tierPolicy";
 import {
   usePlannerStore,
   plannerActions,
@@ -937,6 +946,8 @@ const s2 = StyleSheet.create({
 
 function Step4SaveAndGo() {
   const state = usePlannerStore();
+  const { profile } = useProfile();
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
   const [routeName, setRouteName] = useState(() => {
     if (state.savedRouteName) return state.savedRouteName;
     if (state.from) {
@@ -946,6 +957,8 @@ function Step4SaveAndGo() {
     return "My Route";
   });
   const [privacy, setPrivacy] = useState<"private" | "groups" | "public">("private");
+  const isPremium = profile.isPremium;
+  const privacyOptions = allowedRoutePrivacyOptions(isPremium);
   const [deviceModal, setDeviceModal] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -966,19 +979,29 @@ function Step4SaveAndGo() {
         body: JSON.stringify({
           name: routeName,
           trailIds: visibleTrails.map(t => t.id),
+          isPublic: savedRouteIsPublicForApi(privacy, isPremium),
           waypoints: state.from
             ? [{ id: "from", lat: state.from.lat, lon: state.from.lon, label: state.from.address }]
             : [],
         }),
       });
       plannerActions.setSavedRouteName(routeName);
-      Alert.alert("Saved! ✓", `"${routeName}" saved to your routes.`);
+      Alert.alert(
+        "Draft saved",
+        isPremium
+          ? `"${routeName}" saved to your routes.`
+          : `"${routeName}" saved as your draft. Upgrade for navigation and GPX export.`,
+      );
     } catch (e) {
       Alert.alert("Save failed", e instanceof Error ? e.message : "Unknown error");
     } finally { setSaving(false); }
   }
 
   async function handleExportGpx(device: GpxDevice) {
+    if (!canExportRouteGpx(isPremium)) {
+      setUpgradeVisible(true);
+      return;
+    }
     setDeviceModal(false);
     setExporting(true);
     try {
@@ -990,6 +1013,10 @@ function Step4SaveAndGo() {
   }
 
   async function handleOfflineDownload() {
+    if (!canDownloadRouteOffline(isPremium)) {
+      setUpgradeVisible(true);
+      return;
+    }
     if (!state.from) return;
     setDownloading(true);
     try {
@@ -1016,7 +1043,7 @@ function Step4SaveAndGo() {
         const pct = p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : 0;
         setDownloadProgress(pct);
       });
-      Alert.alert("Downloaded ✓", "Route ready for offline use.");
+      Alert.alert("Downloaded", "Map tiles cached along your route. Save individual trails from their detail page for full offline trail data.");
     } catch (e) {
       Alert.alert("Download failed", e instanceof Error ? e.message : "Unknown error");
     } finally { setDownloading(false); setDownloadProgress(0); }
@@ -1024,6 +1051,10 @@ function Step4SaveAndGo() {
 
   function handleGo() {
     if (!state.from) return;
+    if (!canNavigate(isPremium)) {
+      setUpgradeVisible(true);
+      return;
+    }
     setActiveNavRoute({
       trails: visibleTrails.map(t => ({
         id: t.id,
@@ -1051,7 +1082,7 @@ function Step4SaveAndGo() {
           <Text style={{ color: AMBER, fontSize: 15, fontWeight: "600" }}>Back to route</Text>
         </TouchableOpacity>
 
-        <Text style={{ color: "#fff", fontSize: 26, fontWeight: "900", letterSpacing: -1, marginBottom: 6 }}>SAVE & GO</Text>
+        <Text style={{ color: "#fff", fontSize: 26, fontWeight: "900", letterSpacing: -1, marginBottom: 6 }}>Save your route</Text>
         <View style={{ width: 48, height: 3, backgroundColor: AMBER, borderRadius: 2, marginBottom: 28 }} />
 
         {/* Route name */}
@@ -1070,13 +1101,24 @@ function Step4SaveAndGo() {
           <View style={s4.statCard}><Text style={s4.statValue}>{state.skippedIds.length}</Text><Text style={s4.statLabel}>skipped</Text></View>
         </View>
 
-        {/* Privacy */}
+        {/* Visibility */}
         <Text style={[s4.label, { marginTop: 20 }]}>VISIBILITY</Text>
+        {!isPremium ? (
+          <Text style={{ color: colors.light.mutedForeground, fontSize: 13, marginBottom: 10, lineHeight: 18 }}>
+            Free accounts save private drafts. Upgrade to publish routes to the community.
+          </Text>
+        ) : null}
         <View style={s4.privacyRow}>
-          {PRIVACY_OPTS.map(p => (
+          {PRIVACY_OPTS.filter((p) => privacyOptions.includes(p.id)).map(p => (
             <TouchableOpacity
               key={p.id}
-              onPress={() => setPrivacy(p.id)}
+              onPress={() => {
+                if (p.id === "public" && !canPublishRouteToCommunity(isPremium)) {
+                  setUpgradeVisible(true);
+                  return;
+                }
+                setPrivacy(p.id);
+              }}
               style={[s4.privChip, privacy === p.id && s4.privChipActive]}
             >
               <Text style={s4.privIcon}>{p.icon}</Text>
@@ -1088,19 +1130,37 @@ function Step4SaveAndGo() {
         {/* Action buttons */}
         <TouchableOpacity style={s4.goBtn} onPress={handleGo}>
           <Feather name="navigation" size={22} color="#000" />
-          <Text style={s4.goBtnText}>🧭  START NAVIGATING</Text>
+          <Text style={s4.goBtnText}>
+            {isPremium ? "START NAVIGATING" : "START NAVIGATING — PREMIUM"}
+          </Text>
         </TouchableOpacity>
+        {!isPremium ? (
+          <Text style={{ color: colors.light.mutedForeground, fontSize: 12, textAlign: "center", marginTop: 8 }}>
+            Your route is ready to preview. Upgrade to ride with turn-by-turn guidance.
+          </Text>
+        ) : null}
 
         <View style={s4.actionsRow}>
-          <ActionCard icon="💾" label="Save" loading={saving} onPress={() => void handleSave()} />
+          <ActionCard icon="💾" label="Save draft" loading={saving} onPress={() => void handleSave()} />
           <ActionCard
             icon="📥"
-            label="Offline"
+            label={isPremium ? "Offline" : "Offline 🔒"}
             loading={downloading}
             progress={downloadProgress}
             onPress={() => void handleOfflineDownload()}
           />
-          <ActionCard icon="📤" label="Export" loading={exporting} onPress={() => setDeviceModal(true)} />
+          <ActionCard
+            icon="📤"
+            label={isPremium ? "Export" : "Export 🔒"}
+            loading={exporting}
+            onPress={() => {
+              if (!canExportRouteGpx(isPremium)) {
+                setUpgradeVisible(true);
+                return;
+              }
+              setDeviceModal(true);
+            }}
+          />
         </View>
 
         {/* New route */}
@@ -1128,6 +1188,11 @@ function Step4SaveAndGo() {
           ))}
         </View>
       </Modal>
+      <UpgradePrompt
+        visible={upgradeVisible}
+        featureName="Turn-by-turn navigation"
+        onDismiss={() => setUpgradeVisible(false)}
+      />
     </SafeAreaView>
   );
 }

@@ -28,6 +28,7 @@ import {
 
 import colors from "@/constants/colors";
 import { PageLoadingCover } from "@/components/PageLoadingCover";
+import { useProfile } from "@/components/ProfileContext";
 import { AppShellHeader } from "@/components/shell/AppShellHeader";
 import { TabHero } from "@/components/shell/TabHero";
 import { listRecentlyRidden, type RecentlyRiddenTrail } from "@/lib/api";
@@ -51,8 +52,11 @@ interface SavedTrail {
 interface SavedRoute {
   id: string;
   name: string;
-  trail_count: number | null;
+  trail_count?: number | null;
+  trailIds?: string[];
+  isPublic?: boolean;
   updated_at?: string | null;
+  updatedAt?: string | null;
 }
 
 type SortKey = "name" | "distance" | "climb";
@@ -243,7 +247,7 @@ export default function TrailsTab() {
           (savedRoutes.data as { routes?: SavedRoute[] } | undefined)?.routes
             ?.length === 0
         }
-        emptyHint="Routes you build in the Planner appear here."
+        emptyHint="Routes you build in the Planner appear here as drafts. Premium unlocks navigation and GPX export."
       >
         {((savedRoutes.data as { routes?: SavedRoute[] } | undefined)?.routes ??
           []).map((r) => (
@@ -309,7 +313,7 @@ export default function TrailsTab() {
         {offlineTrails.length === 0 ? (
           <View style={styles.empty}>
             <Text style={styles.emptyText}>
-              No offline trails saved yet. Open a trail on the map and tap "Save offline" to cache it.
+              No offline trails saved yet. Open a trail, then tap Save offline on its detail page.
             </Text>
           </View>
         ) : (
@@ -520,25 +524,56 @@ function TrailRow({
 }
 
 function RouteRow({ route }: { route: SavedRoute }) {
+  const { profile } = useProfile();
+  const isPremium = profile.isPremium;
+  const [loading, setLoading] = useState(false);
+  const isDraft = route.isPublic !== true;
+  const trailCount =
+    route.trailIds?.length ?? route.trail_count ?? 0;
+
+  async function openOnMap() {
+    setLoading(true);
+    try {
+      const { launchSavedRouteOnMap } = await import("@/lib/plannerMapSession");
+      await launchSavedRouteOnMap(route.id);
+    } catch (e) {
+      Alert.alert(
+        "Could not open route",
+        e instanceof Error ? e.message : "Try again in a moment.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <Pressable
       style={styles.row}
-      // Open the planner with the route preloaded. The planner reads
-      // the `routeId` query param on mount and hydrates from it.
-      onPress={() =>
-        router.push(`/(tabs)?routeId=${encodeURIComponent(route.id)}`)
-      }
+      disabled={loading}
+      onPress={() => void openOnMap()}
     >
       <Feather name="git-merge" size={18} color={colors.light.primary} />
       <View style={{ flex: 1 }}>
-        <Text style={styles.rowTitle} numberOfLines={1}>
-          {route.name}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={styles.rowTitle} numberOfLines={1}>
+            {route.name}
+          </Text>
+          {isDraft ? (
+            <View style={styles.draftBadge}>
+              <Text style={styles.draftBadgeText}>Draft</Text>
+            </View>
+          ) : null}
+        </View>
         <Text style={styles.rowMeta}>
-          {route.trail_count ?? 0} trail{route.trail_count === 1 ? "" : "s"}
+          {trailCount} trail{trailCount === 1 ? "" : "s"}
+          {!isPremium ? " · Nav & export need Premium" : ""}
         </Text>
       </View>
-      <Feather name="chevron-right" size={18} color={colors.light.mutedForeground} />
+      {loading ? (
+        <ActivityIndicator color={colors.light.primary} size="small" />
+      ) : (
+        <Feather name="chevron-right" size={18} color={colors.light.mutedForeground} />
+      )}
     </Pressable>
   );
 }
@@ -586,6 +621,18 @@ const styles = StyleSheet.create({
   diffDot: { width: 12, height: 12, borderRadius: 6 },
   rowTitle: { color: colors.light.foreground, fontWeight: "600" },
   rowMeta: { color: colors.light.mutedForeground, fontSize: 12, marginTop: 2 },
+  draftBadge: {
+    backgroundColor: colors.light.muted,
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  draftBadgeText: {
+    color: colors.light.mutedForeground,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
   empty: {
     paddingVertical: 18,
     paddingHorizontal: 12,

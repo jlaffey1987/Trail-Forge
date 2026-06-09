@@ -1,12 +1,14 @@
 /**
  * TrailForge first-launch onboarding.
  *
- * Five swipeable screens shown once after sign-up:
+ * Seven swipeable screens shown once after sign-up:
  *   0  Welcome       — live satellite map, trails light up one-by-one
  *   1  Find Trails   — grade-chip cards animate in with spring physics
  *   2  Plan Your Ride — route-segment builder animates in sequence
  *   3  Navigate      — nav-UI mockup with live rotating heading arrow
- *   4  Your Setup    — bike type picker + 1-10 experience level selector
+ *   4  Ranks         — rider ranks & achievement badges preview
+ *   5  Membership    — free vs Premium — what's included and how to upgrade
+ *   6  Your Setup    — bike type picker + 1-10 experience level selector
  *
  * Animations use React Native's built-in Animated API (no Lottie needed).
  * Completion flag is written to AsyncStorage; users can redo from UserMenu.
@@ -43,6 +45,7 @@ import MapView, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import colors from "@/constants/colors";
+import { MembershipExplainer } from "@/components/membership/MembershipExplainer";
 import { patchPreferences } from "@/lib/api";
 import { ONBOARDING_KEY, EXPERIENCE_KEY } from "@/lib/storageKeys";
 
@@ -51,7 +54,7 @@ import { ONBOARDING_KEY, EXPERIENCE_KEY } from "@/lib/storageKeys";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { width: W, height: H } = Dimensions.get("window");
-const NUM_PAGES = 5;
+const NUM_PAGES = 7;
 
 // Approximate UK trail routes for the welcome-screen map animation.
 // Colors correspond to TET difficulty grades (red = extreme, orange = hard, etc.)
@@ -130,6 +133,20 @@ const ROUTE_SEGMENTS = [
   { type: "trail", color: "#2979FF", label: "Intermediate section",    meta: "31 km · ↑210 m" },
 ] as const;
 
+const DEMO_RANKS = [
+  { title: "Greenlaner", icon: "user" as const },
+  { title: "Trail Rider", icon: "trending-up" as const },
+  { title: "Adventure Rider", icon: "map" as const },
+  { title: "Trail Legend", icon: "star" as const },
+] as const;
+
+const DEMO_BADGES = [
+  { icon: "flag" as const, label: "First trail", color: "#00C853" },
+  { icon: "zap" as const, label: "10 trails", color: "#2979FF" },
+  { icon: "award" as const, label: "100 km ridden", color: colors.light.primary },
+  { icon: "shield" as const, label: "Trail veteran", color: "#FF6D00" },
+] as const;
+
 type BikeType = "adventure" | "trail" | "enduro" | "all";
 
 const BIKE_OPTIONS: Array<{
@@ -183,8 +200,13 @@ export default function OnboardingScreen() {
   const arrowRot = useRef(new Animated.Value(0)).current;
   const navLoopRef = useRef<Animated.CompositeAnimation | null>(null);
 
-  // Screen 4
+  // Screen 4 — ranks & achievements
+  const rankAnims = useRef(DEMO_RANKS.map(() => new Animated.Value(0))).current;
+  const badgeAnims = useRef(DEMO_BADGES.map(() => new Animated.Value(0))).current;
+
+  // Screen 5 — setup form
   const formOpacity = useRef(new Animated.Value(0)).current;
+  const membershipOpacity = useRef(new Animated.Value(0)).current;
 
   // ── Per-page animation runners ───────────────────────────────────────────────
 
@@ -287,9 +309,34 @@ export default function OnboardingScreen() {
     return () => loop.stop();
   }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Screen 4 — form fades in
+  // Screen 4 — rank chips & achievement badges spring in
   useEffect(() => {
     if (page !== 4) return;
+    rankAnims.forEach((a) => a.setValue(0));
+    badgeAnims.forEach((a) => a.setValue(0));
+    Animated.stagger(
+      110,
+      [
+        ...rankAnims.map((a) =>
+          Animated.spring(a, { toValue: 1, tension: 65, friction: 8, useNativeDriver: true }),
+        ),
+        ...badgeAnims.map((a) =>
+          Animated.spring(a, { toValue: 1, tension: 65, friction: 8, useNativeDriver: true }),
+        ),
+      ],
+    ).start();
+  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Screen 5 — membership explainer fades in
+  useEffect(() => {
+    if (page !== 5) return;
+    membershipOpacity.setValue(0);
+    Animated.timing(membershipOpacity, { toValue: 1, duration: 480, useNativeDriver: true }).start();
+  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Screen 6 — form fades in
+  useEffect(() => {
+    if (page !== 6) return;
     formOpacity.setValue(0);
     Animated.timing(formOpacity, { toValue: 1, duration: 480, useNativeDriver: true }).start();
   }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -605,7 +652,110 @@ export default function OnboardingScreen() {
     </View>
   );
 
-  // ── Screen 4: Your Setup ─────────────────────────────────────────────────────
+  // ── Screen 4: Ranks & achievements ───────────────────────────────────────────
+
+  const renderRanksAchievements = () => (
+    <View style={[styles.screen, styles.darkBg]}>
+      <View style={[styles.pad, { paddingTop: insets.top + 52 }]}>
+        <View style={styles.iconPill}>
+          <Feather name="award" size={20} color={colors.light.primary} />
+        </View>
+
+        <Text style={styles.screenTitle}>
+          Earn ranks &{"\n"}achievements
+        </Text>
+        <Text style={styles.helperText}>
+          Log trails as ridden after a ride to climb the leaderboard
+        </Text>
+
+        <Text style={[styles.formLabel, { marginTop: 24 }]}>Rider ranks</Text>
+        <View style={styles.rankRow}>
+          {DEMO_RANKS.map((rank, idx) => (
+            <Animated.View
+              key={rank.title}
+              style={[
+                styles.rankChip,
+                {
+                  opacity: rankAnims[idx],
+                  transform: [{
+                    scale: rankAnims[idx].interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.85, 1],
+                    }),
+                  }],
+                },
+              ]}
+            >
+              <Feather name={rank.icon} size={14} color={colors.light.primary} />
+              <Text style={styles.rankChipText} numberOfLines={1}>
+                {rank.title}
+              </Text>
+            </Animated.View>
+          ))}
+        </View>
+
+        <Text style={[styles.formLabel, { marginTop: 28 }]}>Achievements</Text>
+        <View style={styles.badgeGrid}>
+          {DEMO_BADGES.map((badge, idx) => (
+            <Animated.View
+              key={badge.label}
+              style={[
+                styles.badgeCard,
+                {
+                  opacity: badgeAnims[idx],
+                  transform: [{
+                    translateY: badgeAnims[idx].interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [20, 0],
+                    }),
+                  }],
+                },
+              ]}
+            >
+              <View
+                style={[
+                  styles.badgeIcon,
+                  { backgroundColor: badge.color + "22", borderColor: badge.color },
+                ]}
+              >
+                <Feather name={badge.icon} size={18} color={badge.color} />
+              </View>
+              <Text style={styles.badgeLabel}>{badge.label}</Text>
+            </Animated.View>
+          ))}
+        </View>
+      </View>
+    </View>
+  );
+
+  // ── Screen 5: Free vs Premium ────────────────────────────────────────────────
+
+  const renderMembership = () => (
+    <View style={[styles.screen, styles.darkBg]}>
+      <Animated.View style={[{ flex: 1, opacity: membershipOpacity }]}>
+        <ScrollView
+          contentContainerStyle={[
+            styles.pad,
+            { paddingTop: insets.top + 36, paddingBottom: insets.bottom + 32 },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.iconPill}>
+            <Feather name="layers" size={20} color={colors.light.primary} />
+          </View>
+          <Text style={styles.screenTitle}>
+            Free vs{"\n"}Premium
+          </Text>
+          <Text style={[styles.helperText, { marginBottom: 16 }]}>
+            Start free — upgrade when you want guided rides on the trail
+          </Text>
+          <MembershipExplainer embedded showHeader={false} />
+        </ScrollView>
+      </Animated.View>
+    </View>
+  );
+
+  // ── Screen 6: Your Setup ─────────────────────────────────────────────────────
 
   const renderSetup = () => (
     <View style={[styles.screen, styles.darkBg]}>
@@ -705,6 +855,8 @@ export default function OnboardingScreen() {
     renderFindTrails,
     renderPlanRide,
     renderNavigate,
+    renderRanksAchievements,
+    renderMembership,
     renderSetup,
   ];
 
@@ -737,8 +889,8 @@ export default function OnboardingScreen() {
         bounces={false}
       />
 
-      {/* Skip button — shown on screens 0–3 */}
-      {page < 4 && (
+      {/* Skip button — shown on screens 0–5 */}
+      {page < 6 && (
         <TouchableOpacity
           style={[styles.skipBtn, { top: insets.top + 14 }]}
           onPress={handleSkip}
@@ -748,8 +900,8 @@ export default function OnboardingScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Progress dots — shown on screens 0–3 */}
-      {page < 4 && (
+      {/* Progress dots — shown on screens 0–5 */}
+      {page < 6 && (
         <View style={[styles.dotsRow, { bottom: insets.bottom + 114 }]}>
           {Array.from({ length: NUM_PAGES }).map((_, i) => (
             <TouchableOpacity
@@ -765,8 +917,8 @@ export default function OnboardingScreen() {
         </View>
       )}
 
-      {/* Bottom CTA — shown on screens 0–3 */}
-      {page < 4 && (
+      {/* Bottom CTA — shown on screens 0–5 */}
+      {page < 6 && (
         <View
           style={[
             styles.bottomCta,
@@ -1087,7 +1239,61 @@ const styles = StyleSheet.create({
     fontWeight: "500",
   },
 
-  // ── Screen 4: Setup ──────────────────────────────────────────────────────────
+  // ── Screen 4: Ranks & achievements ───────────────────────────────────────────
+  rankRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  rankChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    backgroundColor: colors.light.card,
+  },
+  rankChipText: {
+    color: colors.light.foreground,
+    fontSize: 12,
+    fontWeight: "700",
+    maxWidth: 120,
+  },
+  badgeGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  badgeCard: {
+    width: (W - 48 - 10) / 2,
+    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.light.border,
+    backgroundColor: colors.light.card,
+  },
+  badgeIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+  },
+  badgeLabel: {
+    color: colors.light.foreground,
+    fontSize: 12,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+
+  // ── Screen 5: Setup ──────────────────────────────────────────────────────────
   setupTitle: {
     color: colors.light.foreground,
     fontSize: 30,

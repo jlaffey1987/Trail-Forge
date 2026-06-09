@@ -1,3 +1,5 @@
+import { POLYLINE_ZOOM_DELTA } from "@/lib/mapZoom";
+
 /** Grid-based trail clustering for country / regional map zoom. */
 
 export interface GridClusterInput {
@@ -56,10 +58,10 @@ export function buildGridClusters(
   }));
 }
 
-/** Use grid clusters when the viewport is wide or has many trails. */
+/** Numbered grid clusters whenever polylines are hidden (zoomed out). */
 export function shouldUseGridClusters(
   latitudeDelta: number,
   trailCount: number,
 ): boolean {
-  return latitudeDelta > 0.75 && trailCount > 80;
+  return trailCount > 0 && latitudeDelta > POLYLINE_ZOOM_DELTA;
 }
