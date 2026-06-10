@@ -37,6 +37,7 @@ import {
   launchFindTrailsOnMap,
   launchSuggestTrip,
 } from "@/lib/plannerMapSession";
+import { launchLocalRideOnMap } from "@/lib/localTrailRide";
 import { useProfile } from "@/components/ProfileContext";
 
 const AMBER = colors.light.primary;
@@ -235,6 +236,13 @@ export default function PlannerTab() {
             >
               <Text style={s.quickCardTitle}>Trans Northern Trail</Text>
               <Text style={s.quickCardSub}>Community route · navigate with Premium</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.quickCard}
+              onPress={() => launchLocalRideOnMap()}
+            >
+              <Text style={s.quickCardTitle}>Ride nearby trails</Text>
+              <Text style={s.quickCardSub}>No destination · pick trails on the map</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={s.quickCard}

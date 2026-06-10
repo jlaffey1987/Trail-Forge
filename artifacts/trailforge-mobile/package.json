@@ -74,6 +74,7 @@
     "expo-sharing": "~14.0.8",
     "expo-speech": "~14.0.8",
     "expo-video": "~3.0.16",
+    "react-native-draggable-flatlist": "^4.0.3",
     "react-native-map-clustering": "^4.0.0"
   }
 }

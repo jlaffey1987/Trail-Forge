@@ -79,6 +79,23 @@ export default function NavSettingsScreen() {
       </View>
 
       <View style={ns.section}>
+        <Text style={ns.sectionLabel}>DEFAULT MAP LAYER</Text>
+        <View style={ns.segRow}>
+          {(["standard", "satellite", "terrain"] as const).map((opt) => (
+            <TouchableOpacity
+              key={opt}
+              style={[ns.seg, prefs.mapType === opt && ns.segActive]}
+              onPress={() => void update({ mapType: opt })}
+            >
+              <Text style={[ns.segText, prefs.mapType === opt && ns.segTextActive]}>
+                {opt.charAt(0).toUpperCase() + opt.slice(1)}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      <View style={ns.section}>
         <Text style={ns.sectionLabel}>SPEED UNITS</Text>
         <View style={ns.segRow}>
           <TouchableOpacity

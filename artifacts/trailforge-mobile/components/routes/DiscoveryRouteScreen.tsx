@@ -52,10 +52,15 @@ import {
 import {
   buildTntNavPlan,
   buildTntNavRouteAsync,
+  findTntJoinSnap,
   orderedTntTrails,
-  suggestTntDirection,
+  remainingDistanceM,
+  suggestTntDirectionFromJoin,
   type TntDirection,
+  type TntJoinSnap,
 } from "@/lib/tntNavigation";
+import { TntJoinPickerMap } from "@/components/routes/TntJoinPickerMap";
+import { haversineLatLng } from "@/lib/geo";
 
 const AMBER = colors.light.primary;
 const { width: W } = Dimensions.get("window");
@@ -85,6 +90,7 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
   const [navDirection, setNavDirection] = useState<TntDirection>("forward");
   const [rideLevelId, setRideLevelId] = useState<RideLevelId>("moderate");
   const [navUserPos, setNavUserPos] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [navJoin, setNavJoin] = useState<TntJoinSnap | null>(null);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
 
   const collectionsQ = useQuery({
@@ -198,25 +204,42 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
     || (collection?.id ? sectionsQ.isLoading : fallbackTrailsQ.isLoading);
 
   const ridePreview = useMemo((): RidePreviewStats | null => {
-    if (!navUserPos || !rideSheetOpen) return null;
+    if (!navUserPos || !navJoin || !rideSheetOpen) return null;
     const level = rideLevelById(rideLevelId);
     const built = buildTntNavPlan({
       allTrails: trails,
       userPos: navUserPos,
       direction: navDirection,
       maxGrade: level.maxGrade,
+      joinOverride: navJoin,
     });
     if (!built) return null;
-    const joinTrail = trails[built.plan.join.sectionIndex];
+    const joinTrail = trails[navJoin.sectionIndex];
+    const gpsToJoinKm = haversineLatLng(navUserPos, navJoin.snap.point);
+    const remainingKm =
+      remainingDistanceM(trails, navJoin, navDirection) / 1000;
     return {
       joinName: joinTrail?.name ?? config.title,
-      joinDistanceKm: built.plan.join.snap.distanceM / 1000,
+      joinDistanceKm: gpsToJoinKm,
       trailSectionCount: built.plan.legs.filter((l) => l.kind === "trail").length,
       skippedSections: built.plan.skippedHardSections,
       estimatedRoadBypassKm: built.plan.bypassRoadKm,
-      totalDistanceKm: stats.totalKm,
+      remainingRouteKm: Math.round(remainingKm),
     };
-  }, [navUserPos, rideSheetOpen, trails, rideLevelId, navDirection, stats.totalKm, config.title]);
+  }, [
+    navUserPos,
+    navJoin,
+    rideSheetOpen,
+    trails,
+    rideLevelId,
+    navDirection,
+    config.title,
+  ]);
+
+  function handleJoinChange(join: TntJoinSnap) {
+    setNavJoin(join);
+    setNavDirection(suggestTntDirectionFromJoin(trails, join));
+  }
 
   async function saveOffline() {
     if (!isPremium) {
@@ -276,7 +299,13 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
         longitude: pos.coords.longitude,
       };
       setNavUserPos(userPos);
-      setNavDirection(suggestTntDirection(trails, userPos));
+      const join = findTntJoinSnap(trails, userPos);
+      if (!join) {
+        Alert.alert("Route too far", "Move closer to the Trans Northern Trail to join it.");
+        return;
+      }
+      setNavJoin(join);
+      setNavDirection(suggestTntDirectionFromJoin(trails, join));
       setRideLevelId("moderate");
       setRideSheetOpen(true);
     } catch {
@@ -291,7 +320,7 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
       setUpgradeVisible(true);
       return;
     }
-    if (!navUserPos) return;
+    if (!navUserPos || !navJoin) return;
     setNavLoading(true);
     try {
       const level = rideLevelById(rideLevelId);
@@ -300,6 +329,7 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
         userPos: navUserPos,
         direction: navDirection,
         maxGrade: level.maxGrade,
+        joinOverride: navJoin,
       });
       if (!built) {
         Alert.alert(
@@ -371,6 +401,15 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
             <Stat label="Sections" value={String(stats.sections)} />
           </View>
           <Text style={styles.credit}>{difficultyText} · Community mapping</Text>
+          {stats.trailKm > 0 && stats.roadKm === 0 ? (
+            <Text style={styles.roadHint}>
+              Road links between trail sections are missing — re-run the TNT import to show the full route.
+            </Text>
+          ) : (
+            <Text style={styles.mapLegend}>
+              Solid lines = trails · dashed grey = road links
+            </Text>
+          )}
 
           <Text style={styles.sectionLabel}>Route overview</Text>
           <View style={styles.mapBox}>
@@ -390,11 +429,11 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
                     highlightId === id
                       ? AMBER
                       : isRoad
-                        ? "#888888"
+                        ? "#b0b0b0"
                         : difficultyColor(trail.difficulty)
                   }
-                  strokeWidth={highlightId === id ? 6 : isRoad ? 2 : 4}
-                  lineDashPattern={isRoad ? [6, 8] : undefined}
+                  strokeWidth={highlightId === id ? 6 : isRoad ? 3 : 4}
+                  lineDashPattern={isRoad ? [8, 10] : undefined}
                   tappable
                   onPress={() => focusTrail(trail)}
                 />
@@ -500,6 +539,16 @@ export function DiscoveryRouteScreen({ config }: { config: DiscoveryRouteConfig 
           direction={navDirection}
           rideLevelId={rideLevelId}
           preview={ridePreview}
+          joinMap={
+            navUserPos && navJoin
+              ? {
+                  sections: trails,
+                  userGps: navUserPos,
+                  join: navJoin,
+                  onJoinChange: handleJoinChange,
+                }
+              : undefined
+          }
           onClose={() => setRideSheetOpen(false)}
           onSetDirection={setNavDirection}
           onSelectLevel={setRideLevelId}
@@ -559,6 +608,20 @@ const styles = StyleSheet.create({
   statValue: { color: "#fff", fontWeight: "800", fontSize: 15 },
   statLabel: { color: "#78716c", fontSize: 10, marginTop: 2, fontWeight: "700" },
   credit: { textAlign: "center", color: "#78716c", fontSize: 11, marginTop: 8, fontStyle: "italic" },
+  roadHint: {
+    textAlign: "center",
+    color: AMBER,
+    fontSize: 11,
+    marginTop: 8,
+    marginHorizontal: 20,
+    lineHeight: 16,
+  },
+  mapLegend: {
+    textAlign: "center",
+    color: "#78716c",
+    fontSize: 11,
+    marginTop: 8,
+  },
   sectionLabel: {
     color: AMBER,
     fontSize: 12,

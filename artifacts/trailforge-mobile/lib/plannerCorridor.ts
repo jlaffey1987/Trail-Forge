@@ -132,7 +132,172 @@ export function selectTrailsAlongCorridor(
   return picked.map((s) => s.trail);
 }
 
-/** Order trail ids start → end to avoid backtracking along the trip line. */
+function toNavLatLng(p: LocationPoint | NavLatLng): NavLatLng {
+  if ("latitude" in p) return p;
+  return { latitude: p.lat, longitude: p.lon };
+}
+
+export function orientTrailPathToward(
+  path: NavLatLng[],
+  approach: LocationPoint | NavLatLng,
+  toward: LocationPoint | NavLatLng,
+): NavLatLng[] {
+  if (path.length <= 1) return path;
+  const a = toNavLatLng(approach);
+  const t = toNavLatLng(toward);
+
+  const legCost = (pts: NavLatLng[]) => {
+    const entry = pts[0];
+    const exit = pts[pts.length - 1];
+    return (
+      haversineKm(
+        { lat: a.latitude, lon: a.longitude },
+        { lat: entry.latitude, lon: entry.longitude },
+      ) +
+      haversineKm(
+        { lat: exit.latitude, lon: exit.longitude },
+        { lat: t.latitude, lon: t.longitude },
+      )
+    );
+  };
+
+  const forward = path;
+  const reverse = [...path].reverse();
+  return legCost(forward) <= legCost(reverse) ? forward : reverse;
+}
+
+/**
+ * Greedy trail sequence: each step picks the remaining trail that minimizes
+ * approach→entry plus exit→destination (avoids backtracking when trails are added late).
+ */
+export function buildOptimalTrailSequence(
+  start: LocationPoint,
+  end: LocationPoint,
+  trails: MapTrail[],
+): MapTrail[] {
+  if (trails.length <= 1) return trails;
+
+  const remaining = new Set(trails.map((t) => t.id));
+  const byId = new Map(trails.map((t) => [t.id, t]));
+  const ordered: MapTrail[] = [];
+  let current: LocationPoint = start;
+
+  while (remaining.size > 0) {
+    let bestId: string | null = null;
+    let bestCost = Infinity;
+
+    for (const id of remaining) {
+      const trail = byId.get(id)!;
+      const pts = trailMapCoordinates(trail);
+      if (pts.length === 0) {
+        bestId = id;
+        bestCost = 0;
+        continue;
+      }
+      const oriented = orientTrailPathToward(pts, current, end);
+      const entry = oriented[0];
+      const exit = oriented[oriented.length - 1];
+      const cost =
+        haversineKm(
+          { lat: current.lat, lon: current.lon },
+          { lat: entry.latitude, lon: entry.longitude },
+        ) +
+        haversineKm(
+          { lat: exit.latitude, lon: exit.longitude },
+          { lat: end.lat, lon: end.lon },
+        );
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestId = id;
+      }
+    }
+
+    if (!bestId) break;
+    const trail = byId.get(bestId)!;
+    ordered.push(trail);
+    remaining.delete(bestId);
+
+    const pts = trailMapCoordinates(trail);
+    if (pts.length > 0) {
+      const exit = orientTrailPathToward(pts, current, end).at(-1)!;
+      current = { lat: exit.latitude, lon: exit.longitude, address: "" };
+    }
+  }
+
+  return ordered;
+}
+
+/**
+ * Order trails from the rider's current position with no fixed destination —
+ * pure nearest-neighbor on trail entry points.
+ */
+export function buildOptimalTrailSequenceFromHere(
+  start: LocationPoint,
+  trails: MapTrail[],
+): MapTrail[] {
+  if (trails.length <= 1) return trails;
+
+  const remaining = new Set(trails.map((t) => t.id));
+  const byId = new Map(trails.map((t) => [t.id, t]));
+  const ordered: MapTrail[] = [];
+  let current: LocationPoint = start;
+
+  while (remaining.size > 0) {
+    let bestId: string | null = null;
+    let bestEntryKm = Infinity;
+    let bestExit: NavLatLng | null = null;
+
+    for (const id of remaining) {
+      const trail = byId.get(id)!;
+      const pts = trailMapCoordinates(trail);
+      if (pts.length === 0) {
+        bestId = id;
+        bestEntryKm = 0;
+        bestExit = null;
+        continue;
+      }
+      const forward = pts;
+      const reverse = [...pts].reverse();
+      for (const oriented of [forward, reverse]) {
+        const entry = oriented[0];
+        const d = haversineKm(
+          { lat: current.lat, lon: current.lon },
+          { lat: entry.latitude, lon: entry.longitude },
+        );
+        if (d < bestEntryKm) {
+          bestEntryKm = d;
+          bestId = id;
+          bestExit = oriented[oriented.length - 1];
+        }
+      }
+    }
+
+    if (!bestId) break;
+    ordered.push(byId.get(bestId)!);
+    remaining.delete(bestId);
+    if (bestExit) {
+      current = { lat: bestExit.latitude, lon: bestExit.longitude, address: "" };
+    }
+  }
+
+  return ordered;
+}
+
+/** Order trail ids from current position (no destination). */
+export function orderTrailIdsFromLocation(
+  start: LocationPoint,
+  trailIds: string[],
+  details: Map<string, MapTrail>,
+): string[] {
+  if (trailIds.length <= 1) return trailIds;
+  const trails = trailIds
+    .map((id) => details.get(id))
+    .filter(Boolean) as MapTrail[];
+  if (trails.length <= 1) return trailIds;
+  return buildOptimalTrailSequenceFromHere(start, trails).map((t) => t.id);
+}
+
+/** Order trail ids for forward flow toward the destination. */
 export function orderTrailIdsAlongRoute(
   start: LocationPoint,
   end: LocationPoint,
@@ -140,33 +305,27 @@ export function orderTrailIdsAlongRoute(
   details: Map<string, MapTrail>,
 ): string[] {
   if (trailIds.length <= 1) return trailIds;
-
-  const meanLat = ((start.lat + end.lat) / 2) * (Math.PI / 180);
-  const kmPerDegLng = KM_PER_DEG_LAT * Math.cos(meanLat);
-  const bx = (end.lon - start.lon) * kmPerDegLng;
-  const by = (end.lat - start.lat) * KM_PER_DEG_LAT;
-  const totalKm = Math.hypot(bx, by) || 1;
-
-  return [...trailIds].sort((a, b) => {
-    const ma = trailMidpoint(details.get(a) ?? { id: a } as MapTrail);
-    const mb = trailMidpoint(details.get(b) ?? { id: b } as MapTrail);
-    if (!ma || !mb) return 0;
-    const along = (m: { lat: number; lon: number }) => {
-      const px = (m.lon - start.lon) * kmPerDegLng;
-      const py = (m.lat - start.lat) * KM_PER_DEG_LAT;
-      return (px * bx + py * by) / (totalKm * totalKm);
-    };
-    return along(ma) - along(mb);
-  });
+  const trails = trailIds
+    .map((id) => details.get(id))
+    .filter(Boolean) as MapTrail[];
+  if (trails.length <= 1) return trailIds;
+  return buildOptimalTrailSequence(start, end, trails).map((t) => t.id);
 }
 
-/** Best entry point on a trail when approaching from `from`. */
-export function trailEntryPoint(t: MapTrail, from: LocationPoint): NavLatLng {
+/** Best entry point when approaching from `from`, optionally biased toward `toward`. */
+export function trailEntryPoint(
+  t: MapTrail,
+  from: LocationPoint,
+  toward?: LocationPoint,
+): NavLatLng {
   const pts = trailMapCoordinates(t);
   if (pts.length === 0) {
     return { latitude: from.lat, longitude: from.lon };
   }
   if (pts.length === 1) return pts[0];
+  if (toward) {
+    return orientTrailPathToward(pts, from, toward)[0];
+  }
   const first = pts[0];
   const last = pts[pts.length - 1];
   const dFirst = haversineKm(
@@ -178,4 +337,16 @@ export function trailEntryPoint(t: MapTrail, from: LocationPoint): NavLatLng {
     { lat: last.latitude, lon: last.longitude },
   );
   return dFirst <= dLast ? first : last;
+}
+
+/** Exit point after entering `t` from `from` toward `toward`. */
+export function trailExitPoint(
+  t: MapTrail,
+  from: LocationPoint,
+  toward: LocationPoint,
+): NavLatLng {
+  const pts = trailMapCoordinates(t);
+  if (pts.length === 0) return { latitude: from.lat, longitude: from.lon };
+  const oriented = orientTrailPathToward(pts, from, toward);
+  return oriented[oriented.length - 1];
 }

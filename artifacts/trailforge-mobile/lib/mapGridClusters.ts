@@ -24,7 +24,7 @@ export function buildGridClusters(
 ): GridCluster[] {
   if (items.length === 0) return [];
 
-  const cellDeg = Math.max(0.06, latitudeDelta / 10);
+  const cellDeg = Math.max(0.1, latitudeDelta / 6);
   const buckets = new Map<
     string,
     { latSum: number; lonSum: number; count: number; grades: number[] }

@@ -4,4 +4,5 @@ export const EXPERIENCE_KEY = "@trailforge/experience_level";
 export const INTRO_SEEN_KEY = "@trailforge/intro_seen";
 export const MAP_LEGAL_DISCLAIMER_KEY = "@trailforge/map_legal_disclaimer_v1";
 export const MAP_PLANNER_COACH_KEY = "@trailforge/map_planner_coach_v1";
+export const MAP_LOCAL_RIDE_COACH_KEY = "@trailforge/map_local_ride_coach_v1";
 export const LAYER_STORAGE_KEY = "@trailforge/map_layers_v1";

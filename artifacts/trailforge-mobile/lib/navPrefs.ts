@@ -7,6 +7,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const KEY = "@trailforge/nav-prefs-v1";
 
+export type NavMapType = "standard" | "satellite" | "terrain";
+
 export interface NavPrefs {
   /** Position marker style shown on the navigation map */
   markerStyle: "arrow" | "motorcycle";
@@ -18,6 +20,8 @@ export interface NavPrefs {
   autoZoom: boolean;
   /** Night mode setting */
   nightMode: "auto" | "on" | "off";
+  /** Base map style during navigation */
+  mapType: NavMapType;
 }
 
 export const NAV_PREFS_DEFAULT: NavPrefs = {
@@ -26,7 +30,21 @@ export const NAV_PREFS_DEFAULT: NavPrefs = {
   speedUnit: "mph",
   autoZoom: true,
   nightMode: "auto",
+  mapType: "standard",
 };
+
+/** Cycle map layer: standard → satellite → terrain. */
+export function cycleNavMapType(current: NavMapType): NavMapType {
+  if (current === "standard") return "satellite";
+  if (current === "satellite") return "terrain";
+  return "standard";
+}
+
+export function navMapTypeLabel(t: NavMapType): string {
+  if (t === "satellite") return "Satellite";
+  if (t === "terrain") return "Terrain";
+  return "Standard";
+}
 
 export async function loadNavPrefs(): Promise<NavPrefs> {
   try {

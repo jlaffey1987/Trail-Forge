@@ -57,6 +57,12 @@ export interface NavRouteInput {
   trails?: NavTrailInput[];
   /** Preferred: fully ordered legs including TNT road links and bypasses. */
   legs?: NavRouteLeg[];
+  /** Exploratory ride — no fixed destination; ends after last trail. */
+  localRide?: boolean;
+  /** Loop back to start after the last trail (local rides). */
+  localRideLoop?: boolean;
+  /** Key for offline nav route cache (ordered trail ids). */
+  cacheKey?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -518,9 +524,10 @@ export function computeProgress(
   const currentSection = route.sections[currentSectionIdx];
   const isOnTrail = (currentSection?.kind ?? "road") === "trail";
 
-  // Arrived if within 30 m of destination.
+  // Arrived when near destination and most of the route is complete (avoids
+  // false positives for loop rides where start === destination).
   const destDist = haversineM(userPos, route.to);
-  const arrived = destDist < 30;
+  const arrived = destDist < 30 && remaining < 50;
 
   // Advance instruction index: skip instructions that have already fired.
   let nextInstructionIdx = prevProgress?.nextInstructionIdx ?? 0;

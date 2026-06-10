@@ -15,6 +15,7 @@ import { router } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   Keyboard,
   Platform,
@@ -48,6 +49,7 @@ import { PageLoadingCover } from "@/components/PageLoadingCover";
 import { PlannerMapChrome } from "@/components/planner/PlannerMapChrome";
 import { MapLegalDisclaimer } from "@/components/map/MapLegalDisclaimer";
 import { MapPlannerCoachMark } from "@/components/map/MapPlannerCoachMark";
+import { MapLocalRideCoachMark } from "@/components/map/MapLocalRideCoachMark";
 import { UpgradePrompt } from "@/components/UpgradePrompt";
 import { useProfile } from "@/components/ProfileContext";
 import colors from "@/constants/colors";
@@ -74,6 +76,9 @@ import {
 import { cullPolylinesToViewport } from "@/lib/mapPolylineCulling";
 import { publishVisibleTrails } from "@/lib/visibleTrails";
 import { toggleTrailOnRoute } from "@/lib/plannerMapSession";
+import { toggleLocalRideTrail, launchLocalRideOnMap, startSingleTrailNavigation, addLocalRideTrail, removeLocalRideTrail, rebuildLocalRidePreviewRoute } from "@/lib/localTrailRide";
+import { canNavigate } from "@/lib/tierPolicy";
+import { LocalRideChrome } from "@/components/planner/LocalRideChrome";
 import { usePlannerStore } from "@/store/routePlannerStore";
 
 // ---------------------------------------------------------------------------
@@ -573,6 +578,8 @@ const REGION_FETCH_DEBOUNCE_MS = 450;
 
 export default function MapTab() {
   const mapRef = useRef<MapView | null>(null);
+  const localRideTapRef = useRef<{ id: string; t: number } | null>(null);
+  const localRideToggleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [region, setRegion] = useState<Region>(FALLBACK_REGION);
   const [fetchRegion, setFetchRegion] = useState<Region>(FALLBACK_REGION);
   const [permission, setPermission] = useState<
@@ -594,12 +601,43 @@ export default function MapTab() {
 
   // Upgrade prompt
   const [upgradeVisible, setUpgradeVisible] = useState(false);
+  const [navStarting, setNavStarting] = useState(false);
   const [upgradedFeature, setUpgradedFeature] = useState("");
   const { profile } = useProfile();
   const isPremium = profile.isPremium;
   const showDifficultyColors = isPremium;
   const planner = usePlannerStore();
   const isPlanning = planner.mapMode === "planning";
+  const isLocalRide = planner.mapMode === "localRide";
+  const isRideSelect = isPlanning || isLocalRide;
+
+  useEffect(() => {
+    if (!isLocalRide || !userCoords) return;
+    const t = setTimeout(() => {
+      void rebuildLocalRidePreviewRoute({
+        lat: userCoords.lat,
+        lon: userCoords.lon,
+        address: "You",
+      });
+    }, 450);
+    return () => clearTimeout(t);
+  }, [
+    isLocalRide,
+    userCoords?.lat,
+    userCoords?.lon,
+    planner.activeTrailIds,
+    planner.localRideLoop,
+  ]);
+
+  useEffect(() => {
+    if (isLocalRide) return;
+    if (localRideToggleTimerRef.current) {
+      clearTimeout(localRideToggleTimerRef.current);
+      localRideToggleTimerRef.current = null;
+    }
+    localRideTapRef.current = null;
+  }, [isLocalRide]);
+
   const activeTrailSet = useMemo(
     () => new Set(planner.activeTrailIds),
     [planner.activeTrailIds],
@@ -644,6 +682,36 @@ export default function MapTab() {
   function showUpgrade(feature: string) {
     setUpgradedFeature(feature);
     setUpgradeVisible(true);
+  }
+
+  async function navigateSelectedTrail() {
+    if (!selected) return;
+    if (!canNavigate(isPremium)) {
+      showUpgrade("Turn-by-turn navigation");
+      return;
+    }
+    const full = trailsQ.data?.trails?.find((t) => t.id === selected.id);
+    if (!full) {
+      Alert.alert("Trail unavailable", "Could not load trail geometry for navigation.");
+      return;
+    }
+    setNavStarting(true);
+    try {
+      const pos = await getAccuratePosition();
+      await startSingleTrailNavigation(full, {
+        lat: pos.coords.latitude,
+        lon: pos.coords.longitude,
+        address: "You",
+      });
+      setSelected(null);
+    } catch (e) {
+      Alert.alert(
+        "Navigation failed",
+        e instanceof Error ? e.message : "Check location and try again.",
+      );
+    } finally {
+      setNavStarting(false);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -743,7 +811,7 @@ export default function MapTab() {
 
   /** Full path geometry when polylines may render (current or debounced region). */
   const includeTrailGeometry =
-    isPlanning
+    isRideSelect
     || shouldShowTrailPolylines(region.latitudeDelta)
     || shouldShowTrailPolylines(fetchRegion.latitudeDelta);
 
@@ -767,7 +835,7 @@ export default function MapTab() {
   const { trailData, roadData, layeredTrails } = useMemo(() => {
     const byId = new Map<string, ApiTrail>();
     for (const t of trailsQ.data?.trails ?? []) byId.set(t.id, t);
-    for (const t of isPlanning ? planner.trailDetails : []) byId.set(t.id, t);
+    for (const t of isRideSelect ? planner.trailDetails : []) byId.set(t.id, t);
     const all = [...byId.values()];
     const trailData: ApiTrail[] = [];
     const roadData: ApiTrail[] = [];
@@ -809,7 +877,7 @@ export default function MapTab() {
 
   // Flat list of trail sections (for markers, completions lookup, etc.)
   const trails: ApiTrail[] = useMemo(() => layeredTrails.map(l => l.trail), [layeredTrails]);
-  const showPolylines = !isPlanning && shouldShowTrailPolylines(region.latitudeDelta);
+  const showPolylines = !isPlanning && !isLocalRide && shouldShowTrailPolylines(region.latitudeDelta);
   const rawTrailCount = trailsQ.data?.trails?.length ?? 0;
   // Android custom Marker views need one paint cycle with tracksViewChanges enabled.
   const [markerTracksChanges, setMarkerTracksChanges] = useState(Platform.OS === "android");
@@ -901,12 +969,12 @@ export default function MapTab() {
   );
 
   const { visiblePolylines, polylineHiddenCount } = useMemo(() => {
-    if (isPlanning || !showPolylines) {
+    if (isRideSelect || !showPolylines) {
       return { visiblePolylines: trailPolylines, polylineHiddenCount: 0 };
     }
     const { visible, hiddenCount } = cullPolylinesToViewport(trailPolylines, region);
     return { visiblePolylines: visible, polylineHiddenCount: hiddenCount };
-  }, [trailPolylines, region, isPlanning, showPolylines]);
+  }, [trailPolylines, region, isRideSelect, showPolylines]);
 
   const showClusterLegend = useOverviewClusters && trails.length > 0;
 
@@ -1019,7 +1087,7 @@ export default function MapTab() {
             title="Destination"
           />
         ) : null}
-        {planner.roadPolyline && planner.roadPolyline.length >= 2 && isPlanning ? (
+        {planner.roadPolyline && planner.roadPolyline.length >= 2 && (isPlanning || isLocalRide) ? (
           <Polyline
             coordinates={planner.roadPolyline}
             strokeColor="#3b82f6"
@@ -1034,6 +1102,7 @@ export default function MapTab() {
                 geometry={{ coordinates: [cluster.longitude, cluster.latitude] }}
                 properties={{ point_count: cluster.count }}
                 leafGrades={cluster.grades}
+                latitudeDelta={region.latitudeDelta}
                 tracksViewChanges={markerTracksChanges}
                 onPress={() => zoomToCluster(cluster.latitude, cluster.longitude)}
               />
@@ -1052,7 +1121,7 @@ export default function MapTab() {
         ))}
 
         {/* Trail sections — difficulty colour for Premium. */}
-        {(showPolylines || isPlanning) && visiblePolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
+        {(showPolylines || isRideSelect) && visiblePolylines.map(({ id, trail, coords, layerColor, isOsm, isSeasonal }) => {
           const isActive = activeTrailSet.has(id);
           const color = isActive
             ? colors.light.primary
@@ -1073,6 +1142,27 @@ export default function MapTab() {
               onPress={() => {
                 if (isPlanning) {
                   void toggleTrailOnRoute(trail);
+                } else if (isLocalRide) {
+                  const now = Date.now();
+                  const last = localRideTapRef.current;
+                  if (last?.id === id && now - last.t < 400) {
+                    localRideTapRef.current = null;
+                    if (localRideToggleTimerRef.current) {
+                      clearTimeout(localRideToggleTimerRef.current);
+                      localRideToggleTimerRef.current = null;
+                    }
+                    setSelected(trailDetailData(trail));
+                    return;
+                  }
+                  localRideTapRef.current = { id, t: now };
+                  if (localRideToggleTimerRef.current) {
+                    clearTimeout(localRideToggleTimerRef.current);
+                  }
+                  localRideToggleTimerRef.current = setTimeout(() => {
+                    localRideToggleTimerRef.current = null;
+                    localRideTapRef.current = null;
+                    toggleLocalRideTrail(trail);
+                  }, 400);
                 } else {
                   setSelected(trailDetailData(trail));
                 }
@@ -1093,7 +1183,17 @@ export default function MapTab() {
           <Text style={fs.topBtnOutlineTxt}>Filters</Text>
           {hasFiltersActive ? <View style={fs.activeDot} /> : null}
         </TouchableOpacity>
-        {!isPlanning ? (
+        {!isPlanning && !isLocalRide ? (
+          <TouchableOpacity
+            style={fs.topBtnOutline}
+            onPress={() => launchLocalRideOnMap()}
+            activeOpacity={0.85}
+          >
+            <Feather name="navigation" size={14} color={AMBER} />
+            <Text style={fs.topBtnOutlineTxt}>Ride nearby</Text>
+          </TouchableOpacity>
+        ) : null}
+        {!isPlanning && !isLocalRide ? (
           <TouchableOpacity
             style={fs.topBtn}
             onPress={() => router.push("/add-trail")}
@@ -1238,7 +1338,7 @@ export default function MapTab() {
         </View>
       ) : null}
 
-      {!isPlanning && showClusterLegend ? (
+      {!isPlanning && !isLocalRide && showClusterLegend ? (
         <View style={styles.legendCard} pointerEvents="none">
           {([
             { label: "Easy (1–3)", color: gradeClusterColor(2) },
@@ -1255,8 +1355,12 @@ export default function MapTab() {
       ) : null}
 
       <PlannerMapChrome />
+      <LocalRideChrome />
       <MapPlannerCoachMark
         active={isPlanning && planner.activeTrailIds.length === 0 && !planner.pendingRouteActionsOpen}
+      />
+      <MapLocalRideCoachMark
+        active={isLocalRide && planner.activeTrailIds.length === 0}
       />
 
       {/* ── Trail detail sheet ──────────────────────────────────────────── */}
@@ -1266,6 +1370,23 @@ export default function MapTab() {
         ridden={selected ? ridden.has(selected.id) : false}
         onClose={() => setSelected(null)}
         onMarkRiddenChange={() => void completionsQ.refetch()}
+        onNavigateTrail={isLocalRide ? undefined : () => void navigateSelectedTrail()}
+        navigateLoading={navStarting}
+        localRideMode={isLocalRide}
+        isOnRide={selected ? planner.activeTrailIds.includes(selected.id) : false}
+        onToggleRide={
+          isLocalRide && selected
+            ? () => {
+                const full = trailsQ.data?.trails?.find((t) => t.id === selected.id);
+                if (!full) return;
+                if (planner.activeTrailIds.includes(selected.id)) {
+                  removeLocalRideTrail(selected.id);
+                } else {
+                  addLocalRideTrail(full);
+                }
+              }
+            : undefined
+        }
       />
 
 

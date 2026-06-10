@@ -92,7 +92,7 @@ export function findTntJoinSnap(sections: MapTrail[], pos: NavLatLng): TntJoinSn
 }
 
 /** Remaining route length from join in each direction (metres). */
-function remainingDistanceM(
+export function remainingDistanceM(
   sections: MapTrail[],
   join: TntJoinSnap,
   direction: TntDirection,
@@ -115,6 +115,18 @@ function remainingDistanceM(
   return total;
 }
 
+/** Prefer the direction with more riding ahead from an explicit join point. */
+export function suggestTntDirectionFromJoin(
+  sections: MapTrail[],
+  join: TntJoinSnap,
+): TntDirection {
+  if (sections.length < 2) return "forward";
+  const fwd = remainingDistanceM(sections, join, "forward");
+  const rev = remainingDistanceM(sections, join, "reverse");
+  if (Math.abs(fwd - rev) > 3000) return fwd >= rev ? "forward" : "reverse";
+  return fwd >= rev ? "forward" : "reverse";
+}
+
 /** Prefer the direction with more riding ahead; tie-break by nearest route end. */
 export function suggestTntDirection(sections: MapTrail[], pos: NavLatLng): TntDirection {
   const join = findTntJoinSnap(sections, pos);
@@ -122,7 +134,9 @@ export function suggestTntDirection(sections: MapTrail[], pos: NavLatLng): TntDi
 
   const fwd = remainingDistanceM(sections, join, "forward");
   const rev = remainingDistanceM(sections, join, "reverse");
-  if (Math.abs(fwd - rev) > 5000) return fwd >= rev ? "forward" : "reverse";
+  if (Math.abs(fwd - rev) > 5000) {
+    return suggestTntDirectionFromJoin(sections, join);
+  }
 
   const startPts = trailMapCoordinates(sections[0]);
   const endPts = trailMapCoordinates(sections[sections.length - 1]);
@@ -244,11 +258,13 @@ export function buildTntNavPlan(params: {
   userLabel?: string;
   direction: TntDirection;
   maxGrade: number | null;
+  /** When set, join here instead of nearest snap to userPos. */
+  joinOverride?: TntJoinSnap;
 }): TntNavPlanResult | null {
-  const { allTrails, userPos, direction, maxGrade } = params;
+  const { allTrails, userPos, direction, maxGrade, joinOverride } = params;
   if (allTrails.length === 0) return null;
 
-  const join = findTntJoinSnap(allTrails, userPos);
+  const join = joinOverride ?? findTntJoinSnap(allTrails, userPos);
   if (!join) return null;
 
   const { legs, skippedHardSections, bypassRoadKm } = compileTntLegs(

@@ -62,6 +62,19 @@ import {
   type NominatimResult,
 } from "@/lib/nominatim";
 import { setActiveNavRoute } from "@/lib/activeNavRoute";
+import {
+  fetchWizardTrailSuggestions,
+  applyWizardTrailBatch,
+  addTrailToWizardRoute,
+  findTrailNearCoordinate,
+  pickTrailsAlongWizardRoute,
+  prepareTrailsForNavigation,
+  rebuildWizardRoadRoute,
+} from "@/lib/plannerMapSession";
+import { navRouteCacheKey } from "@/lib/offlineNavRoute";
+import { downloadRideOfflinePack } from "@/lib/offlineRidePack";
+import type { NavRouteInput } from "@/lib/navigation";
+import { SuggestTrailsReviewSheet } from "@/components/planner/SuggestTrailsReviewSheet";
 import { useProfile } from "@/components/ProfileContext";
 import { UpgradePrompt } from "@/components/UpgradePrompt";
 import {
@@ -224,23 +237,13 @@ function Step1StyleSelector({ profile }: { profile: ReturnType<typeof useProfile
 
   async function doCalculate(from: typeof state.from, style: RideStyle) {
     if (!from) return;
-    const params = styleToParams(style);
-    const dest = state.to ?? from; // null to = loop back to start
+    const dest = state.to ?? from;
     plannerActions.setCalculating(true);
     plannerActions.setStep(2);
     try {
-      const res = await getPlannerSuggestions({
-        fromLat: from.lat,
-        fromLon: from.lon,
-        toLat:   dest.lat,
-        toLon:   dest.lon,
-        corridorKm: params.corridorKm,
-      });
-      const ids = res.suggestions.map(s => s.trailId).join(",");
-      const details = ids
-        ? await searchTrailsByBbox({ ids, limit: 50 })
-        : { trails: [] };
-      plannerActions.setSuggestions(res.suggestions, details.trails);
+      const { suggestions, trails } = await fetchWizardTrailSuggestions(from, dest, style);
+      plannerActions.setSuggestions(suggestions, trails);
+      await rebuildWizardRoadRoute();
     } catch (e) {
       Alert.alert("Route error", e instanceof Error ? e.message : "Could not find trails");
       plannerActions.setCalculating(false);
@@ -571,7 +574,11 @@ function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: b
   const mapRef = useRef<MapView>(null);
   const sheetAnim = useRef(new Animated.Value(0)).current;
   const [adjusting, setAdjusting] = useState<string | null>(null);
-  const [showQuality, setShowQuality] = useState(false);
+  const [suggestingAlong, setSuggestingAlong] = useState(false);
+  const [reviewTrails, setReviewTrails] = useState<MapTrail[]>([]);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewApplying, setReviewApplying] = useState(false);
+  const [mapTapBusy, setMapTapBusy] = useState(false);
 
   // Visible trails = suggestions minus skipped
   const skippedSet = useMemo(() => new Set(state.skippedIds), [state.skippedIds]);
@@ -620,47 +627,169 @@ function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: b
 
   const estimatedMin = Math.round((totalKm / 20) * 60);
 
-  // Initial map region
   const region = useMemo(() => {
     if (!state.from) return undefined;
+    const lats = [state.from.lat];
+    const lons = [state.from.lon];
+    if (state.to) {
+      lats.push(state.to.lat);
+      lons.push(state.to.lon);
+    }
+    for (const t of visibleTrails) {
+      const pts = polylineFromPath(t.path);
+      for (const p of pts) {
+        lats.push(p.latitude);
+        lons.push(p.longitude);
+      }
+    }
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons);
+    const maxLon = Math.max(...lons);
     return {
-      latitude: state.from.lat,
-      longitude: state.from.lon,
-      latitudeDelta: 0.5,
-      longitudeDelta: 0.5,
+      latitude: (minLat + maxLat) / 2,
+      longitude: (minLon + maxLon) / 2,
+      latitudeDelta: Math.max(0.15, (maxLat - minLat) * 1.4 + 0.08),
+      longitudeDelta: Math.max(0.15, (maxLon - minLon) * 1.4 + 0.08),
     };
-  }, [state.from]);
+  }, [state.from, state.to, visibleTrails]);
+
+  useEffect(() => {
+    if (state.step !== 2 || state.isCalculating) return;
+    void rebuildWizardRoadRoute();
+  }, [
+    state.step,
+    state.isCalculating,
+    visibleTrails.length,
+    state.skippedIds.join(","),
+    state.from?.lat,
+    state.from?.lon,
+    state.to?.lat,
+    state.to?.lon,
+  ]);
 
   async function handleAdjust(mode: "more_trails" | "less_trails" | "harder" | "easier") {
     if (!state.from) return;
     setAdjusting(mode);
     plannerActions.setAdjustmentMode(mode);
 
+    const dest = state.to ?? state.from;
     const base = styleToParams(state.rideStyle ?? "moderate");
-    const corridorKm = mode === "more_trails" ? base.corridorKm * 1.4
-      : mode === "less_trails" ? base.corridorKm * 0.6
-      : base.corridorKm;
 
     try {
+      if (mode === "more_trails") {
+        const picked = await pickTrailsAlongWizardRoute(3);
+        if (picked.length === 0) {
+          Alert.alert(
+            "No more trails",
+            "Nothing suitable along your route right now. Tap the map or widen your ride style.",
+          );
+        } else {
+          setReviewTrails(picked);
+          setReviewOpen(true);
+        }
+        return;
+      }
+
+      if (mode === "less_trails") {
+        const visible = state.trailDetails.filter((t) => !state.skippedIds.includes(t.id));
+        if (visible.length > 0) {
+          plannerActions.skipSection(visible[visible.length - 1].id);
+          await rebuildWizardRoadRoute();
+        }
+        return;
+      }
+
+      const corridorKm = base.corridorKm;
       const res = await getPlannerSuggestions({
-        fromLat: state.from.lat, fromLon: state.from.lon,
-        toLat: state.from.lat,   toLon: state.from.lon,
+        fromLat: state.from.lat,
+        fromLon: state.from.lon,
+        toLat: dest.lat,
+        toLon: dest.lon,
         corridorKm,
       });
-      const filteredSuggestions = res.suggestions.filter(s => {
+      const filteredSuggestions = res.suggestions.filter((s) => {
         const g = parseInt(String(s.difficulty ?? "5"), 10);
-        if (mode === "harder")  return g >= (base.maxGrade - 2);
-        if (mode === "easier")  return g <= (base.maxGrade - 1);
+        if (mode === "harder") return g >= Math.max(5, base.maxGrade - 1);
+        if (mode === "easier") return g <= Math.max(3, base.maxGrade - 2);
         return true;
       });
-      const ids = filteredSuggestions.map(s => s.trailId).join(",");
+      const ids = filteredSuggestions.map((s) => s.trailId).join(",");
       const details = ids ? await searchTrailsByBbox({ ids, limit: 50 }) : { trails: [] };
-      plannerActions.setSuggestions(filteredSuggestions, details.trails);
+      plannerActions.setSuggestions(filteredSuggestions, details.trails ?? []);
+      await rebuildWizardRoadRoute();
     } catch (e) {
       Alert.alert("Adjust failed", e instanceof Error ? e.message : "Try again");
     } finally {
       setAdjusting(null);
       plannerActions.setAdjustmentMode(null);
+    }
+  }
+
+  async function handleAddTrailsAlongRoute() {
+    setSuggestingAlong(true);
+    try {
+      const picked = await pickTrailsAlongWizardRoute(4);
+      if (picked.length === 0) {
+        Alert.alert(
+          "No matches",
+          "No suitable trails along your route. Try More trails, or tap the map near a trail.",
+        );
+        return;
+      }
+      setReviewTrails(picked);
+      setReviewOpen(true);
+    } catch (e) {
+      Alert.alert("Could not suggest trails", e instanceof Error ? e.message : "Try again");
+    } finally {
+      setSuggestingAlong(false);
+    }
+  }
+
+  async function handleMapPress(lat: number, lon: number) {
+    if (state.step !== 2 || mapTapBusy) return;
+    setMapTapBusy(true);
+    try {
+      const trail = await findTrailNearCoordinate(lat, lon, state.rideStyle ?? "moderate");
+      if (!trail) {
+        Alert.alert("No trail here", "Tap closer to a trail line on the map.");
+        return;
+      }
+      const onRoute =
+        visibleTrails.some((t) => t.id === trail.id);
+      const skipped = state.skippedIds.includes(trail.id);
+      if (onRoute) {
+        plannerActions.selectSection(trail.id);
+        plannerActions.setStep(3);
+        return;
+      }
+      if (skipped) {
+        Alert.alert(
+          "Add back?",
+          `Add "${trail.name}" back onto your route?`,
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Add",
+              onPress: () => void addTrailToWizardRoute(trail),
+            },
+          ],
+        );
+        return;
+      }
+      Alert.alert(
+        "Add trail?",
+        `Add "${trail.name}" to your route?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Add",
+            onPress: () => void addTrailToWizardRoute(trail),
+          },
+        ],
+      );
+    } finally {
+      setMapTapBusy(false);
     }
   }
 
@@ -692,7 +821,19 @@ function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: b
         initialRegion={region}
         showsUserLocation
         showsCompass={false}
+        onPress={(e) => {
+          const { latitude, longitude } = e.nativeEvent.coordinate;
+          void handleMapPress(latitude, longitude);
+        }}
       >
+        {state.roadPolyline && state.roadPolyline.length >= 2 ? (
+          <Polyline
+            coordinates={state.roadPolyline}
+            strokeColor="#3b82f6"
+            strokeWidth={5}
+            zIndex={1}
+          />
+        ) : null}
         {/* Visible trail polylines */}
         {visibleTrails.map(t => {
           const pts = polylineFromPath(t.path);
@@ -735,6 +876,9 @@ function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: b
         {state.from && (
           <Marker coordinate={{ latitude: state.from.lat, longitude: state.from.lon }} pinColor={colors.light.success} />
         )}
+        {state.to && (
+          <Marker coordinate={{ latitude: state.to.lat, longitude: state.to.lon }} pinColor={AMBER} />
+        )}
       </MapView>
 
       {/* Section editor sheet */}
@@ -761,8 +905,31 @@ function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: b
             <View style={s2.divider} />
             <SumStat value={`${minGrade}-${maxGrade}`} label="Grades" />
             <View style={s2.divider} />
+            <SumStat
+              value={state.roadDistanceKm != null ? `~${state.roadDistanceKm}km` : "—"}
+              label="Road"
+            />
+            <View style={s2.divider} />
             <SumStat value={avgStars ? `★${avgStars}` : "—"} label="Rating" amber />
           </View>
+
+          <Text style={s2.tapHint}>Tap the map near a trail to add it · blue line = road route</Text>
+
+          {/* Add trails along route */}
+          <TouchableOpacity
+            style={s2.addAlongBtn}
+            onPress={() => void handleAddTrailsAlongRoute()}
+            disabled={suggestingAlong || adjusting !== null}
+          >
+            {suggestingAlong ? (
+              <ActivityIndicator size="small" color={AMBER} />
+            ) : (
+              <>
+                <Feather name="plus-circle" size={16} color={AMBER} />
+                <Text style={s2.addAlongText}>Add trails along route</Text>
+              </>
+            )}
+          </TouchableOpacity>
 
           {/* Adjustment toolbar */}
           <View style={s2.adjRow}>
@@ -793,6 +960,26 @@ function Step2RouteResult({ showSectionEditor = false }: { showSectionEditor?: b
           </View>
         </Animated.View>
       )}
+
+      <SuggestTrailsReviewSheet
+        visible={reviewOpen}
+        trails={reviewTrails}
+        loading={reviewApplying}
+        onCancel={() => {
+          setReviewOpen(false);
+          setReviewTrails([]);
+        }}
+        onConfirm={() => {
+          setReviewApplying(true);
+          void applyWizardTrailBatch(reviewTrails)
+            .then(() => {
+              setReviewOpen(false);
+              setReviewTrails([]);
+            })
+            .catch(() => Alert.alert("Could not add trails", "Try again."))
+            .finally(() => setReviewApplying(false));
+        }}
+      />
     </View>
   );
 }
@@ -840,7 +1027,11 @@ function SectionEditorSheet({
       {isSkipped ? (
         <TouchableOpacity
           style={[s2.sectionBtn, { backgroundColor: colors.light.success }]}
-          onPress={() => { plannerActions.restoreSection(trail.id); onClose(); }}
+          onPress={() => {
+            plannerActions.restoreSection(trail.id);
+            onClose();
+            void rebuildWizardRoadRoute();
+          }}
         >
           <Feather name="plus" size={22} color="#fff" />
           <Text style={s2.sectionBtnText}>ADD BACK TO ROUTE</Text>
@@ -856,7 +1047,11 @@ function SectionEditorSheet({
           </TouchableOpacity>
           <TouchableOpacity
             style={[s2.sectionBtn, { backgroundColor: colors.light.destructive, marginTop: 12 }]}
-            onPress={() => { plannerActions.skipSection(trail.id); onClose(); }}
+            onPress={() => {
+            plannerActions.skipSection(trail.id);
+            onClose();
+            void rebuildWizardRoadRoute();
+          }}
           >
             <Feather name="x" size={22} color="#fff" />
             <Text style={s2.sectionBtnText}>SKIP THIS SECTION</Text>
@@ -909,6 +1104,26 @@ const s2 = StyleSheet.create({
     paddingVertical: 6, marginBottom: 16,
   },
   divider: { width: 1, height: 32, backgroundColor: colors.light.border },
+  tapHint: {
+    color: colors.light.mutedForeground,
+    fontSize: 11,
+    textAlign: "center",
+    marginBottom: 10,
+    lineHeight: 16,
+  },
+  addAlongBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    minHeight: 46,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: AMBER + "66",
+    backgroundColor: AMBER + "14",
+    marginBottom: 12,
+  },
+  addAlongText: { color: AMBER, fontWeight: "800", fontSize: 13 },
   adjRow:  { flexDirection: "row", gap: 8, marginBottom: 14 },
   adjBtn:  {
     flex: 1, alignItems: "center", justifyContent: "center",
@@ -1019,34 +1234,32 @@ function Step4SaveAndGo() {
     }
     if (!state.from) return;
     setDownloading(true);
+    setDownloadProgress(0);
     try {
-      const { cacheTiles } = await import("@/lib/offlineStore");
-      const { apiJson } = await import("@/lib/api");
-      const ids = visibleTrails.map(t => t.id).join(",");
-      if (ids) await apiJson(`/api/trails/search?ids=${ids}&limit=50`);
-      // Download tile cache around route bbox
-      const lats = visibleTrails.flatMap(t => {
-        const r = t as unknown as { bbox_min_lat?: number; bbox_max_lat?: number };
-        return [r.bbox_min_lat ?? state.from!.lat, r.bbox_max_lat ?? state.from!.lat];
-      });
-      const lons = visibleTrails.flatMap(t => {
-        const r = t as unknown as { bbox_min_lng?: number; bbox_max_lng?: number };
-        return [r.bbox_min_lng ?? state.from!.lon, r.bbox_max_lng ?? state.from!.lon];
-      });
-      const bbox = {
-        minLat: Math.min(...lats) - 0.05,
-        maxLat: Math.max(...lats) + 0.05,
-        minLon: Math.min(...lons) - 0.05,
-        maxLon: Math.max(...lons) + 0.05,
+      const dest = state.to ?? state.from;
+      const input: NavRouteInput = {
+        from: {
+          latitude: state.from.lat,
+          longitude: state.from.lon,
+          label: state.from.address,
+        },
+        to: state.to
+          ? { latitude: state.to.lat, longitude: state.to.lon, label: state.to.address }
+          : { latitude: state.from.lat, longitude: state.from.lon, label: state.from.address },
+        trails: prepareTrailsForNavigation(state.from, dest, visibleTrails),
+        cacheKey: navRouteCacheKey(visibleTrails.map((t) => t.id)),
       };
-      await cacheTiles(bbox, p => {
-        const pct = p.total > 0 ? Math.round((p.downloaded / p.total) * 100) : 0;
-        setDownloadProgress(pct);
-      });
-      Alert.alert("Downloaded", "Map tiles cached along your route. Save individual trails from their detail page for full offline trail data.");
+      await downloadRideOfflinePack(input, (p) => setDownloadProgress(p.percent));
+      Alert.alert(
+        "Ready for offline",
+        "Route, trail data, and map tiles are saved for this ride.",
+      );
     } catch (e) {
       Alert.alert("Download failed", e instanceof Error ? e.message : "Unknown error");
-    } finally { setDownloading(false); setDownloadProgress(0); }
+    } finally {
+      setDownloading(false);
+      setDownloadProgress(0);
+    }
   }
 
   function handleGo() {
@@ -1055,14 +1268,10 @@ function Step4SaveAndGo() {
       setUpgradeVisible(true);
       return;
     }
+    const dest = state.to ?? state.from;
     setActiveNavRoute({
-      trails: visibleTrails.map(t => ({
-        id: t.id,
-        name: t.name,
-        difficulty: String(t.difficulty ?? "5"),
-        distance_km: t.distance_km ?? null,
-        path: t.path,
-      })),
+      trails: prepareTrailsForNavigation(state.from, dest, visibleTrails),
+      cacheKey: navRouteCacheKey(visibleTrails.map((t) => t.id)),
       from: { latitude: state.from.lat, longitude: state.from.lon, label: state.from.address },
       to: state.to
         ? { latitude: state.to.lat, longitude: state.to.lon, label: state.to.address }

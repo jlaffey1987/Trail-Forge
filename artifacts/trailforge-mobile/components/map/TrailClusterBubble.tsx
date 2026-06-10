@@ -16,6 +16,8 @@ export interface TrailClusterRenderProps {
   leafGrades?: Array<number | null | undefined>;
   /** Required on Android so count text paints on custom marker views. */
   tracksViewChanges?: boolean;
+  /** Viewport latitudeDelta — larger bubbles when zoomed out. */
+  latitudeDelta?: number;
 }
 
 function TrailClusterBubble({
@@ -24,9 +26,10 @@ function TrailClusterBubble({
   onPress,
   leafGrades = [],
   tracksViewChanges = false,
+  latitudeDelta,
 }: TrailClusterRenderProps) {
   const count = properties.point_count;
-  const { outer, inner, fontSize } = clusterBubbleSize(count);
+  const { outer, inner, fontSize } = clusterBubbleSize(count, latitudeDelta);
   const color = clusterColorFromGrades(leafGrades);
 
   return (

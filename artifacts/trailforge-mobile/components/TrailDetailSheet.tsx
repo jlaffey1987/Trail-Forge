@@ -53,6 +53,13 @@ interface TrailDetailSheetProps {
   ridden: boolean;
   onClose: () => void;
   onMarkRiddenChange?: (next: boolean) => void;
+  /** Navigate this trail from current GPS (local ride). */
+  onNavigateTrail?: () => void;
+  navigateLoading?: boolean;
+  /** Local ride mode — show add/remove from multi-trail ride. */
+  localRideMode?: boolean;
+  isOnRide?: boolean;
+  onToggleRide?: () => void;
 }
 
 export function TrailDetailSheet({
@@ -61,6 +68,11 @@ export function TrailDetailSheet({
   ridden,
   onClose,
   onMarkRiddenChange,
+  onNavigateTrail,
+  navigateLoading = false,
+  localRideMode = false,
+  isOnRide = false,
+  onToggleRide,
 }: TrailDetailSheetProps) {
   const { width } = useWindowDimensions();
   const qc = useQueryClient();
@@ -204,6 +216,51 @@ export function TrailDetailSheet({
             ) : null}
 
             <View style={styles.actions}>
+              {localRideMode && onToggleRide ? (
+                <TouchableOpacity
+                  onPress={onToggleRide}
+                  style={[
+                    styles.actionBtn,
+                    isOnRide ? styles.actionBtnActive : styles.navigateBtn,
+                  ]}
+                >
+                  <Feather
+                    name={isOnRide ? "minus-circle" : "plus-circle"}
+                    size={18}
+                    color={isOnRide ? colors.light.primaryForeground : "#111"}
+                  />
+                  <Text
+                    style={[
+                      styles.actionBtnText,
+                      isOnRide
+                        ? undefined
+                        : { color: "#111", fontWeight: "800" },
+                    ]}
+                  >
+                    {isOnRide ? "Remove from ride" : "Add to ride"}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+
+              {!localRideMode && onNavigateTrail ? (
+                <TouchableOpacity
+                  onPress={onNavigateTrail}
+                  disabled={navigateLoading}
+                  style={[styles.actionBtn, styles.navigateBtn]}
+                >
+                  {navigateLoading ? (
+                    <ActivityIndicator color="#111" />
+                  ) : (
+                    <>
+                      <Feather name="navigation" size={18} color="#111" />
+                      <Text style={[styles.actionBtnText, { color: "#111", fontWeight: "800" }]}>
+                        Navigate trail
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              ) : null}
+
               <TouchableOpacity
                 onPress={() => riddenMut.mutate(!ridden)}
                 disabled={riddenMut.isPending}
@@ -502,6 +559,10 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   actionBtnActive: { backgroundColor: colors.light.primary },
+  navigateBtn: {
+    backgroundColor: colors.light.primary,
+    borderColor: colors.light.primary,
+  },
   actionBtnText: { color: colors.light.primary, fontWeight: "700" },
   secondaryBtn: {
     flexDirection: "row",

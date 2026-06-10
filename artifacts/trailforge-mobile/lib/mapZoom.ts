@@ -25,15 +25,27 @@ export function clusterColorFromGrades(grades: Array<number | null | undefined>)
   return gradeClusterColor(Math.round(avg));
 }
 
-export function clusterBubbleSize(count: number): {
+export function clusterBubbleSize(
+  count: number,
+  latitudeDelta: number = POLYLINE_ZOOM_DELTA,
+): {
   outer: number;
   inner: number;
   fontSize: number;
 } {
-  if (count >= 50) return { outer: 84, inner: 64, fontSize: 20 };
-  if (count >= 25) return { outer: 78, inner: 58, fontSize: 19 };
-  if (count >= 15) return { outer: 72, inner: 54, fontSize: 18 };
-  if (count >= 10) return { outer: 66, inner: 50, fontSize: 17 };
-  if (count >= 6) return { outer: 58, inner: 44, fontSize: 16 };
-  return { outer: 50, inner: 38, fontSize: 15 };
+  let base: { outer: number; inner: number; fontSize: number };
+  if (count >= 50) base = { outer: 84, inner: 64, fontSize: 20 };
+  else if (count >= 25) base = { outer: 78, inner: 58, fontSize: 19 };
+  else if (count >= 15) base = { outer: 72, inner: 54, fontSize: 18 };
+  else if (count >= 10) base = { outer: 66, inner: 50, fontSize: 17 };
+  else if (count >= 6) base = { outer: 58, inner: 44, fontSize: 16 };
+  else base = { outer: 50, inner: 38, fontSize: 15 };
+
+  const zoomOut = Math.max(1, latitudeDelta / POLYLINE_ZOOM_DELTA);
+  const scale = Math.min(2.6, 0.9 + zoomOut * 0.55);
+  return {
+    outer: Math.round(base.outer * scale),
+    inner: Math.round(base.inner * scale),
+    fontSize: Math.min(24, Math.round(base.fontSize * Math.min(1.35, scale))),
+  };
 }

@@ -17,7 +17,7 @@ const STORAGE_KEY = "@trailforge/route-planner-v1";
 export type RideStyle = "easy" | "moderate" | "challenge";
 export type PlannerStep = 1 | 2 | 3 | 4;
 export type AdjustmentMode = "more_trails" | "less_trails" | "harder" | "easier" | null;
-export type PlannerMapMode = "idle" | "planning";
+export type PlannerMapMode = "idle" | "planning" | "localRide";
 export type PlanningSource = "suggest" | "browse";
 
 export interface RoadPoint {
@@ -59,6 +59,8 @@ export interface PlannerState {
   isRebuildingRoute: boolean;
   /** Open the route actions sheet once route geometry is ready (saved draft reload). */
   pendingRouteActionsOpen: boolean;
+  /** Return to start after last trail (local ride mode). */
+  localRideLoop: boolean;
 }
 
 const DEFAULT_STATE: PlannerState = {
@@ -84,6 +86,7 @@ const DEFAULT_STATE: PlannerState = {
   routeReady: false,
   isRebuildingRoute: false,
   pendingRouteActionsOpen: false,
+  localRideLoop: false,
 };
 
 // ── Module-level state + listeners ───────────────────────────────────────────
@@ -189,6 +192,39 @@ export const plannerActions = {
       skippedIds: [],
       suggestions: [],
     });
+  },
+  startLocalRide() {
+    _setState({
+      mapMode: "localRide",
+      planningSource: null,
+      from: null,
+      to: null,
+      activeTrailIds: [],
+      suggestedTrailIds: [],
+      roadPolyline: null,
+      roadDistanceKm: null,
+      routeReady: false,
+      isCalculating: false,
+      localRideLoop: false,
+      difficultyGrades: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    });
+  },
+  endLocalRide() {
+    _setState({
+      mapMode: "idle",
+      activeTrailIds: [],
+      suggestedTrailIds: [],
+      roadPolyline: null,
+      roadDistanceKm: null,
+      routeReady: false,
+      localRideLoop: false,
+    });
+  },
+  setLocalRideLoop(localRideLoop: boolean) {
+    _setState({ localRideLoop });
+  },
+  setLocalRideTrailOrder(activeTrailIds: string[]) {
+    _setState({ activeTrailIds });
   },
   setMapTrails(activeTrailIds: string[], suggestedTrailIds: string[], trailDetails: MapTrail[]) {
     const merged = new Map(_state.trailDetails.map((t) => [t.id, t]));
